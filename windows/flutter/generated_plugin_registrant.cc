@@ -11,6 +11,7 @@
 #include <flutter_localization/flutter_localization_plugin_c_api.h>
 #include <screen_retriever_windows/screen_retriever_windows_plugin_c_api.h>
 #include <window_manager/window_manager_plugin.h>
+#include <window_manager_plus/window_manager_plus_plugin.h>
 
 void RegisterPlugins(flutter::PluginRegistry* registry) {
   DesktopMultiWindowPluginRegisterWithRegistrar(
@@ -23,4 +24,6 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("ScreenRetrieverWindowsPluginCApi"));
   WindowManagerPluginRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("WindowManagerPlugin"));
+  WindowManagerPlusPluginRegisterWithRegistrar(
+      registry->GetRegistrarForPlugin("WindowManagerPlusPlugin"));
 }

@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../../constants/colors.dart';
-import 'package:http/http.dart' as http;
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'dart:convert';
 import '../../constants/export.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
@@ -27,7 +27,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
   final _scanRateHrController = TextEditingController(text: '0');
   final _scanRateMinController = TextEditingController(text: '0');
   final _scanRateSecController = TextEditingController(text: '1');
-  final _testDurationDayController = TextEditingController(text: '0'); // Added day controller
+  final _testDurationDayController = TextEditingController(text: '0');
   final _testDurationHrController = TextEditingController(text: '0');
   final _testDurationMinController = TextEditingController(text: '0');
   final _testDurationSecController = TextEditingController(text: '0');
@@ -53,6 +53,10 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
   bool showDataPoints = false;
   double zoomLevel = 1.0;
   bool showPeak = false;
+  late Database _database;
+  bool _isDatabaseInitialized = false;
+  bool _isLoading = false;
+  String? _fetchError;
 
   @override
   void initState() {
@@ -68,13 +72,124 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     Global.scanningRateHH.addListener(_onGlobalChanged);
     Global.scanningRateMM.addListener(_onGlobalChanged);
     Global.scanningRateSS.addListener(_onGlobalChanged);
-    Global.testDurationDD?.addListener(_onGlobalChanged); // Added for day
+    Global.testDurationDD?.addListener(_onGlobalChanged);
     Global.testDurationHH.addListener(_onGlobalChanged);
     Global.testDurationMM.addListener(_onGlobalChanged);
     Global.testDurationSS.addListener(_onGlobalChanged);
 
-    fetchData(showFull: true);
+    // Initialize database and fetch data sequentially
+    _initializeAndFetchData();
+
     print('[INIT_STATE] Initialized OpenFilePage with fileName: ${widget.fileName}');
+  }
+
+  Future<void> _initializeAndFetchData() async {
+    setState(() {
+      _isLoading = true;
+    });
+    await _initializeDatabase();
+    setState(() {
+      _isDatabaseInitialized = true;
+      _isLoading = false;
+    });
+    fetchData(showFull: true);
+  }
+
+  Future<void> _initializeDatabase() async {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+    final databasesPath = await getDatabasesPath();
+    final path = '$databasesPath/Countronics.db';
+    _database = await openDatabase(path);
+    print('[INITIALIZE_DATABASE] Database initialized at path: $path');
+  }
+
+  Future<void> fetchData({bool showFull = false}) async {
+    if (!_isDatabaseInitialized || Global.selectedRecNo?.value == null) {
+      print('[FETCH_DATA] Skipping fetch: database not initialized or RecNo is null');
+      return;
+    }
+    setState(() {
+      _isLoading = true;
+      _fetchError = null;
+    });
+    try {
+      print('[FETCH_DATA] Fetching data for RecNo: ${Global.selectedRecNo!.value}');
+
+      // Query Test1 table
+      final test1Data = await _database.query(
+        'Test1',
+        where: 'RecNo = ?',
+        whereArgs: [Global.selectedRecNo!.value],
+      );
+      print('[FETCH_DATA] Test1 data retrieved: ${test1Data.length} rows');
+
+      // Query Test2 table
+      final test2Data = await _database.query(
+        'Test2',
+        where: 'RecNo = ?',
+        whereArgs: [Global.selectedRecNo!.value],
+      );
+      print('[FETCH_DATA] Test2 data retrieved: ${test2Data.length} rows');
+
+      setState(() {
+        // Process Test1 data
+        tableData = test1Data.map((row) {
+          final newRow = Map<String, dynamic>.from(row);
+          for (int i = 1; i <= 50; i++) {
+            if (newRow.containsKey('AbsPer$i')) {
+              newRow['AbsPer$i'] = (newRow['AbsPer$i'] as num?)?.toDouble();
+            }
+          }
+          return newRow;
+        }).toList();
+
+        // Process Test2 data
+        final test2Row = test2Data.isNotEmpty ? test2Data[0] : {};
+
+        channelNames.clear();
+        channelColors.clear();
+        maxLoadValues.clear();
+        List<int> channelIndices = [];
+        for (int i = 1; i <= 50; i++) {
+          String? name = test2Row['ChannelName$i']?.toString().trim();
+          if (name != null && name.isNotEmpty && name != 'null') {
+            channelIndices.add(i);
+            channelNames[i] = name;
+            channelColors[i] = _getDefaultColor(i);
+            print('[FETCH_DATA] Loaded channel $i: $name');
+            if (tableData.isNotEmpty) {
+              var values = tableData
+                  .map((row) => (row['AbsPer$i'] as num?)?.toDouble())
+                  .where((value) => value != null)
+                  .cast<double>()
+                  .toList();
+              if (values.isNotEmpty) {
+                maxLoadValues[i] = values.reduce((a, b) => a > b ? a : b);
+              }
+            }
+          } else {
+            print('[FETCH_DATA] Channel $i is null or empty');
+            break;
+          }
+        }
+
+        selectedChannel = channelNames.isNotEmpty ? 'All' : null;
+        _calculateGraphSegments();
+        _calculateYRange();
+        _initializeControllers();
+      });
+      print('[FETCH_DATA] Data fetched successfully, tableData length: ${tableData.length}, channels: ${channelNames.length}');
+    } catch (e) {
+      print('[FETCH_DATA] Error fetching data: $e');
+      setState(() {
+        _fetchError = 'Error fetching data: $e';
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
   }
 
   void _initializeControllers() {
@@ -105,73 +220,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       _initializeControllers();
     });
     print('[ON_GLOBAL_CHANGED] Global values changed, reinitializing controllers');
-  }
-
-  Future<void> fetchData({bool showFull = false}) async {
-    if (Global.selectedRecNo?.value == null) return;
-    try {
-      final test1Response = await http.get(
-        Uri.parse('http://localhost/Table/getData.php?type=Test1&RecNo=${Global.selectedRecNo!.value}'),
-      );
-      print('[FETCH_DATA] Test1 response: ${test1Response.body}');
-      final test2Response = await http.get(
-        Uri.parse('http://localhost/Table/getData.php?type=Test2&RecNo=${Global.selectedRecNo!.value}'),
-      );
-      print('[FETCH_DATA] Test2 response: ${test2Response.body}');
-
-      if (test1Response.statusCode == 200 && test2Response.statusCode == 200) {
-        setState(() {
-          var jsonData = json.decode(test1Response.body);
-          if (jsonData['data'] is List) {
-            tableData = (jsonData['data'] as List<dynamic>).map((item) => item as Map<String, dynamic>).toList();
-          } else {
-            tableData = [];
-          }
-
-          var test2Data = json.decode(test2Response.body)['data'];
-          if (test2Data is List && test2Data.isNotEmpty) {
-            test2Data = test2Data[0];
-          } else {
-            test2Data = {};
-          }
-
-          channelNames.clear();
-          channelColors.clear();
-          maxLoadValues.clear();
-          List<int> channelIndices = [];
-          for (int i = 1; i <= 50; i++) {
-            String? name = test2Data['ChannelName$i']?.toString().trim();
-            if (name != null && name.isNotEmpty && name != 'null') {
-              channelIndices.add(i);
-              channelNames[i] = name;
-              channelColors[i] = _getDefaultColor(i);
-              print('[FETCH_DATA] Loaded channel $i: $name');
-              if (tableData.isNotEmpty) {
-                var values = tableData
-                    .map((row) => (row['AbsPer$i'] as num?)?.toDouble())
-                    .where((value) => value != null)
-                    .cast<double>()
-                    .toList();
-                if (values.isNotEmpty) {
-                  maxLoadValues[i] = values.reduce((a, b) => a > b ? a : b);
-                }
-              }
-            } else {
-              print('[FETCH_DATA] Channel $i is null or empty');
-              break;
-            }
-          }
-
-          selectedChannel = channelNames.isNotEmpty ? 'All' : null;
-          _calculateGraphSegments();
-          _calculateYRange();
-          _initializeControllers();
-        });
-        print('[FETCH_DATA] Data fetched successfully, tableData length: ${tableData.length}, channels: ${channelNames.length}');
-      }
-    } catch (e) {
-      print('[FETCH_DATA] Error fetching data: $e');
-    }
   }
 
   Color _getDefaultColor(int index) {
@@ -323,26 +371,22 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
   Future<Uint8List?> _captureGraph({List<Map<String, dynamic>>? filteredData}) async {
     try {
       if (filteredData != null && filteredData.isNotEmpty) {
-        // Store original state
         final originalTableData = List<Map<String, dynamic>>.from(tableData);
         final originalSegment = currentSegment;
         final originalMinY = minYValue;
         final originalMaxY = maxYValue;
 
-        // Update state for capture
         setState(() {
           tableData = filteredData;
-          currentSegment = 0; // Show full range
+          currentSegment = 0;
           _calculateYRange(data: filteredData);
         });
 
-        // Wait for the UI to render the updated graph
         await Future.delayed(Duration(milliseconds: 200));
 
         RenderRepaintBoundary? boundary = _graphKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
         if (boundary == null) {
           print('[CAPTURE_GRAPH] Error: RenderRepaintBoundary not found');
-          // Restore original state
           setState(() {
             tableData = originalTableData;
             currentSegment = originalSegment;
@@ -355,7 +399,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         ui.Image image = await boundary.toImage(pixelRatio: 3.0);
         ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
 
-        // Restore original state
         setState(() {
           tableData = originalTableData;
           currentSegment = originalSegment;
@@ -552,20 +595,30 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
 
   Widget _buildGraph({List<Map<String, dynamic>>? filteredData}) {
     final dataToUse = filteredData ?? tableData;
+    if (_isLoading) {
+      return Center(child: CircularProgressIndicator());
+    }
+    if (_fetchError != null) {
+      return Center(
+        child: Text(
+          _fetchError!,
+          style: GoogleFonts.roboto(fontSize: 16, color: Colors.red),
+        ),
+      );
+    }
     if (dataToUse.isEmpty) {
       return Center(
         child: Text(
           'No data available',
-          style: TextStyle(fontSize: 16, color: Colors.black54),
+          style: GoogleFonts.roboto(fontSize: 16, color: Colors.black54),
         ),
       );
     }
-
     if (channelNames.isEmpty || selectedChannel == null) {
       return Center(
         child: Text(
           'No channel data available',
-          style: TextStyle(fontSize: 16, color: Colors.black54),
+          style: GoogleFonts.roboto(fontSize: 16, color: Colors.black54),
         ),
       );
     }
@@ -661,7 +714,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       return Center(
         child: Text(
           'No data in current segment',
-          style: TextStyle(fontSize: 16, color: Colors.black54),
+          style: GoogleFonts.roboto(fontSize: 16, color: Colors.black54),
         ),
       );
     }
@@ -827,6 +880,17 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
   }
 
   Widget _buildDataTable() {
+    if (_isLoading) {
+      return Center(child: CircularProgressIndicator());
+    }
+    if (_fetchError != null) {
+      return Center(
+        child: Text(
+          _fetchError!,
+          style: GoogleFonts.roboto(fontSize: 16, color: Colors.red),
+        ),
+      );
+    }
     return Container(
       height: 400,
       decoration: BoxDecoration(
@@ -1381,63 +1445,63 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         ],
       ),
       child: DropdownButton<String>(
-          value: selectedChannel,
-          onChanged: (String? newValue) async {
-            if (newValue != null) {
-              setState(() {
-                selectedChannel = newValue;
-                _calculateYRange();
-              });
-              try {
-                final channelData = _prepareChannelData(newValue);
-                final window = await DesktopMultiWindow.createWindow(jsonEncode({
-                  'channel': newValue,
-                  'channelData': channelData,
-                }));
-                window.setFrame(const Offset(0, 0) & const Size(800, 600));
-                window.center();
-                final channelTitle = newValue == 'All' ? 'All Channels' : channelNames[int.parse(newValue)];
-                window.setTitle('Graph for $channelTitle');
-                window.show();
-                print('[CHANNEL_SELECTOR] Opened new window for channel: $newValue');
-              } catch (e) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Failed to open new window: $e')),
-                );
-                print('[CHANNEL_SELECTOR] Error opening new window: $e');
-              }
+        value: selectedChannel,
+        onChanged: (String? newValue) async {
+          if (newValue != null) {
+            setState(() {
+              selectedChannel = newValue;
+              _calculateYRange();
+            });
+            try {
+              final channelData = _prepareChannelData(newValue);
+              final window = await DesktopMultiWindow.createWindow(jsonEncode({
+                'channel': newValue,
+                'channelData': channelData,
+              }));
+              window.setFrame(const Offset(0, 0) & const Size(800, 600));
+              window.center();
+              final channelTitle = newValue == 'All' ? 'All Channels' : channelNames[int.parse(newValue)];
+              window.setTitle('Graph for $channelTitle');
+              window.show();
+              print('[CHANNEL_SELECTOR] Opened new window for channel: $newValue');
+            } catch (e) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Failed to open new window: $e')),
+              );
+              print('[CHANNEL_SELECTOR] Error opening new window: $e');
             }
-          },
-          items: [
+          }
+        },
+        items: [
           if (channelNames.isNotEmpty)
-      DropdownMenuItem<String>(
-      value: 'All',
-      child: Text(
-        'All',
-        style: GoogleFonts.roboto(
-          color: AppColors.textPrimary,
-          fontSize: 14,
-          fontWeight: FontWeight.w500,
-        ),
+            DropdownMenuItem<String>(
+              value: 'All',
+              child: Text(
+                'All',
+                style: GoogleFonts.roboto(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ...channelNames.entries.map<DropdownMenuItem<String>>(
+                (entry) => DropdownMenuItem<String>(
+              value: entry.key.toString(),
+              child: Text(
+                entry.value,
+                style: GoogleFonts.roboto(
+                  color: AppColors.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+        ],
+        underline: Container(),
+        icon: Icon(Icons.arrow_drop_down, color: AppColors.textPrimary),
       ),
-    ),
-    ...channelNames.entries.map<DropdownMenuItem<String>>(
-    (entry) => DropdownMenuItem<String>(
-    value: entry.key.toString(),
-    child: Text(
-    entry.value,
-    style: GoogleFonts.roboto(
-    color: AppColors.textPrimary,
-    fontSize: 14,
-    fontWeight: FontWeight.w500,
-    ),
-    ),
-    ),
-    ),
-    ],
-    underline: Container(),
-    icon: Icon(Icons.arrow_drop_down, color: AppColors.textPrimary),
-    ),
     );
   }
 
@@ -1816,6 +1880,27 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return Scaffold(
+        backgroundColor: AppColors.background,
+        body: SafeArea(
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+    if (_fetchError != null) {
+      return Scaffold(
+        backgroundColor: AppColors.background,
+        body: SafeArea(
+          child: Center(
+            child: Text(
+              _fetchError!,
+              style: GoogleFonts.roboto(fontSize: 16, color: Colors.red),
+            ),
+          ),
+        ),
+      );
+    }
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
@@ -1841,17 +1926,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
 
   @override
   void dispose() {
-    Global.selectedRecNo?.removeListener(_onRecNoChanged);
-    Global.selectedFileName.removeListener(_onGlobalChanged);
-    Global.operatorName.removeListener(_onGlobalChanged);
-    Global.scanningRateHH.removeListener(_onGlobalChanged);
-    Global.scanningRateMM.removeListener(_onGlobalChanged);
-    Global.scanningRateSS.removeListener(_onGlobalChanged);
-    Global.testDurationDD?.removeListener(_onGlobalChanged);
-    Global.testDurationHH.removeListener(_onGlobalChanged);
-    Global.testDurationMM.removeListener(_onGlobalChanged);
-    Global.testDurationSS.removeListener(_onGlobalChanged);
-
     _fileNameController.dispose();
     _operatorController.dispose();
     _scanRateHrController.dispose();
@@ -1862,12 +1936,21 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     _testDurationMinController.dispose();
     _testDurationSecController.dispose();
     _graphVisibleHrController.dispose();
-    _graphVisibleMinController.removeListener(_updateGraphSegments);
     _graphVisibleMinController.dispose();
     _tableHorizontalScrollController.dispose();
     _tableVerticalScrollController.dispose();
     _animationController.dispose();
-    print('[DISPOSE] Disposed all controllers and listeners');
+    Global.selectedRecNo?.removeListener(_onRecNoChanged);
+    Global.selectedFileName.removeListener(_onGlobalChanged);
+    Global.operatorName.removeListener(_onGlobalChanged);
+    Global.scanningRateHH.removeListener(_onGlobalChanged);
+    Global.scanningRateMM.removeListener(_onGlobalChanged);
+    Global.scanningRateSS.removeListener(_onGlobalChanged);
+    Global.testDurationDD?.removeListener(_onGlobalChanged);
+    Global.testDurationHH.removeListener(_onGlobalChanged);
+    Global.testDurationMM.removeListener(_onGlobalChanged);
+    Global.testDurationSS.removeListener(_onGlobalChanged);
+    print('[DISPOSE] OpenFilePage disposed, database closed');
     super.dispose();
   }
 }

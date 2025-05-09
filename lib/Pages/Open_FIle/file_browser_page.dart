@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:http/http.dart' as http;
 import 'package:peakloadindicator/constants/loader_widget.dart';
-import 'dart:convert';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../../constants/global.dart';
 import 'open_file.dart';
 
@@ -21,17 +20,36 @@ class FileSelectionDialog extends StatefulWidget {
 }
 
 class _FileSelectionDialogState extends State<FileSelectionDialog> {
-  Future<List<Map<String, dynamic>>> _fetchFilesFromApi() async {
-    print('FileSelectionDialog _fetchFilesFromApi: Fetching file list');
-    final url = Uri.parse('http://localhost/Table/getData.php?type=Test');
-    final response = await http.get(url);
-    print('FileSelectionDialog _fetchFilesFromApi: Response status = ${response.statusCode}');
-    if (response.statusCode == 200) {
-      final jsonData = jsonDecode(response.body);
-      print('FileSelectionDialog _fetchFilesFromApi: Data fetched, length = ${jsonData['data'].length}');
-      return List<Map<String, dynamic>>.from(jsonData['data']);
-    } else {
-      throw Exception('Failed to load data from API');
+  late Database _database;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeDatabase();
+  }
+
+  Future<void> _initializeDatabase() async {
+    final databasesPath = await getDatabasesPath();
+    final path = '$databasesPath/Countronics.db'; // Use string concatenation
+    _database = await openDatabase(path);
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchFilesFromDatabase() async {
+    try {
+      print('Fetching files from database');
+      final files = await _database.query(
+        'Test',
+        columns: ['RecNo', 'FName', 'OperatorName', 'ScanningRate',
+          'ScanningRateHH', 'ScanningRateMM', 'ScanningRateSS',
+          'TestDurationDD', 'TestDurationHH', 'TestDurationMM',
+          'GraphVisibleArea'],
+        orderBy: 'RecNo DESC',
+      );
+      print('Found ${files.length} files in database');
+      return files;
+    } catch (e) {
+      print('Error fetching files from database: $e');
+      throw Exception('Failed to load data from database');
     }
   }
 
@@ -55,7 +73,7 @@ class _FileSelectionDialogState extends State<FileSelectionDialog> {
                 ),
                 const SizedBox(height: 12),
                 FutureBuilder<List<Map<String, dynamic>>>(
-                  future: _fetchFilesFromApi(),
+                  future: _fetchFilesFromDatabase(),
                   builder: (context, snapshot) {
                     if (snapshot.connectionState == ConnectionState.waiting) {
                       return const Padding(
@@ -81,37 +99,36 @@ class _FileSelectionDialogState extends State<FileSelectionDialog> {
                               return DataRow(
                                 cells: [
                                   DataCell(Text(file['RecNo'].toString(), style: GoogleFonts.poppins())),
-                                  DataCell(Text(file['FName'], style: GoogleFonts.poppins())),
-                                  DataCell(Text(file['OperatorName'], style: GoogleFonts.poppins())),
+                                  DataCell(Text(file['FName'].toString(), style: GoogleFonts.poppins())),
+                                  DataCell(Text(file['OperatorName'].toString(), style: GoogleFonts.poppins())),
                                 ],
                                 onSelectChanged: (selected) async {
                                   if (selected ?? false) {
                                     print('FileSelectionDialog DataRow: Selected file = ${file['FName']}, RecNo = ${file['RecNo']}');
                                     try {
                                       setState(() {
-                                        widget.controller.text = file['FName'];
-                                        // Ensure Global.selectedRecNo is initialized as ValueNotifier<int?>
+                                        widget.controller.text = file['FName'].toString();
                                         if (Global.selectedRecNo == null) {
                                           print('FileSelectionDialog DataRow: Initializing Global.selectedRecNo');
                                           Global.selectedRecNo = ValueNotifier<int?>(null);
                                         }
-                                        // Update the value, ensuring type safety
-                                        Global.selectedRecNo!.value = file['RecNo'] as int?;
+                                        // Convert RecNo (double) to int
+                                        Global.selectedRecNo!.value = (file['RecNo'] as double).toInt();
                                         print('FileSelectionDialog DataRow: Set Global.selectedRecNo.value = ${Global.selectedRecNo!.value}');
-                                        Global.selectedFileName.value = file['FName'];
-                                        Global.operatorName.value = file['OperatorName'];
+                                        Global.selectedFileName.value = file['FName'].toString();
+                                        Global.operatorName.value = file['OperatorName'].toString();
 
-                                        // Update scanning rate fields
-                                        Global.scanningRate.value = file['ScanningRate'] as int?;
-                                        Global.scanningRateHH.value = file['ScanningRateHH'] as int?;
-                                        Global.scanningRateMM.value = file['ScanningRateMM'] as int?;
-                                        Global.scanningRateSS.value = file['ScanningRateSS'] as int?;
+                                        // Update scanning rate fields (handle double to int conversion)
+                                        Global.scanningRate.value = (file['ScanningRate'] as double?)?.toInt();
+                                        Global.scanningRateHH.value = (file['ScanningRateHH'] as double?)?.toInt();
+                                        Global.scanningRateMM.value = (file['ScanningRateMM'] as double?)?.toInt();
+                                        Global.scanningRateSS.value = (file['ScanningRateSS'] as double?)?.toInt();
 
-                                        // Update test duration fields
-                                        Global.testDurationDD.value = file['TestDurationDD'] as int?;
-                                        Global.testDurationHH.value = file['TestDurationHH'] as int?;
-                                        Global.testDurationMM.value = file['TestDurationMM'] as int?;
-                                        Global.testDurationSS.value = file['TestDurationSS'] as int?;
+                                        // Update test duration fields (handle double to int conversion)
+                                        Global.testDurationDD.value = (file['TestDurationDD'] as double?)?.toInt();
+                                        Global.testDurationHH.value = (file['TestDurationHH'] as double?)?.toInt();
+                                        Global.testDurationMM.value = (file['TestDurationMM'] as double?)?.toInt();
+                                        Global.testDurationSS.value = (file['TestDurationSS'] as double?)?.toInt();
 
                                         // Update graph visible area
                                         print('FileSelectionDialog DataRow: testduration = ${Global.testDurationSS.value}');
@@ -239,7 +256,6 @@ class _FileSelectionDialogState extends State<FileSelectionDialog> {
                           () {
                         print('FileSelectionDialog Open button: File name = ${widget.controller.text}, RecNo = ${Global.selectedRecNo?.value}');
                         if (widget.controller.text.isNotEmpty) {
-                          // Ensure selectedRecNo is initialized if null
                           if (Global.selectedRecNo == null) {
                             print('FileSelectionDialog Open button: Initializing Global.selectedRecNo');
                             Global.selectedRecNo = ValueNotifier<int?>(null);
@@ -266,5 +282,10 @@ class _FileSelectionDialogState extends State<FileSelectionDialog> {
         ),
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
   }
 }

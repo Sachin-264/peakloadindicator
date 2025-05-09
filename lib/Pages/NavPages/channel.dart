@@ -1,14 +1,14 @@
 class Channel {
-  final int recNo;
+  final double recNo; // Changed to double to handle REAL
   final String channelName;
   final String startingCharacter;
   final int dataLength;
   final int decimalPlaces;
   final String unit;
-  final int chartMaximumValue;
-  final int chartMinimumValue;
-  final int targetAlarmMax;
-  final int targetAlarmMin;
+  final double chartMaximumValue; // Changed to double to handle REAL
+  final double chartMinimumValue; // Changed to double to handle REAL
+  final double targetAlarmMax; // Changed to double to handle REAL
+  final double targetAlarmMin; // Changed to double to handle REAL
   final int graphLineColour;
   final int targetAlarmColour;
 
@@ -29,18 +29,18 @@ class Channel {
 
   factory Channel.fromJson(Map<String, dynamic> json) {
     return Channel(
-      recNo: json['RecNo'] as int,
-      channelName: json['ChannelName'] as String,
-      startingCharacter: json['StartingCharacter'] as String,
-      dataLength: json['DataLength'] as int,
-      decimalPlaces: json['DecimalPlaces'] as int,
-      unit: json['Unit'] as String,
-      chartMaximumValue: json['ChartMaximumValue'] as int,
-      chartMinimumValue: json['ChartMinimumValue'] as int,
-      targetAlarmMax: json['TargetAlarmMax'] as int,
-      targetAlarmMin: json['TargetAlarmMin'] as int,
-      graphLineColour: json['GraphLineColour'] as int,
-      targetAlarmColour: json['TargetAlarmColour'] as int,
+      recNo: (json['RecNo'] is int ? json['RecNo'].toDouble() : json['RecNo']) as double,
+      channelName: json['ChannelName'] as String? ?? '',
+      startingCharacter: json['StartingCharacter'] as String? ?? '',
+      dataLength: json['DataLength'] as int? ?? 0,
+      decimalPlaces: json['DecimalPlaces'] as int? ?? 0,
+      unit: json['Unit'] as String? ?? '',
+      chartMaximumValue: (json['ChartMaximumValue'] is int ? json['ChartMaximumValue'].toDouble() : json['ChartMaximumValue']) as double? ?? 0.0,
+      chartMinimumValue: (json['ChartMinimumValue'] is int ? json['ChartMinimumValue'].toDouble() : json['ChartMinimumValue']) as double? ?? 0.0,
+      targetAlarmMax: (json['TargetAlarmMax'] is int ? json['TargetAlarmMax'].toDouble() : json['TargetAlarmMax']) as double? ?? 0.0,
+      targetAlarmMin: (json['TargetAlarmMin'] is int ? json['TargetAlarmMin'].toDouble() : json['TargetAlarmMin']) as double? ?? 0.0,
+      graphLineColour: json['GraphLineColour'] as int? ?? 0,
+      targetAlarmColour: json['TargetAlarmColour'] as int? ?? 0,
     );
   }
 

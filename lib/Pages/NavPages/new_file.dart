@@ -1,7 +1,8 @@
-import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:peakloadindicator/Pages/setup/setup_api.dart'; // Import ApiService
+import 'package:path/path.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:peakloadindicator/constants/message_utils.dart';
 import '../../constants/colors.dart';
 import '../../constants/loader_widget.dart';
@@ -35,16 +36,31 @@ class _NewTestPageState extends State<NewTestPage> {
     });
 
     try {
-      final data = await ApiService.fetchChannels();
-      print('Fetched channels: $data');
+      // Initialize sqflite_common_ffi (needed for desktop)
+      sqfliteFfiInit();
+      databaseFactory = databaseFactoryFfi;
+
+      // Open the database
+      final databasesPath = await getDatabasesPath();
+      final path = join(databasesPath, 'Countronics.db');
+      final database = await openDatabase(path);
+
+      // Query the ChannelSetup table
+      final List<Map<String, dynamic>> data = await database.query('ChannelSetup');
+      print('Fetched channels from ChannelSetup: $data');
+
+      // Convert to Channel objects
       setState(() {
         _channels = data.map((item) => Channel.fromJson(item)).toList();
         _isLoading = false;
       });
+
+      // Close the database
+      await database.close();
     } catch (e) {
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Error: $e';
+        _errorMessage = 'Error fetching channels: $e';
       });
       print('Error fetching channels: $e');
     }
@@ -168,7 +184,7 @@ class _NewTestPageState extends State<NewTestPage> {
                               },
                             ),
                             cells: [
-                              DataCell(Text('${_channels[index].recNo}')),
+                              DataCell(Text('${_channels[index].recNo.toInt()}')), // Convert recNo to int to avoid decimal
                               DataCell(Text(_channels[index].channelName)),
                               DataCell(Text(_channels[index].unit)),
                             ],
