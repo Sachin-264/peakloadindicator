@@ -5,6 +5,7 @@
 import FlutterMacOS
 import Foundation
 
+import bitsdojo_window_macos
 import desktop_multi_window
 import file_picker
 import flutter_libserialport
@@ -18,6 +19,7 @@ import window_manager
 import window_manager_plus
 
 func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
+  BitsdojoWindowPlugin.register(with: registry.registrar(forPlugin: "BitsdojoWindowPlugin"))
   FlutterMultiWindowPlugin.register(with: registry.registrar(forPlugin: "FlutterMultiWindowPlugin"))
   FilePickerPlugin.register(with: registry.registrar(forPlugin: "FilePickerPlugin"))
   FlutterLibserialportPlugin.register(with: registry.registrar(forPlugin: "FlutterLibserialportPlugin"))

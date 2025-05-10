@@ -1,18 +1,16 @@
-import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'package:window_manager_plus/window_manager_plus.dart';
-import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:synchronized/synchronized.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
-import 'Pages/Secondary_window/Secondary_Bloc.dart';
 import 'Pages/homepage.dart';
-import 'Pages/NavPages/serialportscreen.dart';
-import 'Pages/Secondary_window/secondary_window.dart';
+import 'constants/colors.dart'; // Assuming AppColors is defined here
 
-// Singleton for database management
+// Global notifier for isScanning
+ValueNotifier<bool> isScanningNotifier = ValueNotifier<bool>(false);
+
+// Database manager for persistent storage
 class DatabaseManager {
   static final DatabaseManager _instance = DatabaseManager._internal();
   Database? _database;
@@ -23,286 +21,366 @@ class DatabaseManager {
 
   Future<Database> get database async {
     if (_database != null && _database!.isOpen) return _database!;
-    final databasesPath = await getDatabasesPath();
-    final dbPath = path.join(databasesPath, 'Countronics.db');
-    try {
-      _database = await databaseFactoryFfi.openDatabase(dbPath);
-      await _initializeDatabase();
-      debugPrint('[DATABASE] Database opened at $dbPath');
-    } catch (e) {
-      debugPrint('[DATABASE] Error opening database: $e');
-      rethrow;
-    }
+
+    final appDocumentsDir = await getApplicationDocumentsDirectory();
+    final dbPath = path.join(appDocumentsDir.path, 'Countronics.db');
+
+    await Directory(path.dirname(dbPath)).create(recursive: true);
+    _database = await databaseFactoryFfi.openDatabase(dbPath);
+    await _initializeDatabase();
     return _database!;
   }
 
   Future<void> _initializeDatabase() async {
-    final db = _database!;
-    try {
-      await db.execute('''
-        CREATE TABLE IF NOT EXISTS ChannelData (
-          channel TEXT PRIMARY KEY,
-          data TEXT,
-          timestamp INTEGER
-        )
-      ''');
-      await db.execute('''
-        CREATE TABLE IF NOT EXISTS Windows (
-          windowId INTEGER PRIMARY KEY,
-          channel TEXT,
-          subscribedChannels TEXT
-        )
-      ''');
-      await db.execute('CREATE INDEX IF NOT EXISTS idx_channel ON ChannelData(channel)');
-      debugPrint('[DATABASE] Initialized ChannelData and Windows tables');
-    } catch (e) {
-      debugPrint('[DATABASE] Error initializing tables: $e');
-      rethrow;
-    }
+    final db = _database;
+    if (db == null) return;
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS Test (
+        RecNo REAL PRIMARY KEY,
+        FName TEXT,
+        OperatorName TEXT,
+        TDate TEXT,
+        TTime TEXT,
+        ScanningRate REAL,
+        ScanningRateHH REAL,
+        ScanningRateMM REAL,
+        ScanningRateSS REAL,
+        TestDurationDD REAL,
+        TestDurationHH REAL,
+        TestDurationMM REAL,
+        GraphVisibleArea REAL,
+        BaseLine REAL,
+        FullScale REAL,
+        Descrip TEXT,
+        AbsorptionPer REAL,
+        NOR REAL,
+        FLName TEXT,
+        XAxis TEXT,
+        XAxisRecNo REAL,
+        XAxisUnit TEXT,
+        XAxisCode REAL,
+        TotalChannel INTEGER,
+        MaxYAxis REAL,
+        MinYAxis REAL
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS Test1 (
+        RecNo REAL,
+        SNo REAL,
+        SlNo REAL,
+        ChangeTime TEXT,
+        AbsDate TEXT,
+        AbsTime TEXT,
+        AbsDateTime TEXT,
+        Shown TEXT,
+        AbsAvg REAL,
+        ${List.generate(50, (i) => 'AbsPer${i + 1} REAL').join(', ')}
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS Test2 (
+        RecNo REAL PRIMARY KEY,
+        ${List.generate(50, (i) => 'ChannelName${i + 1} TEXT').join(', ')}
+      )
+    ''');
   }
 
   Future<void> close() async {
     if (_database != null && _database!.isOpen) {
-      try {
-        await _database!.close();
-        _database = null;
-        debugPrint('[DATABASE] Closed database');
-      } catch (e) {
-        debugPrint('[DATABASE] Error closing database: $e');
-      }
+      await _database!.close();
+      _database = null;
     }
-  }
-
-  Future<void> setupDatabase() async {
-    final databasesPath = await getDatabasesPath();
-    final dbPath = path.join(databasesPath, 'Countronics.db');
-    final directory = Directory(databasesPath);
-    if (!await directory.exists()) {
-      await directory.create(recursive: true);
-      debugPrint('[DATABASE] Created database directory at $databasesPath');
-    }
-    debugPrint('[DATABASE] Using database at $dbPath');
-  }
-
-  Future<void> updateChannelData(String channel, Map<String, dynamic> channelData) async {
-    try {
-      final db = await database;
-      final dataJson = jsonEncode(channelData);
-      await db.insert(
-        'ChannelData',
-        {
-          'channel': channel,
-          'data': dataJson,
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      debugPrint('[DATABASE] Updated channel data for $channel (points: ${channelData['dataPoints']?.length ?? 0})');
-    } catch (e) {
-      debugPrint('[DATABASE] Error updating channel data for $channel: $e');
-      rethrow;
-    }
-  }
-
-  Future<String> getDatabasesPath() async {
-    return path.join(Directory.current.path, '.dart_tool', 'sqflite_common_ffi', 'databases');
   }
 }
 
-void main(List<String> args) async {
-  WidgetsFlutterBinding.ensureInitialized();
-  sqfliteFfiInit();
-  databaseFactory = databaseFactoryFfi;
-  final windowId = args.isEmpty ? 0 : int.tryParse(args[0]) ?? 0;
-  try {
-    await WindowManagerPlus.ensureInitialized(windowId);
-  } catch (e) {
-    debugPrint('[MAIN] Failed to initialize WindowManagerPlus: $e');
-    return;
-  }
+// Custom Title Bar Widget
+class CustomTitleBar extends StatelessWidget {
+  final String title;
 
-  try {
-    await DatabaseManager().setupDatabase();
-  } catch (e) {
-    debugPrint('[MAIN] Failed to set up database: $e');
-    return;
-  }
+  const CustomTitleBar({
+    super.key,
+    required this.title,
+  });
 
-  final navigatorKey = GlobalKey<NavigatorState>();
-
-  // Configure window options
-  final windowOptions = WindowOptions(
-    size: const Size(800, 600),
-    center: true,
-    backgroundColor: Colors.transparent,
-    skipTaskbar: false,
-    titleBarStyle: TitleBarStyle.normal,
-  );
-  try {
-    await WindowManagerPlus.current.waitUntilReadyToShow(windowOptions, () async {
-      await WindowManagerPlus.current.show();
-      await WindowManagerPlus.current.focus();
-    });
-  } catch (e) {
-    debugPrint('[MAIN] Failed to configure window: $e');
-  }
-
-  if (args.length > 1) {
-    try {
-      final argsMap = jsonDecode(args[1]) as Map<String, dynamic>;
-      if (argsMap.containsKey('channel') && argsMap.containsKey('channelData')) {
-        runApp(
-          BlocProvider(
-            create: (_) => ChannelDataBloc(),
-            child: MaterialApp(
-              navigatorKey: navigatorKey,
-              home: SecondaryWindowApp(
-                channel: argsMap['channel'] as String,
-                channelData: argsMap['channelData'] as Map<String, dynamic>,
-                windowId: windowId,
-                windowKey: argsMap['windowKey'] as String?,
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF2D2D2D), Color(0xFF1A1A1A)], // Dark grey to black
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        border: Border.all(
+          color: Colors.white.withOpacity(0.1),
+          width: 1,
+        ),
+        borderRadius: const BorderRadius.only(
+          topLeft: Radius.circular(12),
+          topRight: Radius.circular(12),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.3),
+            blurRadius: 10,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          // App Icon
+          Padding(
+            padding: const EdgeInsets.only(left: 12),
+            child: Icon(
+              Icons.analytics, // Replace with your app icon (e.g., Image.asset)
+              color: Colors.white.withOpacity(0.9),
+              size: 24,
+            ),
+          ),
+          // Title
+          Expanded(
+            child: MoveWindow(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.9),
+                    fontWeight: FontWeight.w600,
+                    fontSize: 16,
+                    letterSpacing: 1.2,
+                    shadows: [
+                      Shadow(
+                        color: Colors.black.withOpacity(0.5),
+                        blurRadius: 2,
+                        offset: const Offset(1, 1),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
-        );
-        debugPrint('[MAIN] Started secondary window for channel: ${argsMap['channel']}, ID: $windowId');
-        return;
-      }
-    } catch (e) {
-      debugPrint('[MAIN] Error parsing secondary window args: $e');
-    }
+          // Minimize Button
+          WindowButton(
+            icon: Icons.remove,
+            onPressed: () => appWindow.minimize(),
+            tooltip: 'Minimize',
+          ),
+          // Maximize/Restore Button
+          WindowButton(
+            icon: appWindow.isMaximized ? Icons.filter_none : Icons.crop_square,
+            onPressed: () => appWindow.maximizeOrRestore(),
+            tooltip: appWindow.isMaximized ? 'Restore' : 'Maximize',
+          ),
+          // Close Button
+          ValueListenableBuilder<bool>(
+            valueListenable: isScanningNotifier,
+            builder: (context, isScanning, child) {
+              return WindowButton(
+                icon: Icons.close,
+                onPressed: () async {
+                  if (isScanning) {
+                    final shouldClose = await showDialog<bool>(
+                      context: context,
+                      builder: (context) => AlertDialog(
+                        title: const Text('Confirm Close'),
+                        content: const Text(
+                            'Scanning is active. Are you sure you want to close the application?'),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(false),
+                            child: const Text('Cancel'),
+                          ),
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(true),
+                            child: const Text('Close'),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (shouldClose == true) {
+                      appWindow.close();
+                    }
+                  } else {
+                    appWindow.close();
+                  }
+                },
+                tooltip: 'Close',
+                isClose: true,
+              );
+            },
+          ),
+        ],
+      ),
+    );
   }
+}
 
-  final autoStartController = AutoStartController();
-  autoStartController.startMonitoring(navigatorKey);
-  runApp(
-    BlocProvider(
-      create: (_) => ChannelDataBloc(),
-      child: MaterialApp(navigatorKey: navigatorKey, home: HomePage()),
-    ),
-  );
-  debugPrint('[MAIN] Started primary window (ID: $windowId)');
+// Custom WindowButton Widget with Hover and Animation
+class WindowButton extends StatefulWidget {
+  final IconData icon;
+  final VoidCallback onPressed;
+  final String tooltip;
+  final bool isClose;
 
-  Timer.periodic(const Duration(minutes: 10), (timer) async {
-    try {
-      final db = await DatabaseManager().database;
-      final threshold = DateTime.now().millisecondsSinceEpoch - 3600000; // 1 hour
-      final deleted = await db.delete('ChannelData', where: 'timestamp < ?', whereArgs: [threshold]);
-      debugPrint('[DATABASE] Cleaned $deleted old channel data entries');
-    } catch (e) {
-      debugPrint('[DATABASE] Error cleaning old channel data: $e');
-    }
+  const WindowButton({
+    super.key,
+    required this.icon,
+    required this.onPressed,
+    required this.tooltip,
+    this.isClose = false,
   });
+
+  @override
+  State<WindowButton> createState() => _WindowButtonState();
 }
 
-class AutoStartController {
-  Timer? _timer;
+class _WindowButtonState extends State<WindowButton> with SingleTickerProviderStateMixin {
+  bool _isHovered = false;
+  late AnimationController _controller;
+  late Animation<double> _scaleAnimation;
 
-  void startMonitoring(GlobalKey<NavigatorState> navigatorKey) {
-    _timer = Timer.periodic(const Duration(minutes: 1), (timer) async {
-      try {
-        final db = await DatabaseManager().database;
-        final autoStartResult = await db.query('AutoStart', limit: 1);
-        if (autoStartResult.isNotEmpty) {
-          final autoStart = autoStartResult.first;
-          final startHr = autoStart['StartTimeHr'] as int?;
-          final startMin = autoStart['StartTimeMin'] as int?;
-          if (startHr != null && startMin != null) {
-            final now = DateTime.now();
-            if (now.hour == startHr && now.minute == startMin) {
-              final selectResult = await db.query('SelectChannel');
-              if (selectResult.isNotEmpty && navigatorKey.currentState != null) {
-                navigatorKey.currentState!.push(
-                  MaterialPageRoute(
-                    builder: (context) => SerialPortScreen(selectedChannels: selectResult),
-                  ),
-                );
-              }
-            }
-          }
-        }
-      } catch (e) {
-        debugPrint('[AUTOSTART] Error in AutoStart monitoring: $e');
-      }
-    });
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 150),
+      vsync: this,
+    );
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.15).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+    );
   }
 
+  @override
   void dispose() {
-    _timer?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) {
+        setState(() => _isHovered = true);
+        _controller.forward();
+      },
+      onExit: (_) {
+        setState(() => _isHovered = false);
+        _controller.reverse();
+      },
+      child: Tooltip(
+        message: widget.tooltip,
+        child: Material(
+          color: widget.isClose
+              ? (_isHovered ? Colors.redAccent : Colors.red)
+              : (_isHovered ? Colors.white.withOpacity(0.2) : Colors.transparent),
+          shape: const CircleBorder(),
+          child: InkWell(
+            onTap: widget.onPressed,
+            customBorder: const CircleBorder(),
+            child: ScaleTransition(
+              scale: _scaleAnimation,
+              child: SizedBox(
+                width: 40,
+                height: 40,
+                child: Icon(
+                  widget.icon,
+                  color: Colors.white.withOpacity(0.9),
+                  size: 18,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
-class SecondaryWindowManager {
-  static final SecondaryWindowManager _instance = SecondaryWindowManager._internal();
-  final Map<String, int> _windowIds = {}; // Map windowKey to windowId
-  final Lock _lock = Lock();
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
 
-  factory SecondaryWindowManager() => _instance;
+  // Initialize database
+  sqfliteFfiInit();
+  databaseFactory = databaseFactoryFfi;
 
-  SecondaryWindowManager._internal();
+  // Initialize bitsdojo_window
+  doWhenWindowReady(() {
+    const initialSize = Size(1280, 720);
+    appWindow.minSize = const Size(800, 600);
+    appWindow.size = initialSize;
+    appWindow.alignment = Alignment.center;
+    appWindow.title = 'Peak Load Indicator';
+    appWindow.show();
+  });
 
-  Future<void> createWindow(String channel, Map<String, dynamic> channelData, String windowKey) async {
-    await _lock.synchronized(() async {
-      try {
-        debugPrint('[SECONDARY_WINDOW] Creating window with key $windowKey for channel: $channel');
-        final newWindow = await WindowManagerPlus.createWindow([jsonEncode({
-          'channel': channel,
-          'channelData': channelData,
-          'windowKey': windowKey,
-        })]);
-        if (newWindow != null) {
-          final windowIds = await WindowManagerPlus.getAllWindowManagerIds();
-          final windowId = windowIds.last; // Assume newest ID is the last
-          _windowIds[windowKey] = windowId;
-          await newWindow.setTitle('Channel $channel Data');
-          await newWindow.setSize(const Size(800, 600));
-          await newWindow.setPosition(const Offset(100, 100));
-          await newWindow.center();
-          await newWindow.show();
-          debugPrint('[SECONDARY_WINDOW] Opened window with key $windowKey and ID $windowId for channel $channel');
-        } else {
-          debugPrint('[SECONDARY_WINDOW] Failed to create window for channel $channel');
-        }
-      } catch (e) {
-        debugPrint('[SECONDARY_WINDOW] Error creating window for channel $channel: $e');
-      }
-    });
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Peak Load Indicator',
+      debugShowCheckedModeBanner: false, // Disable debug banner
+      theme: ThemeData(
+        primarySwatch: Colors.grey,
+        scaffoldBackgroundColor: Colors.transparent,
+      ),
+      home: const HomePageWrapper(),
+    );
   }
+}
 
-  Future<void> removeWindow(String windowKey) async {
-    await _lock.synchronized(() async {
-      final windowId = _windowIds.remove(windowKey);
-      if (windowId != null) {
-        debugPrint('[SECONDARY_WINDOW] Removed window $windowId with key $windowKey');
-      }
-    });
-  }
+class HomePageWrapper extends StatelessWidget {
+  const HomePageWrapper({super.key});
 
-  Future<void> updateWindows(String? channel, Map<String, dynamic> channelData) async {
-    final effectiveChannel = channel ?? 'All';
-    await _lock.synchronized(() async {
-      try {
-        debugPrint('[SECONDARY_WINDOW] Updating windows for channel: $effectiveChannel (points: ${channelData['dataPoints']?.length ?? 0})');
-        await DatabaseManager().updateChannelData(effectiveChannel, channelData);
-        // Create a copy to avoid concurrent modification
-        final windowIds = Map.from(_windowIds);
-        for (var entry in windowIds.entries) {
-          final windowKey = entry.key;
-          final windowId = entry.value;
-          try {
-            final result = await WindowManagerPlus.current.invokeMethodToWindow(windowId, 'updateData', jsonEncode({
-              'channel': effectiveChannel,
-              'channelData': channelData,
-              'windowKey': windowKey,
-            }));
-            debugPrint('[SECONDARY_WINDOW] Sent update to window $windowId (key $windowKey) for channel $effectiveChannel, result: $result');
-          } catch (e) {
-            debugPrint('[SECONDARY_WINDOW] Error updating window $windowKey: $e');
-          }
-        }
-      } catch (e) {
-        debugPrint('[SECONDARY_WINDOW] Error updating secondary windows for $effectiveChannel: $e');
-      }
-    });
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            (AppColors.background ?? Colors.grey[100]!).withOpacity(0.8),
+            Colors.white,
+          ],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+        border: Border.all(
+          color: Colors.grey[800]!, // Dark grey border
+          width: 2,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.3),
+            blurRadius: 12,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      margin: const EdgeInsets.all(8),
+      child: Scaffold(
+        backgroundColor: Colors.transparent,
+        body: Column(
+          children: [
+            const CustomTitleBar(title: 'Peak Load Indicator'),
+            Expanded(
+              child: HomePage(), // Replace with SerialPortScreen if needed
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

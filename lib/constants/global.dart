@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -31,4 +33,10 @@ class Global {
   static ValueNotifier<int> stopBits = ValueNotifier(1);
 
 
+
+  static final StreamController<Map<String, dynamic>> _graphDataStreamController =
+  StreamController<Map<String, dynamic>>.broadcast();
+  static Stream<Map<String, dynamic>> get graphDataStream => _graphDataStreamController.stream;
+  static Sink<Map<String, dynamic>> get graphDataSink => _graphDataStreamController.sink;
 }
+
