@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:peakloadindicator/Pages/setup/setup_api.dart';
-import '../../constants/colors.dart';
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
+import '../../constants/database_manager.dart';
+import '../../constants/theme.dart';
+import '../../constants/global.dart';
+import '../logScreen/log.dart';
+
 
 class EditChannelScreen extends StatefulWidget {
   final Map<String, dynamic>? channel;
@@ -15,32 +19,36 @@ class EditChannelScreen extends StatefulWidget {
 class _EditChannelScreenState extends State<EditChannelScreen> {
   final _formKey = GlobalKey<FormState>();
   final _channelNameController = TextEditingController();
-  final _startingCharacterController = TextEditingController();
-  final _dataLengthController = TextEditingController();
-  final _decimalPlacesController = TextEditingController();
   final _unitController = TextEditingController();
-  final _chartMaxController = TextEditingController();
-  final _chartMinController = TextEditingController();
   final _targetAlarmMaxController = TextEditingController();
   final _targetAlarmMinController = TextEditingController();
-  final _graphLineColourController = TextEditingController();
   final _targetAlarmColourController = TextEditingController();
+  final _channelColourController = TextEditingController();
+  Color _selectedAlarmColor = Colors.red; // Default alarm color
+  Color _selectedChannelColor = Colors.blue; // Default channel color
 
   @override
   void initState() {
     super.initState();
     if (widget.channel != null) {
-      _channelNameController.text = widget.channel!['ChannelName'];
-      _startingCharacterController.text = widget.channel!['StartingCharacter'];
-      _dataLengthController.text = widget.channel!['DataLength'].toString();
-      _decimalPlacesController.text = widget.channel!['DecimalPlaces'].toString();
-      _unitController.text = widget.channel!['Unit'];
-      _chartMaxController.text = widget.channel!['ChartMaximumValue'].toString();
-      _chartMinController.text = widget.channel!['ChartMinimumValue'].toString();
-      _targetAlarmMaxController.text = widget.channel!['TargetAlarmMax'].toString();
-      _targetAlarmMinController.text = widget.channel!['TargetAlarmMin'].toString();
-      _graphLineColourController.text = widget.channel!['GraphLineColour'].toString();
-      _targetAlarmColourController.text = widget.channel!['TargetAlarmColour'].toString();
+      _channelNameController.text = widget.channel!['ChannelName'] ?? '';
+      _unitController.text = widget.channel!['Unit'] ?? '';
+      _targetAlarmMaxController.text = widget.channel!['TargetAlarmMax']?.toString() ?? '';
+      _targetAlarmMinController.text = widget.channel!['TargetAlarmMin']?.toString() ?? '';
+      _targetAlarmColourController.text = widget.channel!['TargetAlarmColour'] ?? 'FF0000';
+      _channelColourController.text = widget.channel!['ChannelColour'] ?? '0000FF';
+      try {
+        _selectedAlarmColor = Color(int.parse('FF${_targetAlarmColourController.text}', radix: 16));
+        _selectedChannelColor = Color(int.parse('FF${_channelColourController.text}', radix: 16));
+      } catch (e) {
+        _selectedAlarmColor = Colors.red; // Fallback alarm color
+        _selectedChannelColor = Colors.blue; // Fallback channel color
+      }
+      LogPage.addLog('[$_currentTime] Loaded channel data: ${widget.channel!['ChannelName']}');
+    } else {
+      _targetAlarmColourController.text = 'FF0000'; // Default red
+      _channelColourController.text = '0000FF'; // Default blue
+      LogPage.addLog('[$_currentTime] Initialized new channel form');
     }
   }
 
@@ -48,62 +56,137 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
     if (_formKey.currentState!.validate()) {
       final channelData = <String, dynamic>{
         'ChannelName': _channelNameController.text,
-        'StartingCharacter': _startingCharacterController.text,
-        'DataLength': int.parse(_dataLengthController.text),
-        'DecimalPlaces': int.parse(_decimalPlacesController.text),
         'Unit': _unitController.text,
-        'ChartMaximumValue': int.parse(_chartMaxController.text),
-        'ChartMinimumValue': int.parse(_chartMinController.text),
         'TargetAlarmMax': int.parse(_targetAlarmMaxController.text),
         'TargetAlarmMin': int.parse(_targetAlarmMinController.text),
-        'GraphLineColour': int.parse(_graphLineColourController.text),
-        'TargetAlarmColour': int.parse(_targetAlarmColourController.text),
+        'TargetAlarmColour': _targetAlarmColourController.text, // Hex code without #
+        'graphLineColour': _channelColourController.text, // Hex code without #
       };
 
       try {
+        final dbManager = DatabaseManager();
+        final db = await dbManager.database;
         String message;
+
         if (widget.channel != null) {
           channelData['RecNo'] = widget.channel!['RecNo'];
-          print('Submitting edit: $channelData');
-          message = await ApiService.editChannel(channelData);
+          await db.update(
+            'ChannelSetup',
+            channelData,
+            where: 'RecNo = ?',
+            whereArgs: [widget.channel!['RecNo']],
+          );
+          message = 'Channel updated successfully';
+          LogPage.addLog('[$_currentTime] Edited channel: ${channelData['ChannelName']}');
         } else {
-          print('Submitting add: $channelData');
-          message = await ApiService.addChannel(channelData);
+          await db.insert('ChannelSetup', channelData);
+          message = 'Channel added successfully';
+          LogPage.addLog('[$_currentTime] Added new channel: ${channelData['ChannelName']}');
         }
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
                 message,
-                style: GoogleFonts.poppins(fontSize: 16, color: Colors.white),
+                style: GoogleFonts.poppins(fontSize: 14, color: Colors.white),
               ),
-              backgroundColor: AppColors.submitButton,
+              backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              margin: const EdgeInsets.all(16),
             ),
           );
           Navigator.pop(context, true); // Return true to refresh main screen
         }
       } catch (e) {
         print('Error: $e');
+        String errorMessage = e.toString();
+        if (errorMessage.contains('UNIQUE constraint failed')) {
+          errorMessage = 'Failed to save channel: Channel name already exists.';
+        } else if (errorMessage.contains('NOT NULL constraint failed')) {
+          errorMessage = 'Failed to save channel: Record ID is required.';
+        } else {
+          errorMessage = 'Failed to save channel: Please check your input and try again.';
+        }
+        LogPage.addLog('[$_currentTime] Error saving channel: $errorMessage');
         if (mounted) {
-          // Extract a user-friendly message from the error
-          String errorMessage = e.toString();
-          if (errorMessage.contains('Cannot insert the value NULL into column \'RecNo\'')) {
-            errorMessage = 'Failed to add channel: Record ID is required.';
-          } else if (errorMessage.contains('Add Failed')) {
-            errorMessage = 'Failed to add channel. Please check your input and try again.';
-          }
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
                 errorMessage,
-                style: GoogleFonts.poppins(fontSize: 16, color: Colors.white),
+                style: GoogleFonts.poppins(fontSize: 14, color: Colors.white),
               ),
-              backgroundColor: AppColors.errorText,
+              backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              margin: const EdgeInsets.all(16),
             ),
           );
         }
       }
     }
+  }
+
+  void _openColorPicker({required bool isAlarmColor}) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.white, // White dialog background
+        title: SingleChildScrollView(
+          child: Column(
+            children: [
+              Text(
+                isAlarmColor ? 'Select Alarm Colour' : 'Select Channel Colour',
+                style: GoogleFonts.poppins(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.black87,
+                ),
+              ),
+              const SizedBox(height: 16),
+              ColorPicker(
+                pickerColor: isAlarmColor ? _selectedAlarmColor : _selectedChannelColor,
+                onColorChanged: (color) {
+                  setState(() {
+                    if (isAlarmColor) {
+                      _selectedAlarmColor = color;
+                      _targetAlarmColourController.text =
+                          color.value.toRadixString(16).substring(2).toUpperCase();
+                    } else {
+                      _selectedChannelColor = color;
+                      _channelColourController.text =
+                          color.value.toRadixString(16).substring(2).toUpperCase();
+                    }
+                  });
+                },
+                pickerAreaHeightPercent: 0.8,
+                enableAlpha: false,
+                displayThumbColor: true,
+                paletteType: PaletteType.hsv,
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                ),
+                child: Text(
+                  'Confirm',
+                  style: GoogleFonts.poppins(
+                    fontSize: 14,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildFormField({
@@ -112,6 +195,8 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
     TextInputType? keyboardType,
     String? Function(String?)? validator,
     required IconData icon,
+    bool isColorField = false,
+    bool isAlarmColor = true,
   }) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
@@ -125,7 +210,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
               style: GoogleFonts.poppins(
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
-                color: AppColors.textPrimary,
+                color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
               ),
             ),
           ),
@@ -135,41 +220,63 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
               decoration: InputDecoration(
                 labelStyle: GoogleFonts.poppins(
                   fontSize: 14,
-                  color: AppColors.textPrimary.withOpacity(0.8),
+                  color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
                 ),
                 filled: true,
-                fillColor: Colors.white.withOpacity(0.1),
+                fillColor: ThemeColors.getColor('cardBackground', Global.isDarkMode.value).withOpacity(0.1),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide(
-                    color: AppColors.textPrimary.withOpacity(0.5),
+                    color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value),
                     width: 1,
                   ),
                 ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide(
-                    color: AppColors.textPrimary.withOpacity(0.5),
+                    color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value),
                     width: 1,
                   ),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide(
-                    color: AppColors.submitButton,
+                    color: ThemeColors.getColor('buttonGradientStart', Global.isDarkMode.value),
                     width: 1.5,
                   ),
                 ),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                prefixIcon: Icon(
+                prefixIcon: isColorField
+                    ? GestureDetector(
+                  onTap: () => _openColorPicker(isAlarmColor: isAlarmColor),
+                  child: Container(
+                    margin: const EdgeInsets.only(left: 12, right: 8),
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: isAlarmColor ? _selectedAlarmColor : _selectedChannelColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value),
+                        width: 1,
+                      ),
+                    ),
+                  ),
+                )
+                    : Icon(
                   icon,
                   size: 20,
-                  color: AppColors.textPrimary.withOpacity(0.8),
+                  color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
                 ),
               ),
               keyboardType: keyboardType,
               validator: validator,
-              style: GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary),
+              style: GoogleFonts.poppins(
+                fontSize: 14,
+                color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+              ),
+              readOnly: isColorField,
+              onTap: isColorField ? () => _openColorPicker(isAlarmColor: isAlarmColor) : null,
             ),
           ),
         ],
@@ -202,7 +309,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
                     style: GoogleFonts.poppins(
                       fontSize: 14,
                       fontWeight: FontWeight.w500,
-                      color: AppColors.textPrimary,
+                      color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
                     ),
                   ),
                 ),
@@ -212,28 +319,28 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
                     decoration: InputDecoration(
                       labelStyle: GoogleFonts.poppins(
                         fontSize: 14,
-                        color: AppColors.textPrimary.withOpacity(0.8),
+                        color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
                       ),
                       filled: true,
-                      fillColor: Colors.white.withOpacity(0.1),
+                      fillColor: ThemeColors.getColor('cardBackground', Global.isDarkMode.value).withOpacity(0.1),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: AppColors.textPrimary.withOpacity(0.5),
+                          color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value),
                           width: 1,
                         ),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: AppColors.textPrimary.withOpacity(0.5),
+                          color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value),
                           width: 1,
                         ),
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: AppColors.submitButton,
+                          color: ThemeColors.getColor('buttonGradientStart', Global.isDarkMode.value),
                           width: 1.5,
                         ),
                       ),
@@ -241,12 +348,15 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
                       prefixIcon: Icon(
                         icon1,
                         size: 20,
-                        color: AppColors.textPrimary.withOpacity(0.8),
+                        color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
                       ),
                     ),
                     keyboardType: keyboardType,
                     validator: validator,
-                    style: GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary),
+                    style: GoogleFonts.poppins(
+                      fontSize: 14,
+                      color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                    ),
                   ),
                 ),
               ],
@@ -264,7 +374,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
                     style: GoogleFonts.poppins(
                       fontSize: 14,
                       fontWeight: FontWeight.w500,
-                      color: AppColors.textPrimary,
+                      color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
                     ),
                   ),
                 ),
@@ -274,28 +384,28 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
                     decoration: InputDecoration(
                       labelStyle: GoogleFonts.poppins(
                         fontSize: 14,
-                        color: AppColors.textPrimary.withOpacity(0.8),
+                        color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
                       ),
                       filled: true,
-                      fillColor: Colors.white.withOpacity(0.1),
+                      fillColor: ThemeColors.getColor('cardBackground', Global.isDarkMode.value).withOpacity(0.1),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: AppColors.textPrimary.withOpacity(0.5),
+                          color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value),
                           width: 1,
                         ),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: AppColors.textPrimary.withOpacity(0.5),
+                          color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value),
                           width: 1,
                         ),
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(
-                          color: AppColors.submitButton,
+                          color: ThemeColors.getColor('buttonGradientStart', Global.isDarkMode.value),
                           width: 1.5,
                         ),
                       ),
@@ -303,12 +413,15 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
                       prefixIcon: Icon(
                         icon2,
                         size: 20,
-                        color: AppColors.textPrimary.withOpacity(0.8),
+                        color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
                       ),
                     ),
                     keyboardType: keyboardType,
                     validator: validator,
-                    style: GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary),
+                    style: GoogleFonts.poppins(
+                      fontSize: 14,
+                      color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                    ),
                   ),
                 ),
               ],
@@ -321,190 +434,193 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
-        backgroundColor: AppColors.background,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: AppColors.textPrimary, size: 24),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: Text(
-          widget.channel != null ? 'Edit Channel' : 'Add Channel',
-          style: GoogleFonts.poppins(
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
-            color: AppColors.textPrimary,
+    return ValueListenableBuilder<bool>(
+      valueListenable: Global.isDarkMode,
+      builder: (context, isDarkMode, child) {
+        return Scaffold(
+          backgroundColor: ThemeColors.getColor('appBackground', isDarkMode),
+          appBar: AppBar(
+            backgroundColor: ThemeColors.getColor('appBackground', isDarkMode),
+            elevation: 0,
+            leading: IconButton(
+              icon: Icon(
+                Icons.arrow_back,
+                color: ThemeColors.getColor('titleBarIcon', isDarkMode),
+                size: 24,
+              ),
+              onPressed: () => Navigator.pop(context),
+            ),
+            title: Text(
+              widget.channel != null ? 'Edit Channel' : 'Add Channel',
+              style: GoogleFonts.poppins(
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+                color: ThemeColors.getColor('titleBarText', isDarkMode),
+              ),
+            ),
           ),
-        ),
-      ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Card(
-              elevation: 3,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              child: Container(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
-                  gradient: LinearGradient(
-                    colors: [
-                      AppColors.cardBackground,
-                      AppColors.cardBackground.withOpacity(0.95),
-                    ],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  border: Border.all(color: Colors.white.withOpacity(0.1)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.05),
-                      blurRadius: 10,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
+          body: SafeArea(
+            child: SingleChildScrollView(
+              child: Padding(
                 padding: const EdgeInsets.all(24.0),
-                child: Form(
-                  key: _formKey,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildFormField(
-                        controller: _channelNameController,
-                        label: 'Channel Name',
-                        validator: (value) => value!.isEmpty ? 'Required' : null,
-                        icon: Icons.label,
+                child: Card(
+                  elevation: ThemeColors.getColor('cardElevation', isDarkMode),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(16),
+                      gradient: LinearGradient(
+                        colors: [
+                          ThemeColors.getColor('cardBackground', isDarkMode),
+                          ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.95),
+                        ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
                       ),
-                      _buildFormField(
-                        controller: _startingCharacterController,
-                        label: 'Starting Character',
-                        validator: (value) => value!.isEmpty ? 'Required' : null,
-                        icon: Icons.text_fields,
+                      border: Border.all(
+                        color: ThemeColors.getColor('cardBorder', isDarkMode),
                       ),
-                      _buildFormFieldRow(
-                        controller1: _dataLengthController,
-                        label1: 'Data Length',
-                        controller2: _decimalPlacesController,
-                        label2: 'Decimal Places',
-                        keyboardType: TextInputType.number,
-                        validator: (value) => value!.isEmpty || int.tryParse(value) == null ? 'Valid number' : null,
-                        icon1: Icons.numbers,
-                        icon2: Icons.format_list_numbered,
-                      ),
-                      _buildFormField(
-                        controller: _unitController,
-                        label: 'Unit',
-                        validator: (value) => value!.isEmpty ? 'Required' : null,
-                        icon: Icons.straighten,
-                      ),
-                      _buildFormFieldRow(
-                        controller1: _chartMaxController,
-                        label1: 'Chart Max',
-                        controller2: _chartMinController,
-                        label2: 'Chart Min',
-                        keyboardType: TextInputType.number,
-                        validator: (value) => value!.isEmpty || int.tryParse(value) == null ? 'Valid number' : null,
-                        icon1: Icons.arrow_upward,
-                        icon2: Icons.arrow_downward,
-                      ),
-                      _buildFormFieldRow(
-                        controller1: _targetAlarmMaxController,
-                        label1: 'Alarm Max',
-                        controller2: _targetAlarmMinController,
-                        label2: 'Alarm Min',
-                        keyboardType: TextInputType.number,
-                        validator: (value) => value!.isEmpty || int.tryParse(value) == null ? 'Valid number' : null,
-                        icon1: Icons.warning,
-                        icon2: Icons.warning,
-                      ),
-                      _buildFormFieldRow(
-                        controller1: _graphLineColourController,
-                        label1: 'Graph Colour',
-                        controller2: _targetAlarmColourController,
-                        label2: 'Alarm Colour',
-                        keyboardType: TextInputType.number,
-                        validator: (value) => value!.isEmpty || int.tryParse(value) == null ? 'Valid number' : null,
-                        icon1: Icons.color_lens,
-                        icon2: Icons.color_lens,
-                      ),
-                      const SizedBox(height: 32),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
+                    ),
+                    padding: const EdgeInsets.all(24.0),
+                    child: Form(
+                      key: _formKey,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          GestureDetector(
-                            onTap: () => Navigator.pop(context),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  colors: [
-                                    AppColors.resetButton,
-                                    AppColors.resetButton.withOpacity(0.9),
-                                  ],
-                                ),
-                                borderRadius: BorderRadius.circular(12),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: AppColors.resetButton.withOpacity(0.3),
-                                    blurRadius: 8,
-                                    offset: const Offset(0, 4),
-                                  ),
-                                ],
-                              ),
-                              child: Text(
-                                'Cancel',
-                                style: GoogleFonts.poppins(
-                                  fontSize: 16,
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
+                          Text(
+                            'Channel Configuration',
+                            style: GoogleFonts.poppins(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: ThemeColors.getColor('dialogText', isDarkMode),
                             ),
                           ),
-                          const SizedBox(width: 16),
-                          GestureDetector(
-                            onTap: _saveChannel,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  colors: [
-                                    AppColors.submitButton,
-                                    AppColors.submitButton.withOpacity(0.9),
-                                  ],
-                                ),
-                                borderRadius: BorderRadius.circular(12),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: AppColors.submitButton.withOpacity(0.3),
-                                    blurRadius: 8,
-                                    offset: const Offset(0, 4),
+                          const SizedBox(height: 16),
+                          _buildFormField(
+                            controller: _channelNameController,
+                            label: 'Channel Name',
+                            validator: (value) => value!.isEmpty ? 'Required' : null,
+                            icon: Icons.label,
+                          ),
+                          _buildFormField(
+                            controller: _unitController,
+                            label: 'Unit',
+                            validator: (value) => value!.isEmpty ? 'Required' : null,
+                            icon: Icons.straighten,
+                          ),
+                          _buildFormFieldRow(
+                            controller1: _targetAlarmMaxController,
+                            label1: 'Alarm Max',
+                            controller2: _targetAlarmMinController,
+                            label2: 'Alarm Min',
+                            keyboardType: TextInputType.number,
+                            validator: (value) =>
+                            value!.isEmpty || int.tryParse(value) == null ? 'Valid number required' : null,
+                            icon1: Icons.warning,
+                            icon2: Icons.warning,
+                          ),
+                          _buildFormField(
+                            controller: _targetAlarmColourController,
+                            label: 'Alarm Colour',
+                            validator: (value) =>
+                            value!.isEmpty || RegExp(r'^[0-9A-Fa-f]{6}$').hasMatch(value)
+                                ? null
+                                : 'Valid 6-digit Hex code required',
+                            icon: Icons.color_lens,
+                            isColorField: true,
+                            isAlarmColor: true,
+                          ),
+                          _buildFormField(
+                            controller: _channelColourController,
+                            label: 'Channel Colour',
+                            validator: (value) =>
+                            value!.isEmpty || RegExp(r'^[0-9A-Fa-f]{6}$').hasMatch(value)
+                                ? null
+                                : 'Valid 6-digit Hex code required',
+                            icon: Icons.color_lens,
+                            isColorField: true,
+                            isAlarmColor: false,
+                          ),
+                          const SizedBox(height: 32),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              GestureDetector(
+                                onTap: () => Navigator.pop(context),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                                  decoration: BoxDecoration(
+                                    gradient: ThemeColors.getButtonGradient(isDarkMode),
+                                    borderRadius: BorderRadius.circular(12),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: ThemeColors.getColor('resetButton', isDarkMode).withOpacity(0.3),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 4),
+                                      ),
+                                    ],
                                   ),
-                                ],
-                              ),
-                              child: Text(
-                                'Save',
-                                style: GoogleFonts.poppins(
-                                  fontSize: 16,
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w600,
+                                  child: Text(
+                                    'Cancel',
+                                    style: GoogleFonts.poppins(
+                                      fontSize: 16,
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
                                 ),
                               ),
-                            ),
+                              const SizedBox(width: 16),
+                              GestureDetector(
+                                onTap: _saveChannel,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                                  decoration: BoxDecoration(
+                                    gradient: ThemeColors.getButtonGradient(isDarkMode),
+                                    borderRadius: BorderRadius.circular(12),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.3),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 4),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Text(
+                                    'Save',
+                                    style: GoogleFonts.poppins(
+                                      fontSize: 16,
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
               ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
+
+  @override
+  void dispose() {
+    _channelNameController.dispose();
+    _unitController.dispose();
+    _targetAlarmMaxController.dispose();
+    _targetAlarmMinController.dispose();
+    _targetAlarmColourController.dispose();
+    _channelColourController.dispose();
+    super.dispose();
+  }
+
+  String get _currentTime => DateTime.now().toString().substring(0, 19);
 }

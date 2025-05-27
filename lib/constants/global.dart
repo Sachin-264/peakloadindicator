@@ -11,6 +11,7 @@ class Global {
 
   static ValueNotifier<String?> selectedFileName = ValueNotifier(null);
   static ValueNotifier<String?> operatorName = ValueNotifier(null);
+  static ValueNotifier<String?> selectedDBName = ValueNotifier(null);
 
   // Scanning Rate fields
   static ValueNotifier<int?> scanningRate = ValueNotifier(null);
@@ -23,7 +24,6 @@ class Global {
   static ValueNotifier<int?> testDurationHH = ValueNotifier(null);
   static ValueNotifier<int?> testDurationMM = ValueNotifier(null);
   static ValueNotifier<int?> testDurationSS = ValueNotifier(null);
-
   static ValueNotifier<String?> graphVisibleArea = ValueNotifier(null);
 
   // Port details
@@ -32,11 +32,24 @@ class Global {
   static ValueNotifier<String> parity = ValueNotifier('None');
   static ValueNotifier<int> stopBits = ValueNotifier(1);
 
+  // Dark Mode
+  static ValueNotifier<bool> isDarkMode = ValueNotifier<bool>(false);
 
+  // Initialize theme from shared preferences
+  static Future<void> initTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    isDarkMode.value = prefs.getBool('isDarkMode') ?? false;
+  }
+
+  // Save theme to shared preferences
+  static Future<void> saveTheme(bool isDark) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('isDarkMode', isDark);
+    isDarkMode.value = isDark;
+  }
 
   static final StreamController<Map<String, dynamic>> _graphDataStreamController =
   StreamController<Map<String, dynamic>>.broadcast();
   static Stream<Map<String, dynamic>> get graphDataStream => _graphDataStreamController.stream;
   static Sink<Map<String, dynamic>> get graphDataSink => _graphDataStreamController.sink;
 }
-

@@ -2,11 +2,13 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:libserialport/libserialport.dart';
-import 'package:path/path.dart' as path;
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import '../../constants/colors.dart';
-import '../../constants/global.dart';
+// import 'package:shared_preferences/shared_preferences.dart'; // REMOVED: No longer needed for port settings
+import 'package:sqflite_common_ffi/sqflite_ffi.dart'; // Keep for general database usage
+import '../../constants/colors.dart'; // Ensure this path is correct
+import '../../constants/database_manager.dart'; // Ensure this path is correct
+import '../../constants/global.dart'; // Ensure this path is correct
+import '../../constants/theme.dart'; // Ensure this path is correct
+import 'AuthSettingScreen.dart';
 import 'edit_channel_screen.dart';
 
 class ChannelSetupScreen extends StatefulWidget {
@@ -23,42 +25,31 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
   String? errorMessage;
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
-  late Database _database;
+  late Animation<double> _scaleAnimation;
   final Set<int> _selectedRecNos = {};
   TimeOfDay? _startTime;
   TimeOfDay? _endTime;
   final TextEditingController _scanTimeController = TextEditingController();
+  bool _isDropdownHovered = false;
+  bool _isRowHovered = false;
 
   @override
   void initState() {
     super.initState();
     _animationController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 300),
+      duration: const Duration(milliseconds: 600),
     );
     _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
       CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
     );
-    _initDatabase();
-    _loadSavedPortDetails();
+    _scaleAnimation = Tween<double>(begin: 0.9, end: 1.0).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
+    );
+    _loadSavedPortDetails(); // This now uses DatabaseManager
     _fetchPorts();
-  }
-
-  Future<void> _initDatabase() async {
-    try {
-      sqfliteFfiInit();
-      databaseFactory = databaseFactoryFfi;
-      final databasesPath = await getDatabasesPath();
-      final dbPath = path.join(databasesPath, 'Countronics.db');
-      _database = await openDatabase(dbPath);
-      fetchChannels();
-    } catch (e) {
-      setState(() {
-        isLoading = false;
-        errorMessage = 'Error initializing database: $e';
-      });
-      print('Error initializing database: $e');
-    }
+    fetchChannels();
+    _animationController.forward();
   }
 
   @override
@@ -68,27 +59,21 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     super.dispose();
   }
 
+  // MODIFIED: Load port details from DatabaseManager
   Future<void> _loadSavedPortDetails() async {
-    final prefs = await SharedPreferences.getInstance();
+    final savedSettings = await DatabaseManager().getComPortSettings();
     setState(() {
-      Global.selectedPort.value = prefs.getString('selectedPort') ?? 'No Ports Detected';
-      Global.baudRate.value = prefs.getInt('baudRate') ?? 9600;
-      Global.dataBits.value = prefs.getInt('dataBits') ?? 8;
-      Global.parity.value = prefs.getString('parity') ?? 'None';
-      Global.stopBits.value = prefs.getInt('stopBits') ?? 1;
-      print('Loaded port details: Port=${Global.selectedPort.value}, Baud=${Global.baudRate.value}, '
-          'DataBits=${Global.dataBits.value}, Parity=${Global.parity.value}, StopBits=${Global.stopBits.value}');
+      Global.selectedPort.value = savedSettings?['selectedPort'] ?? 'No Ports Detected';
+      Global.baudRate.value = savedSettings?['baudRate'] ?? 9600;
+      Global.dataBits.value = savedSettings?['dataBits'] ?? 8;
+      Global.parity.value = savedSettings?['parity'] ?? 'None';
+      Global.stopBits.value = savedSettings?['stopBits'] ?? 1;
     });
   }
 
+  // MODIFIED: Save port details to DatabaseManager
   Future<void> _savePortDetails(String port, int baudRate, int dataBits, String parity, int stopBits) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('selectedPort', port);
-    await prefs.setInt('baudRate', baudRate);
-    await prefs.setInt('dataBits', dataBits);
-    await prefs.setString('parity', parity);
-    await prefs.setInt('stopBits', stopBits);
-    print('Saved port details: Port=$port, Baud=$baudRate, DataBits=$dataBits, Parity=$parity, StopBits=$stopBits');
+    await DatabaseManager().saveComPortSettings(port, baudRate, dataBits, parity, stopBits);
   }
 
   Future<void> _fetchPorts() async {
@@ -121,10 +106,12 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                 parityString = "Unknown";
             }
 
-            portDetails.add(
-                '$portName → Baud: $baudRate, Data Bits: $dataBits, Parity: $parityString, Stop Bits: $stopBits');
+            portDetails.add('$portName → Baud: $baudRate, Data Bits: $dataBits, Parity: $parityString, Stop Bits: $stopBits');
 
-            if (Global.selectedPort.value == portName || Global.selectedPort.value == 'No Ports Detected') {
+            // If the previously selected port is found, update Global values
+            // Or if no port was previously selected, and this is the first available port
+            if (Global.selectedPort.value.startsWith(portName) || Global.selectedPort.value == 'No Ports Detected' || Global.selectedPort.value == 'Error Fetching Ports') {
+              Global.selectedPort.value = '$portName → Baud: $baudRate, Data Bits: $dataBits, Parity: $parityString, Stop Bits: $stopBits';
               Global.baudRate.value = baudRate;
               Global.dataBits.value = dataBits;
               Global.parity.value = parityString;
@@ -140,27 +127,46 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
 
         setState(() {
           ports = portDetails;
-          if (Global.selectedPort.value == 'No Ports Detected' && portDetails.isNotEmpty) {
-            Global.selectedPort.value = portDetails[0];
+          // If no port was selected or an error occurred, and ports are now detected, default to the first one
+          if ((Global.selectedPort.value == 'No Ports Detected' || Global.selectedPort.value == 'Error Fetching Ports') && portDetails.isNotEmpty) {
+            final firstPortInfo = portDetails[0];
+            Global.selectedPort.value = firstPortInfo;
+            final portName = firstPortInfo.split(' → ')[0];
+            final details = firstPortInfo.split(' → ')[1];
+            final baudRate = int.parse(details.split(', ')[0].split(': ')[1]);
+            final dataBits = int.parse(details.split(', ')[1].split(': ')[1]);
+            final parity = details.split(', ')[2].split(': ')[1];
+            final stopBits = int.parse(details.split(', ')[3].split(': ')[1]);
+            Global.baudRate.value = baudRate;
+            Global.dataBits.value = dataBits;
+            Global.parity.value = parity;
+            Global.stopBits.value = stopBits;
+            _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
+          }
+          // Ensure Global.selectedPort is still one of the actual ports, or null if none
+          if (!ports.contains(Global.selectedPort.value) && ports.isNotEmpty) {
+            Global.selectedPort.value = ports[0];
+          } else if (ports.isEmpty) {
+            Global.selectedPort.value = 'No Ports Detected';
           }
         });
       } else {
         setState(() {
           ports = ['No Ports Detected'];
           Global.selectedPort.value = 'No Ports Detected';
-          _savePortDetails('No Ports Detected', 9600, 8, 'None', 1);
+          _savePortDetails('No Ports Detected', 9600, 8, 'None', 1); // Save default if no ports found
         });
       }
-
-      _animationController.forward();
     } catch (e) {
       setState(() {
         ports = ['Error Fetching Ports'];
         Global.selectedPort.value = 'Error Fetching Ports';
-        _savePortDetails('Error Fetching Ports', 9600, 8, 'None', 1);
+        _savePortDetails('Error Fetching Ports', 9600, 8, 'None', 1); // Save error state default
       });
+      print('Error fetching ports: $e'); // Log the actual error
     }
   }
+
 
   Future<void> fetchChannels() async {
     setState(() {
@@ -168,8 +174,9 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
       errorMessage = null;
     });
     try {
-      final data = await _database.query('ChannelSetup');
-      final selectedData = await _database.query('SelectChannel');
+      final db = await DatabaseManager().database;
+      final data = await db.query('ChannelSetup');
+      final selectedData = await db.query('SelectChannel');
       final selectedRecNos = selectedData.map((item) => (item['RecNo'] as num).toInt()).toSet();
 
       setState(() {
@@ -178,33 +185,38 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
         _selectedRecNos.addAll(selectedRecNos);
         isLoading = false;
       });
-      _animationController.forward();
-    } catch (e) {
+    } catch (error) {
       setState(() {
-        errorMessage = 'Error fetching channels: $e';
+        errorMessage = 'Error fetching channels: $error';
         isLoading = false;
       });
-      print('Error fetching channels: $e');
+      print('Error fetching channels: $error');
     }
   }
 
   Future<void> deleteChannel(int recNo) async {
     try {
-      print('Deleting channel with RecNo: $recNo');
-      await _database.delete('ChannelSetup', where: 'RecNo = ?', whereArgs: [recNo]);
-      await _database.delete('SelectChannel', where: 'RecNo = ?', whereArgs: [recNo]);
+      final db = await DatabaseManager().database;
+      await db.delete('ChannelSetup', where: 'RecNo = ?', whereArgs: [recNo]);
+      await db.delete('SelectChannel', where: 'RecNo = ?', whereArgs: [recNo]);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Channel deleted successfully', style: GoogleFonts.poppins(fontSize: 14)),
-          backgroundColor: AppColors.submitButton,
+          content: Text('Channel deleted successfully', style: GoogleFonts.montserrat(fontSize: 14)),
+          backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          margin: const EdgeInsets.all(16),
         ),
       );
       fetchChannels();
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error deleting channel: $e', style: GoogleFonts.poppins(fontSize: 14)),
-          backgroundColor: AppColors.errorText,
+          content: Text('Error deleting channel: $e', style: GoogleFonts.montserrat(fontSize: 14)),
+          backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          margin: const EdgeInsets.all(16),
         ),
       );
     }
@@ -212,10 +224,11 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
 
   Future<void> _saveSelectedChannels() async {
     try {
-      await _database.delete('SelectChannel');
+      final db = await DatabaseManager().database;
+      await db.delete('SelectChannel');
       for (int recNo in _selectedRecNos) {
         final channel = channels.firstWhere((c) => (c['RecNo'] as num).toInt() == recNo);
-        await _database.insert('SelectChannel', {
+        await db.insert('SelectChannel', {
           'RecNo': recNo,
           'ChannelName': channel['ChannelName'],
           'StartingCharacter': channel['StartingCharacter'],
@@ -226,18 +239,22 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            'Selected channels saved: ${_selectedRecNos.length}',
-            style: GoogleFonts.poppins(fontSize: 14),
-          ),
-          backgroundColor: AppColors.submitButton,
+          content: Text('Selected channels saved: ${_selectedRecNos.length}',
+              style: GoogleFonts.montserrat(fontSize: 14)),
+          backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          margin: const EdgeInsets.all(16),
         ),
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error saving channels: $e', style: GoogleFonts.poppins(fontSize: 14)),
-          backgroundColor: AppColors.errorText,
+          content: Text('Error saving channels: $e', style: GoogleFonts.montserrat(fontSize: 14)),
+          backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          margin: const EdgeInsets.all(16),
         ),
       );
     }
@@ -245,97 +262,52 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
 
   Future<void> _cancelSelection() async {
     try {
-      await _database.delete('SelectChannel');
+      final db = await DatabaseManager().database;
+      await db.delete('SelectChannel');
       setState(() {
         _selectedRecNos.clear();
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Selections cleared', style: GoogleFonts.poppins(fontSize: 14)),
-          backgroundColor: AppColors.submitButton,
+          content: Text('Selections cleared', style: GoogleFonts.montserrat(fontSize: 14)),
+          backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          margin: const EdgeInsets.all(16),
         ),
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error clearing selections: $e', style: GoogleFonts.poppins(fontSize: 14)),
-          backgroundColor: AppColors.errorText,
+          content: Text('Error clearing selections: $e', style: GoogleFonts.montserrat(fontSize: 14)),
+          backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          margin: const EdgeInsets.all(16),
         ),
       );
     }
   }
 
-  Future<bool> _showPasswordDialog() async {
-    String password = '';
-    const correctPassword = 'admin123';
-    bool isPasswordCorrect = false;
-
-    await showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text('Enter Password', style: GoogleFonts.poppins(fontWeight: FontWeight.w600)),
-          content: TextField(
-            obscureText: true,
-            decoration: InputDecoration(
-              labelText: 'Password',
-              labelStyle: GoogleFonts.poppins(),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-            ),
-            onChanged: (value) {
-              password = value;
-            },
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-              child: Text('Cancel', style: GoogleFonts.poppins()),
-            ),
-            TextButton(
-              onPressed: () {
-                if (password == correctPassword) {
-                  isPasswordCorrect = true;
-                  Navigator.of(context).pop();
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Incorrect password', style: GoogleFonts.poppins()),
-                      backgroundColor: AppColors.errorText,
-                    ),
-                  );
-                }
-              },
-              child: Text('Submit', style: GoogleFonts.poppins()),
-            ),
-          ],
-        );
-      },
-    );
-
-    return isPasswordCorrect;
-  }
-
   Future<void> _showAutoStartDialog() async {
-    // Fetch saved AutoStart settings
     TimeOfDay? dialogStartTime = _startTime;
     TimeOfDay? dialogEndTime = _endTime;
     final dialogScanTimeController = TextEditingController(text: _scanTimeController.text);
 
     try {
-      final autoStartData = await _database.query('AutoStart', limit: 1);
+      final db = await DatabaseManager().database;
+      final autoStartData = await db.query('AutoStart', limit: 1);
       if (autoStartData.isNotEmpty) {
         final autoStart = autoStartData.first;
         dialogStartTime = TimeOfDay(
-          hour: autoStart['StartTimeHr'] as int? ?? 0,
-          minute: autoStart['StartTimeMin'] as int? ?? 0,
+          hour: (autoStart['StartTimeHr'] as num?)?.toInt() ?? 0,
+          minute: (autoStart['StartTimeMin'] as num?)?.toInt() ?? 0,
         );
         dialogEndTime = TimeOfDay(
-          hour: autoStart['EndTimeHr'] as int? ?? 0,
-          minute: autoStart['EndTimeMin'] as int? ?? 0,
+          hour: (autoStart['EndTimeHr'] as num?)?.toInt() ?? 0,
+          minute: (autoStart['EndTimeMin'] as num?)?.toInt() ?? 0,
         );
-        dialogScanTimeController.text = (autoStart['ScanTimeSec'] as int? ?? '').toString();
+        dialogScanTimeController.text = (autoStart['ScanTimeSec'] as num?)?.toInt().toString() ?? '';
       }
     } catch (e) {
       print('Error loading AutoStart settings: $e');
@@ -344,199 +316,349 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     await showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: Colors.transparent,
-          contentPadding: EdgeInsets.zero,
-          content: Card(
-            color: Colors.white,
-            elevation: 8,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            child: Padding(
-              padding: const EdgeInsets.all(20.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Configure AutoStart',
-                    style: GoogleFonts.poppins(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(
-                      'Start Time',
-                      style: GoogleFonts.poppins(fontSize: 16, color: AppColors.textPrimary),
-                    ),
-                    subtitle: Text(
-                      dialogStartTime != null ? dialogStartTime!.format(context) : 'Select time',
-                      style: GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary.withOpacity(0.7)),
-                    ),
-                    onTap: () async {
-                      final selectedTime = await showTimePicker(
-                        context: context,
-                        initialTime: dialogStartTime ?? TimeOfDay.now(),
-                        builder: (context, child) {
-                          return Theme(
-                            data: ThemeData.light().copyWith(
-                              colorScheme: ColorScheme.light(
-                                primary: AppColors.submitButton,
-                                onPrimary: Colors.white,
-                              ),
-                            ),
-                            child: child!,
-                          );
-                        },
-                      );
-                      if (selectedTime != null) {
-                        setDialogState(() {
-                          dialogStartTime = selectedTime;
-                        });
-                      }
-                    },
-                  ),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(
-                      'End Time',
-                      style: GoogleFonts.poppins(fontSize: 16, color: AppColors.textPrimary),
-                    ),
-                    subtitle: Text(
-                      dialogEndTime != null ? dialogEndTime!.format(context) : 'Select time',
-                      style: GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary.withOpacity(0.7)),
-                    ),
-                    onTap: () async {
-                      final selectedTime = await showTimePicker(
-                        context: context,
-                        initialTime: dialogEndTime ?? TimeOfDay.now(),
-                        builder: (context, child) {
-                          return Theme(
-                            data: ThemeData.light().copyWith(
-                              colorScheme: ColorScheme.light(
-                                primary: AppColors.submitButton,
-                                onPrimary: Colors.white,
-                              ),
-                            ),
-                            child: child!,
-                          );
-                        },
-                      );
-                      if (selectedTime != null) {
-                        setDialogState(() {
-                          dialogEndTime = selectedTime;
-                        });
-                      }
-                    },
-                  ),
-                  TextField(
-                    controller: dialogScanTimeController,
-                    decoration: InputDecoration(
-                      labelText: 'Scan Time (seconds)',
-                      labelStyle: GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(color: AppColors.textPrimary.withOpacity(0.5)),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(color: AppColors.submitButton),
-                      ),
-                    ),
-                    keyboardType: TextInputType.number,
-                    onChanged: (value) {
-                      if (value.isNotEmpty && !RegExp(r'^\d+$').hasMatch(value)) {
-                        dialogScanTimeController.text = value.replaceAll(RegExp(r'[^\d]'), '');
-                        dialogScanTimeController.selection = TextSelection.fromPosition(
-                          TextPosition(offset: dialogScanTimeController.text.length),
-                        );
-                      }
-                    },
-                  ),
-                ],
-              ),
+        builder: (context, setDialogState) => Center(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: 400,
+              minWidth: 300,
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-              child: Text(
-                'Cancel',
-                style: GoogleFonts.poppins(
-                  fontSize: 14,
-                  color: AppColors.resetButton,
-                  fontWeight: FontWeight.w600,
+            child: Card(
+              elevation: ThemeColors.getColor('cardElevation', Global.isDarkMode.value),
+              color: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Configure AutoStart',
+                      style: GoogleFonts.montserrat(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        'Start Time',
+                        style: GoogleFonts.montserrat(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                        ),
+                      ),
+                      subtitle: Text(
+                        dialogStartTime != null ? dialogStartTime!.format(context) : 'Select time',
+                        style: GoogleFonts.montserrat(
+                          fontSize: 14,
+                          color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
+                        ),
+                      ),
+                      onTap: () async {
+                        final selectedTime = await showTimePicker(
+                          context: context,
+                          initialTime: dialogStartTime ?? TimeOfDay.now(),
+                          builder: (context, child) => Theme(
+                            data: ThemeData(
+                              colorScheme: ColorScheme(
+                                brightness: Global.isDarkMode.value ? Brightness.dark : Brightness.light,
+                                primary: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+                                onPrimary: Colors.white,
+                                secondary: ThemeColors.getColor('cardBackground', Global.isDarkMode.value),
+                                onSecondary: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                error: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+                                onError: Colors.white,
+                                background: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
+                                onBackground: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                surface: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
+                                onSurface: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                              ),
+                            ),
+                            child: child!,
+                          ),
+                        );
+                        if (selectedTime != null) {
+                          setDialogState(() {
+                            dialogStartTime = selectedTime;
+                          });
+                        }
+                      },
+                    ),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        'End Time',
+                        style: GoogleFonts.montserrat(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                        ),
+                      ),
+                      subtitle: Text(
+                        dialogEndTime != null ? dialogEndTime!.format(context) : 'Select time',
+                        style: GoogleFonts.montserrat(
+                          fontSize: 14,
+                          color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
+                        ),
+                      ),
+                      onTap: () async {
+                        final selectedTime = await showTimePicker(
+                          context: context,
+                          initialTime: dialogEndTime ?? TimeOfDay.now(),
+                          builder: (context, child) => Theme(
+                            data: ThemeData(
+                              colorScheme: ColorScheme(
+                                brightness: Global.isDarkMode.value ? Brightness.dark : Brightness.light,
+                                primary: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+                                onPrimary: Colors.white,
+                                secondary: ThemeColors.getColor('cardBackground', Global.isDarkMode.value),
+                                onSecondary: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                error: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+                                onError: Colors.white,
+                                background: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
+                                onBackground: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                surface: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
+                                onSurface: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                              ),
+                            ),
+                            child: child!,
+                          ),
+                        );
+                        if (selectedTime != null) {
+                          setDialogState(() {
+                            dialogEndTime = selectedTime;
+                          });
+                        }
+                      },
+                    ),
+                    TextField(
+                      controller: dialogScanTimeController,
+                      decoration: InputDecoration(
+                        labelText: 'Scan Time (seconds)',
+                        labelStyle: GoogleFonts.montserrat(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide.none,
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                            color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value),
+                            width: 1.5,
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                            color: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+                            width: 2,
+                          ),
+                        ),
+                        filled: true,
+                        fillColor: ThemeColors.getColor('textFieldBackground', Global.isDarkMode.value),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      ),
+                      style: GoogleFonts.montserrat(
+                        fontSize: 14,
+                        color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                      ),
+                      keyboardType: TextInputType.number,
+                      onChanged: (value) {
+                        if (value.isNotEmpty && !RegExp(r'^\d+$').hasMatch(value)) {
+                          dialogScanTimeController.text = value.replaceAll(RegExp(r'[^\d]'), '');
+                          dialogScanTimeController.selection = TextSelection.fromPosition(
+                            TextPosition(offset: dialogScanTimeController.text.length),
+                          );
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 24),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: Text(
+                            'Cancel',
+                            style: GoogleFonts.montserrat(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _buildButton(
+                          text: 'Save',
+                          icon: Icons.save,
+                          gradient: ThemeColors.getDialogButtonGradient(Global.isDarkMode.value, 'backup'),
+                          onTap: () async {
+                            if (dialogStartTime != null && dialogEndTime != null && dialogScanTimeController.text.isNotEmpty) {
+                              final scanTime = int.tryParse(dialogScanTimeController.text);
+                              if (scanTime == null || scanTime <= 0) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text('Please enter a valid positive scan time',
+                                        style: GoogleFonts.montserrat(fontSize: 14)),
+                                    backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+                                    behavior: SnackBarBehavior.floating,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                    margin: const EdgeInsets.all(16),
+                                  ),
+                                );
+                                return;
+                              }
+                              try {
+                                final db = await DatabaseManager().database;
+                                await db.delete('AutoStart');
+                                await db.insert('AutoStart', {
+                                  'StartTimeHr': dialogStartTime!.hour,
+                                  'StartTimeMin': dialogStartTime!.minute,
+                                  'EndTimeHr': dialogEndTime!.hour,
+                                  'EndTimeMin': dialogEndTime!.minute,
+                                  'ScanTimeSec': scanTime,
+                                });
+                                setState(() {
+                                  _startTime = dialogStartTime;
+                                  _endTime = dialogEndTime;
+                                  _scanTimeController.text = dialogScanTimeController.text;
+                                });
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text('AutoStart settings saved', style: GoogleFonts.montserrat(fontSize: 14)),
+                                    backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+                                    behavior: SnackBarBehavior.floating,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                    margin: const EdgeInsets.all(16),
+                                  ),
+                                );
+                                Navigator.of(context).pop();
+                              } catch (e) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text('Error saving AutoStart settings: $e',
+                                        style: GoogleFonts.montserrat(fontSize: 14)),
+                                    backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+                                    behavior: SnackBarBehavior.floating,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                    margin: const EdgeInsets.all(16),
+                                  ),
+                                );
+                              }
+                            } else {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Please fill all fields', style: GoogleFonts.montserrat(fontSize: 14)),
+                                  backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+                                  behavior: SnackBarBehavior.floating,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                  margin: const EdgeInsets.all(16),
+                                ),
+                              );
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ),
-            ElevatedButton(
-              onPressed: () async {
-                if (dialogStartTime != null && dialogEndTime != null && dialogScanTimeController.text.isNotEmpty) {
-                  final scanTime = int.tryParse(dialogScanTimeController.text);
-                  if (scanTime == null || scanTime <= 0) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('Please enter a valid positive scan time', style: GoogleFonts.poppins(fontSize: 14)),
-                        backgroundColor: AppColors.errorText,
-                      ),
-                    );
-                    return;
-                  }
-                  try {
-                    await _database.delete('AutoStart');
-                    await _database.insert('AutoStart', {
-                      'StartTimeHr': dialogStartTime!.hour,
-                      'StartTimeMin': dialogStartTime!.minute,
-                      'EndTimeHr': dialogEndTime!.hour,
-                      'EndTimeMin': dialogEndTime!.minute,
-                      'ScanTimeSec': scanTime,
-                    });
-                    setState(() {
-                      _startTime = dialogStartTime;
-                      _endTime = dialogEndTime;
-                      _scanTimeController.text = dialogScanTimeController.text;
-                    });
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('AutoStart settings saved', style: GoogleFonts.poppins(fontSize: 14)),
-                        backgroundColor: AppColors.submitButton,
-                      ),
-                    );
-                    Navigator.of(context).pop();
-                  } catch (e) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('Error saving AutoStart settings: $e', style: GoogleFonts.poppins(fontSize: 14)),
-                        backgroundColor: AppColors.errorText,
-                      ),
-                    );
-                  }
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Please fill all fields', style: GoogleFonts.poppins(fontSize: 14)),
-                      backgroundColor: AppColors.errorText,
-                    ),
-                  );
-                }
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.submitButton,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTableHeader(bool isDarkMode) {
+    return Card(
+      elevation: ThemeColors.getColor('cardElevation', isDarkMode),
+      color: ThemeColors.getColor('tableHeaderBackground', isDarkMode),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 40,
+              child: Checkbox(
+                value: channels.isNotEmpty && _selectedRecNos.length == channels.length,
+                onChanged: (value) {
+                  setState(() {
+                    if (value == true) {
+                      _selectedRecNos.clear();
+                      _selectedRecNos.addAll(channels.map((c) => (c['RecNo'] as num).toInt()));
+                    } else {
+                      _selectedRecNos.clear();
+                    }
+                  });
+                },
+                activeColor: ThemeColors.getColor('submitButton', isDarkMode),
+                checkColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode)),
               ),
+            ),
+            SizedBox(
+              width: 50,
               child: Text(
-                'Save',
-                style: GoogleFonts.poppins(
-                  fontSize: 14,
-                  color: Colors.white,
-                  fontWeight: FontWeight.w600,
+                'S.No',
+                style: GoogleFonts.montserrat(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: ThemeColors.getColor('dialogText', isDarkMode),
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 2,
+              child: Text(
+                'Channel',
+                style: GoogleFonts.montserrat(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: ThemeColors.getColor('dialogText', isDarkMode),
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 60,
+              child: Text(
+                'Unit',
+                style: GoogleFonts.montserrat(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: ThemeColors.getColor('dialogText', isDarkMode),
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 1,
+              child: Text(
+                'Start Char',
+                style: GoogleFonts.montserrat(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: ThemeColors.getColor('dialogText', isDarkMode),
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 80,
+              child: Text(
+                'Actions',
+                style: GoogleFonts.montserrat(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: ThemeColors.getColor('dialogText', isDarkMode),
                 ),
               ),
             ),
@@ -546,538 +668,553 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     );
   }
 
-  Widget _buildTableHeader() {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [AppColors.headerBackground, AppColors.headerBackground.withOpacity(0.9)],
+  Widget _buildTableRow(Map<String, dynamic> channel, int index, bool isDarkMode) {
+    final recNo = (channel['RecNo'] as num).toInt();
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isRowHovered = true),
+      onExit: (_) => setState(() => _isRowHovered = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeInOut,
+        decoration: BoxDecoration(
+          color: _selectedRecNos.contains(recNo)
+              ? ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.2)
+              : index.isEven
+              ? ThemeColors.getColor('cardBackground', isDarkMode)
+              : ThemeColors.getColor('tableRowAlternate', isDarkMode),
+          border: Border(
+            bottom: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 0.5),
+          ),
+          boxShadow: _isRowHovered
+              ? [
+            BoxShadow(
+              color: ThemeColors.getColor('buttonHover', isDarkMode).withOpacity(0.2),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ]
+              : [],
         ),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.15),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 40,
-            child: Checkbox(
-              value: channels.isNotEmpty && _selectedRecNos.length == channels.length,
-              onChanged: (value) {
-                setState(() {
-                  if (value == true) {
-                    _selectedRecNos.clear();
-                    _selectedRecNos.addAll(channels.map((c) => (c['RecNo'] as num).toInt()));
-                  } else {
-                    _selectedRecNos.clear();
-                  }
-                });
-              },
-              activeColor: AppColors.submitButton,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-            ),
-          ),
-          SizedBox(
-            width: 50,
-            child: Text(
-              'S.No',
-              style: GoogleFonts.poppins(
-                fontWeight: FontWeight.w700,
-                fontSize: 14,
-                color: Colors.black,
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 40,
+              child: Checkbox(
+                value: _selectedRecNos.contains(recNo),
+                onChanged: (value) {
+                  setState(() {
+                    if (value == true) {
+                      _selectedRecNos.add(recNo);
+                    } else {
+                      _selectedRecNos.remove(recNo);
+                    }
+                  });
+                },
+                activeColor: ThemeColors.getColor('submitButton', isDarkMode),
+                checkColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode)),
               ),
             ),
-          ),
-          Expanded(
-            flex: 2,
-            child: Text(
-              'Channel',
-              style: GoogleFonts.poppins(
-                fontWeight: FontWeight.w700,
-                fontSize: 14,
-                color: Colors.black,
+            SizedBox(
+              width: 50,
+              child: Text(
+                '$recNo',
+                style: GoogleFonts.montserrat(
+                  fontSize: 13,
+                  color: ThemeColors.getColor('cardText', isDarkMode),
+                ),
               ),
             ),
-          ),
-          SizedBox(
-            width: 60,
-            child: Text(
-              'Unit',
-              style: GoogleFonts.poppins(
-                fontWeight: FontWeight.w700,
-                fontSize: 14,
-                color: Colors.black,
+            Expanded(
+              flex: 2,
+              child: Text(
+                channel['ChannelName'] ?? '',
+                style: GoogleFonts.montserrat(
+                  fontSize: 13,
+                  color: ThemeColors.getColor('cardText', isDarkMode),
+                ),
               ),
             ),
-          ),
-          Expanded(
-            flex: 1,
-            child: Text(
-              'Start Char',
-              style: GoogleFonts.poppins(
-                fontWeight: FontWeight.w700,
-                fontSize: 14,
-                color: Colors.black,
+            SizedBox(
+              width: 60,
+              child: Text(
+                channel['Unit'] ?? '',
+                style: GoogleFonts.montserrat(
+                  fontSize: 13,
+                  color: ThemeColors.getColor('cardText', isDarkMode),
+                ),
               ),
             ),
-          ),
-          SizedBox(
-            width: 80,
-            child: Text(
-              'Actions',
-              style: GoogleFonts.poppins(
-                fontWeight: FontWeight.w700,
-                fontSize: 14,
-                color: Colors.black,
+            Expanded(
+              flex: 1,
+              child: Text(
+                channel['StartingCharacter'] ?? '',
+                style: GoogleFonts.montserrat(
+                  fontSize: 13,
+                  color: ThemeColors.getColor('cardText', isDarkMode),
+                ),
               ),
             ),
-          ),
-        ],
+            SizedBox(
+              width: 80,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: Icon(Icons.edit, color: ThemeColors.getColor('submitButton', isDarkMode), size: 22),
+                    onPressed: () async {
+                      final result = await Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (context) => EditChannelScreen(channel: channel)),
+                      );
+                      if (result == true) {
+                        fetchChannels();
+                      }
+                    },
+                    tooltip: 'Edit Channel',
+                  ),
+                  IconButton(
+                    icon: Icon(Icons.delete, color: ThemeColors.getColor('resetButton', isDarkMode), size: 22),
+                    onPressed: () => deleteChannel(recNo),
+                    tooltip: 'Delete Channel',
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _buildTableRow(Map<String, dynamic> channel, int index) {
-    final recNo = (channel['RecNo'] as num).toInt();
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 200),
-      curve: Curves.easeInOut,
-      decoration: BoxDecoration(
-        color: _selectedRecNos.contains(recNo)
-            ? AppColors.selectedRow.withOpacity(0.3)
-            : AppColors.cardBackground,
-        border: Border(
-          bottom: BorderSide(color: Colors.grey.shade200, width: 0.5),
-        ),
-      ),
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 40,
-            child: Checkbox(
-              value: _selectedRecNos.contains(recNo),
-              onChanged: (value) {
-                setState(() {
-                  if (value == true) {
-                    _selectedRecNos.add(recNo);
-                  } else {
-                    _selectedRecNos.remove(recNo);
-                  }
-                });
-              },
-              activeColor: AppColors.submitButton,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+  Widget _buildButton({
+    required String text,
+    IconData? icon,
+    required LinearGradient gradient,
+    required VoidCallback onTap,
+    bool isProminent = false,
+  }) {
+    bool isHovered = false;
+    return StatefulBuilder(
+      builder: (context, setState) => MouseRegion(
+        onEnter: (_) => setState(() => isHovered = true),
+        onExit: (_) => setState(() => isHovered = false),
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            padding: EdgeInsets.symmetric(
+              horizontal: isProminent ? 28 : 20,
+              vertical: isProminent ? 16 : 12,
             ),
-          ),
-          SizedBox(
-            width: 50,
-            child: Text(
-              '$recNo',
-              style: GoogleFonts.poppins(fontSize: 12, color: AppColors.textPrimary),
+            decoration: BoxDecoration(
+              gradient: isHovered
+                  ? LinearGradient(
+                colors: [
+                  ThemeColors.getColor('buttonHover', Global.isDarkMode.value),
+                  ThemeColors.getColor('buttonGradientEnd', Global.isDarkMode.value),
+                ],
+              )
+                  : gradient,
+              borderRadius: BorderRadius.circular(14),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(isProminent ? 0.3 : 0.2),
+                  blurRadius: isProminent ? 10 : 8,
+                  offset: const Offset(0, 4),
+                ),
+              ],
             ),
-          ),
-          Expanded(
-            flex: 2,
-            child: Text(
-              channel['ChannelName'] ?? '',
-              style: GoogleFonts.poppins(fontSize: 12, color: AppColors.textPrimary),
-            ),
-          ),
-          SizedBox(
-            width: 60,
-            child: Text(
-              channel['Unit'] ?? '',
-              style: GoogleFonts.poppins(fontSize: 12, color: AppColors.textPrimary),
-            ),
-          ),
-          Expanded(
-            flex: 1,
-            child: Text(
-              channel['StartingCharacter'] ?? '',
-              style: GoogleFonts.poppins(fontSize: 12, color: AppColors.textPrimary),
-            ),
-          ),
-          SizedBox(
-            width: 80,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                IconButton(
-                  icon: const Icon(Icons.edit, color: AppColors.submitButton, size: 20),
-                  onPressed: () async {
-                    final result = await Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => EditChannelScreen(channel: channel),
-                      ),
-                    );
-                    if (result == true) {
-                      fetchChannels();
-                    }
-                  },
-                  tooltip: 'Edit Channel',
-                ),
-                IconButton(
-                  icon: const Icon(Icons.delete, color: AppColors.resetButton, size: 20),
-                  onPressed: () => deleteChannel(recNo),
-                  tooltip: 'Delete Channel',
+                if (icon != null) ...[
+                  Icon(icon, color: Colors.white, size: 24),
+                  const SizedBox(width: 10),
+                ],
+                Text(
+                  text,
+                  style: GoogleFonts.montserrat(
+                    fontSize: isProminent ? 16 : 14,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: SafeArea(
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: FadeTransition(
-              opacity: _fadeAnimation,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Select Port',
-                    style: GoogleFonts.poppins(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Card(
-                    elevation: 1,
-                    color: AppColors.cardBackground,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white.withOpacity(0.15)),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.05),
-                            blurRadius: 8,
-                            offset: const Offset(0, 4),
+    return ValueListenableBuilder<bool>(
+      valueListenable: Global.isDarkMode,
+      builder: (context, isDarkMode, _) {
+        return Scaffold(
+          backgroundColor: ThemeColors.getColor('appBackground', isDarkMode),
+          body: SafeArea(
+            child: SingleChildScrollView(
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: FadeTransition(
+                  opacity: _fadeAnimation,
+                  child: ScaleTransition(
+                    scale: _scaleAnimation,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Select Port',
+                          style: GoogleFonts.montserrat(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w700,
+                            color: ThemeColors.getColor('dialogText', isDarkMode),
                           ),
-                        ],
-                      ),
-                      padding: const EdgeInsets.all(16.0),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: ValueListenableBuilder<String>(
-                              valueListenable: Global.selectedPort,
-                              builder: (context, selectedPort, _) {
-                                return DropdownButtonFormField<String>(
-                                  value: ports.contains(selectedPort)
-                                      ? selectedPort
-                                      : ports.isNotEmpty
-                                      ? ports[0]
-                                      : null,
-                                  decoration: InputDecoration(
-                                    labelText: 'Port',
-                                    labelStyle: GoogleFonts.poppins(
-                                      fontSize: 14,
-                                      color: AppColors.textPrimary.withOpacity(0.8),
-                                    ),
-                                    filled: true,
-                                    fillColor: Colors.white.withOpacity(0.1),
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: BorderSide(
-                                        color: AppColors.textPrimary.withOpacity(0.5),
-                                        width: 1,
-                                      ),
-                                    ),
-                                    enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: BorderSide(
-                                        color: AppColors.textPrimary.withOpacity(0.5),
-                                        width: 1,
-                                      ),
-                                    ),
-                                    focusedBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: BorderSide(
-                                        color: AppColors.submitButton,
-                                        width: 1.5,
-                                      ),
-                                    ),
-                                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                                    prefixIcon: Icon(
-                                      Icons.usb,
-                                      size: 20,
-                                      color: AppColors.textPrimary.withOpacity(0.8),
+                        ),
+                        const SizedBox(height: 16),
+                        MouseRegion(
+                          onEnter: (_) => setState(() => _isDropdownHovered = true),
+                          onExit: (_) => setState(() => _isDropdownHovered = false),
+                          child: Card(
+                            elevation: _isDropdownHovered ? 8.0 : ThemeColors.getColor('cardElevation', isDarkMode),
+                            color: ThemeColors.getColor('dropdownBackground', isDarkMode),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            child: Container(
+                              padding: const EdgeInsets.all(20.0),
+                              decoration: BoxDecoration(
+                                border: Border.all(
+                                  color: _isDropdownHovered
+                                      ? ThemeColors.getColor('submitButton', isDarkMode)
+                                      : ThemeColors.getColor('cardBorder', isDarkMode),
+                                  width: _isDropdownHovered ? 2.0 : 1.5,
+                                ),
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: ValueListenableBuilder<String>(
+                                      valueListenable: Global.selectedPort,
+                                      builder: (context, selectedPort, _) {
+                                        return DropdownButtonFormField<String>(
+                                          value: ports.contains(selectedPort)
+                                              ? selectedPort
+                                              : ports.isNotEmpty
+                                              ? ports[0]
+                                              : null,
+                                          decoration: InputDecoration(
+                                            labelText: 'Port',
+                                            labelStyle: GoogleFonts.montserrat(
+                                              fontSize: 15,
+                                              fontWeight: FontWeight.w500,
+                                              color: ThemeColors.getColor('dialogSubText', isDarkMode),
+                                            ),
+                                            filled: true,
+                                            fillColor: ThemeColors.getColor('dropdownBackground', isDarkMode),
+                                            border: OutlineInputBorder(
+                                              borderRadius: BorderRadius.circular(12),
+                                              borderSide: BorderSide.none,
+                                            ),
+                                            enabledBorder: OutlineInputBorder(
+                                              borderRadius: BorderRadius.circular(12),
+                                              borderSide: BorderSide(
+                                                color: ThemeColors.getColor('cardBorder', isDarkMode),
+                                                width: 1.5,
+                                              ),
+                                            ),
+                                            focusedBorder: OutlineInputBorder(
+                                              borderRadius: BorderRadius.circular(12),
+                                              borderSide: BorderSide(
+                                                color: ThemeColors.getColor('submitButton', isDarkMode),
+                                                width: 2.5,
+                                              ),
+                                            ),
+                                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                                            prefixIcon: Icon(
+                                              Icons.usb,
+                                              size: 24,
+                                              color: ThemeColors.getColor('cardIcon', isDarkMode),
+                                            ),
+                                          ),
+                                          style: GoogleFonts.montserrat(
+                                            fontSize: 14,
+                                            color: ThemeColors.getColor('dialogText', isDarkMode),
+                                          ),
+                                          dropdownColor: isDarkMode ? ThemeColors.getColor('dropdownBackground', isDarkMode) : Colors.white, // Adjusted dropdown color for dark mode
+                                          items: ports.map((port) {
+                                            return DropdownMenuItem<String>(
+                                              value: port,
+                                              child: Text(
+                                                port,
+                                                style: GoogleFonts.montserrat(
+                                                  fontSize: 14,
+                                                  color: ThemeColors.getColor('dialogText', isDarkMode),
+                                                ),
+                                              ),
+                                            );
+                                          }).toList(),
+                                          onChanged: (value) {
+                                            if (value != null) {
+                                              Global.selectedPort.value = value;
+                                              // Extract port name and details from the string
+                                              final parts = value.split(' → ');
+                                              String portName = parts[0];
+                                              if (parts.length > 1) { // Ensure details part exists
+                                                final details = parts[1];
+                                                final baudRate = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
+                                                final dataBits = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
+                                                final parity = details.split(', ')[2].split(': ')[1];
+                                                final stopBits = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
+
+                                                Global.baudRate.value = baudRate;
+                                                Global.dataBits.value = dataBits;
+                                                Global.parity.value = parity;
+                                                Global.stopBits.value = stopBits;
+                                                _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
+                                              } else {
+                                                // Handle "No Ports Detected" or "Error Fetching Ports" case
+                                                Global.baudRate.value = 9600;
+                                                Global.dataBits.value = 8;
+                                                Global.parity.value = 'None';
+                                                Global.stopBits.value = 1;
+                                                _savePortDetails(portName, 9600, 8, 'None', 1);
+                                              }
+                                            }
+                                          },
+                                        );
+                                      },
                                     ),
                                   ),
-                                  style: GoogleFonts.poppins(fontSize: 14, color: AppColors.textPrimary),
-                                  dropdownColor: AppColors.cardBackground,
-                                  items: ports.map((port) {
-                                    return DropdownMenuItem<String>(
-                                      value: port,
-                                      child: Text(port, style: GoogleFonts.poppins(fontSize: 14)),
-                                    );
-                                  }).toList(),
-                                  onChanged: (value) {
-                                    if (value != null) {
-                                      Global.selectedPort.value = value;
-                                      final portName = value.split(' → ')[0];
-                                      final details = value.split(' → ')[1];
-                                      final baudRate = int.parse(details.split(', ')[0].split(': ')[1]);
-                                      final dataBits = int.parse(details.split(', ')[1].split(': ')[1]);
-                                      final parity = details.split(', ')[2].split(': ')[1];
-                                      final stopBits = int.parse(details.split(', ')[3].split(': ')[1]);
-                                      Global.baudRate.value = baudRate;
-                                      Global.dataBits.value = dataBits;
-                                      Global.parity.value = parity;
-                                      Global.stopBits.value = stopBits;
-                                      _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
-                                    }
-                                  },
-                                );
-                              },
+                                  const SizedBox(width: 16),
+                                  _buildButton(
+                                    text: '',
+                                    icon: Icons.refresh,
+                                    gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'backup'),
+                                    onTap: _fetchPorts,
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
-                          const SizedBox(width: 12),
-                          InkWell(
-                            onTap: _fetchPorts,
-                            borderRadius: BorderRadius.circular(12),
+                        ),
+                        const SizedBox(height: 24),
+                        Text(
+                          'AutoStart Configuration',
+                          style: GoogleFonts.montserrat(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w700,
+                            color: ThemeColors.getColor('dialogText', isDarkMode),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Card(
+                          elevation: ThemeColors.getColor('cardElevation', isDarkMode),
+                          color: ThemeColors.getColor('cardBackground', isDarkMode),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          child: InkWell(
+                            onTap: _showAutoStartDialog,
+                            borderRadius: BorderRadius.circular(16),
                             child: Container(
-                              padding: const EdgeInsets.all(8),
+                              padding: const EdgeInsets.all(20),
                               decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  colors: [
-                                    AppColors.submitButton,
-                                    AppColors.submitButton.withOpacity(0.9),
-                                  ],
+                                border: Border.all(
+                                  color: ThemeColors.getColor('cardBorder', isDarkMode),
+                                  width: 1.5,
                                 ),
-                                borderRadius: BorderRadius.circular(12),
+                                borderRadius: BorderRadius.circular(16),
                               ),
-                              child: const Icon(
-                                Icons.refresh,
-                                color: Colors.white,
-                                size: 20,
+                              child: Row(
+                                children: [
+                                  Icon(Icons.timer, color: ThemeColors.getColor('submitButton', isDarkMode), size: 28),
+                                  const SizedBox(width: 12),
+                                  Text(
+                                    'Configure AutoStart',
+                                    style: GoogleFonts.montserrat(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: ThemeColors.getColor('dialogText', isDarkMode),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  Text(
-                    'AutoStart Configuration',
-                    style: GoogleFonts.poppins(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Card(
-                    elevation: 1,
-                    color: AppColors.cardBackground,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    child: InkWell(
-                      onTap: _showAutoStartDialog,
-                      borderRadius: BorderRadius.circular(16),
-                      child: Container(
-                        padding: const EdgeInsets.all(16),
-                        child: Row(
-                          children: [
-                            Icon(Icons.timer, color: AppColors.submitButton),
-                            const SizedBox(width: 12),
-                            Text(
-                              'Configure AutoStart Settings',
-                              style: GoogleFonts.poppins(
-                                fontSize: 16,
-                                color: AppColors.textPrimary,
+                        ),
+                        const SizedBox(height: 24),
+                        Text(
+                          'Authentication Settings',
+                          style: GoogleFonts.montserrat(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w700,
+                            color: ThemeColors.getColor('dialogText', isDarkMode),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Card(
+                          elevation: ThemeColors.getColor('cardElevation', isDarkMode),
+                          color: ThemeColors.getColor('cardBackground', isDarkMode),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          child: InkWell(
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(builder: (context) => const AuthSettingsScreen()),
+                              );
+                            },
+                            borderRadius: BorderRadius.circular(16),
+                            child: Container(
+                              padding: const EdgeInsets.all(20),
+                              decoration: BoxDecoration(
+                                border: Border.all(
+                                  color: ThemeColors.getColor('cardBorder', isDarkMode),
+                                  width: 1.5,
+                                ),
+                                borderRadius: BorderRadius.circular(16),
                               ),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.lock, color: ThemeColors.getColor('submitButton', isDarkMode), size: 28),
+                                  const SizedBox(width: 12),
+                                  Text(
+                                    'Configure Authentication',
+                                    style: GoogleFonts.montserrat(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: ThemeColors.getColor('dialogText', isDarkMode),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        Text(
+                          'Channels',
+                          style: GoogleFonts.montserrat(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w700,
+                            color: ThemeColors.getColor('dialogText', isDarkMode),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Card(
+                          elevation: ThemeColors.getColor('cardElevation', isDarkMode),
+                          color: ThemeColors.getColor('cardBackground', isDarkMode),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                color: ThemeColors.getColor('cardBorder', isDarkMode),
+                                width: 1.5,
+                              ),
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            height: 400,
+                            child: isLoading
+                                ? Center(
+                              child: CircularProgressIndicator(
+                                color: ThemeColors.getColor('submitButton', isDarkMode),
+                                strokeWidth: 3,
+                              ),
+                            )
+                                : errorMessage != null
+                                ? Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.error_outline,
+                                    color: ThemeColors.getColor('errorText', isDarkMode),
+                                    size: 48,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    errorMessage!,
+                                    style: GoogleFonts.montserrat(
+                                      fontSize: 14,
+                                      color: ThemeColors.getColor('dialogText', isDarkMode),
+                                    ),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                  const SizedBox(height: 24),
+                                  _buildButton(
+                                    text: 'Retry',
+                                    icon: Icons.refresh,
+                                    gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'backup'),
+                                    onTap: fetchChannels,
+                                  ),
+                                ],
+                              ),
+                            )
+                                : channels.isEmpty
+                                ? Center(
+                              child: Text(
+                                'No channels found',
+                                style: GoogleFonts.montserrat(
+                                  fontSize: 14,
+                                  color: ThemeColors.getColor('dialogText', isDarkMode),
+                                ),
+                              ),
+                            )
+                                : Scrollbar(
+                              child: SingleChildScrollView(
+                                scrollDirection: Axis.vertical,
+                                child: SizedBox(
+                                  width: MediaQuery.of(context).size.width - 48,
+                                  child: Column(
+                                    children: [
+                                      _buildTableHeader(isDarkMode),
+                                      ...channels.asMap().entries.map((entry) {
+                                        return _buildTableRow(entry.value, entry.key, isDarkMode);
+                                      }),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            _buildButton(
+                              text: 'Reset',
+                              icon: Icons.clear,
+                              gradient: LinearGradient(
+                                colors: [
+                                  ThemeColors.getColor('resetButton', isDarkMode),
+                                  ThemeColors.getColor('resetButton', isDarkMode).withOpacity(0.8),
+                                ],
+                              ),
+                              onTap: _cancelSelection,
+                            ),
+                            const SizedBox(width: 16),
+                            _buildButton(
+                              text: 'Submit',
+                              icon: Icons.check,
+                              gradient: ThemeColors.getButtonGradient(isDarkMode),
+                              onTap: _saveSelectedChannels,
+                              isProminent: true,
                             ),
                           ],
                         ),
-                      ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 24),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'Channels',
-                        style: GoogleFonts.poppins(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary,
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.add_circle, color: AppColors.submitButton, size: 30),
-                        onPressed: () async {
-                          final isAuthorized = await _showPasswordDialog();
-                          if (isAuthorized) {
-                            final result = await Navigator.push(
-                              context,
-                              MaterialPageRoute(builder: (context) => const EditChannelScreen()),
-                            );
-                            if (result == true) {
-                              fetchChannels();
-                            }
-                          }
-                        },
-                        tooltip: 'Add Channel',
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Card(
-                    elevation: 1,
-                    color: AppColors.cardBackground,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white.withOpacity(0.15)),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.05),
-                            blurRadius: 8,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      height: 400,
-                      child: isLoading
-                          ? const Center(
-                        child: CircularProgressIndicator(
-                          color: AppColors.submitButton,
-                          strokeWidth: 2,
-                        ),
-                      )
-                          : errorMessage != null
-                          ? Center(
-                        child: Text(
-                          errorMessage!,
-                          style: GoogleFonts.poppins(
-                            color: AppColors.errorText,
-                            fontSize: 14,
-                          ),
-                        ),
-                      )
-                          : channels.isEmpty
-                          ? Center(
-                        child: Text(
-                          'No channels found',
-                          style: GoogleFonts.poppins(
-                            fontSize: 14,
-                            color: AppColors.textPrimary,
-                          ),
-                        ),
-                      )
-                          : Scrollbar(
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.vertical,
-                          child: SizedBox(
-                            width: MediaQuery.of(context).size.width - 32,
-                            child: Column(
-                              children: [
-                                _buildTableHeader(),
-                                ...channels.asMap().entries.map((entry) {
-                                  return _buildTableRow(entry.value, entry.key);
-                                }),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      GestureDetector(
-                        onTap: _cancelSelection,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [
-                                AppColors.resetButton,
-                                AppColors.resetButton.withOpacity(0.9),
-                              ],
-                            ),
-                            borderRadius: BorderRadius.circular(12),
-                            boxShadow: [
-                              BoxShadow(
-                                color: AppColors.resetButton.withOpacity(0.3),
-                                blurRadius: 8,
-                                offset: const Offset(0, 4),
-                              ),
-                            ],
-                          ),
-                          child: Text(
-                            'Reset',
-                            style: GoogleFonts.poppins(
-                              fontSize: 14,
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      GestureDetector(
-                        onTap: _saveSelectedChannels,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [
-                                AppColors.submitButton,
-                                AppColors.submitButton.withOpacity(0.9),
-                              ],
-                            ),
-                            borderRadius: BorderRadius.circular(12),
-                            boxShadow: [
-                              BoxShadow(
-                                color: AppColors.submitButton.withOpacity(0.3),
-                                blurRadius: 8,
-                                offset: const Offset(0, 4),
-                              ),
-                            ],
-                          ),
-                          child: Text(
-                            'Submit',
-                            style: GoogleFonts.poppins(
-                              fontSize: 14,
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+                ),
               ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }

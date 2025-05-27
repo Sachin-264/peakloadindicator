@@ -1,17 +1,22 @@
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:fl_chart/fl_chart.dart';
-import '../../constants/colors.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'dart:convert';
+// import 'dart:convert';
+import '../../constants/database_manager.dart';
 import '../../constants/export.dart';
-import 'package:desktop_multi_window/desktop_multi_window.dart';
 import '../../constants/global.dart';
-import '../homepage.dart';
+import '../../constants/theme.dart';
+import '../NavPages/channel.dart';
+import '../Secondary_window/save_secondary_window.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
+import 'package:path/path.dart' as path;
+import '../logScreen/log.dart';
 
 class OpenFilePage extends StatefulWidget {
   final String fileName;
@@ -37,11 +42,14 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
   final ScrollController _tableVerticalScrollController = ScrollController();
   final GlobalKey _graphKey = GlobalKey();
 
+  final List<OverlayEntry> _windowEntries = [];
   bool isDisplaying = false;
   String? selectedChannel;
   List<Map<String, dynamic>> tableData = [];
   Map<int, String> channelNames = {};
-  Map<int, Color> channelColors = {};
+  Map<int, Color> graphLineColour = {};
+  Map<String, Channel> _channelSetupData = {};
+
   int currentSegment = 0;
   int totalSegments = 1;
   double minYValue = 0;
@@ -55,19 +63,22 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
   bool showPeak = false;
   late Database _database;
   bool _isDatabaseInitialized = false;
-  bool _isLoading = false;
+  bool _isLoading = true;
   String? _fetchError;
+  String get _currentTime => DateTime.now().toIso8601String().substring(0, 19);
+
 
   @override
   void initState() {
     super.initState();
     _initializeControllers();
-    _animationController = AnimationController(vsync: this, duration: Duration(milliseconds: 500));
+    _animationController = AnimationController(vsync: this, duration: const Duration(milliseconds: 500));
     _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(_animationController);
     _graphVisibleMinController.addListener(_updateGraphSegments);
 
     Global.selectedRecNo?.addListener(_onRecNoChanged);
     Global.selectedFileName.addListener(_onGlobalChanged);
+    Global.selectedDBName.addListener(_onGlobalChanged);
     Global.operatorName.addListener(_onGlobalChanged);
     Global.scanningRateHH.addListener(_onGlobalChanged);
     Global.scanningRateMM.addListener(_onGlobalChanged);
@@ -76,37 +87,88 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     Global.testDurationHH.addListener(_onGlobalChanged);
     Global.testDurationMM.addListener(_onGlobalChanged);
     Global.testDurationSS.addListener(_onGlobalChanged);
+    Global.isDarkMode.addListener(_onThemeChanged);
 
-    // Initialize database and fetch data sequentially
     _initializeAndFetchData();
+    LogPage.addLog('[$_currentTime] [INIT_STATE] Initialized OpenFilePage with fileName: ${widget.fileName}');
+  }
 
-    print('[INIT_STATE] Initialized OpenFilePage with fileName: ${widget.fileName}');
+  void _onThemeChanged() {
+    if (mounted) {
+      setState(() {
+        LogPage.addLog('[$_currentTime] Theme changed. DarkMode: ${Global.isDarkMode.value}');
+      });
+    }
   }
 
   Future<void> _initializeAndFetchData() async {
     setState(() {
       _isLoading = true;
+      _fetchError = null;
     });
-    await _initializeDatabase();
-    setState(() {
-      _isDatabaseInitialized = true;
-      _isLoading = false;
-    });
-    fetchData(showFull: true);
+    try {
+      await _initializeDatabase();
+      await _fetchChannelSetupData();
+      setState(() {
+        _isDatabaseInitialized = true;
+      });
+      await fetchData(showFull: true);
+    } catch (e) {
+      LogPage.addLog('[$_currentTime] Error during initialization or initial fetch: $e');
+      setState(() {
+        _fetchError = 'Error initializing: $e';
+        _isLoading = false;
+      });
+    }
   }
 
   Future<void> _initializeDatabase() async {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
-    final databasesPath = await getDatabasesPath();
-    final path = '$databasesPath/Countronics.db';
-    _database = await openDatabase(path);
-    print('[INITIALIZE_DATABASE] Database initialized at path: $path');
+    final appDocumentsDir = await getApplicationSupportDirectory();
+    final dataDirPath = path.join(appDocumentsDir.path, 'CountronicsData');
+    await Directory(dataDirPath).create(recursive: true);
+
+    final dbName = Global.selectedDBName.value ?? 'Countronics.db';
+    final dbPath = path.join(dataDirPath, dbName);
+
+    _database = await openDatabase(
+      dbPath,
+      onOpen: (db) async {
+        await db.execute('PRAGMA key = "Countronics2025"');
+      },
+    );
+    LogPage.addLog('[$_currentTime] [INITIALIZE_DATABASE] Database initialized at path: $dbPath');
+  }
+
+  Future<void> _fetchChannelSetupData() async {
+    if (!_isDatabaseInitialized) return;
+    try {
+      final List<Map<String, dynamic>> channelSetupRaw = await _database.query('ChannelSetup');
+      _channelSetupData.clear();
+      for (var row in channelSetupRaw) {
+        final channel = Channel.fromJson(row);
+        if (channel.channelName.isNotEmpty) {
+          _channelSetupData[channel.channelName] = channel;
+        }
+      }
+      LogPage.addLog('[$_currentTime] Fetched ${_channelSetupData.length} entries from ChannelSetup');
+    } catch (e) {
+      LogPage.addLog('[$_currentTime] Error fetching ChannelSetup data: $e');
+    }
   }
 
   Future<void> fetchData({bool showFull = false}) async {
     if (!_isDatabaseInitialized || Global.selectedRecNo?.value == null) {
-      print('[FETCH_DATA] Skipping fetch: database not initialized or RecNo is null');
+      LogPage.addLog('[$_currentTime] [FETCH_DATA] Skipping fetch: database not initialized or RecNo is null');
+      setState(() {
+        _isLoading = false;
+        if (Global.selectedRecNo?.value == null) {
+          _fetchError = "No record selected to fetch data.";
+        } else {
+          _fetchError = "Database not ready.";
+        }
+      });
       return;
     }
     setState(() {
@@ -114,26 +176,20 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       _fetchError = null;
     });
     try {
-      print('[FETCH_DATA] Fetching data for RecNo: ${Global.selectedRecNo!.value}');
+      LogPage.addLog('[$_currentTime] [FETCH_DATA] Fetching data for RecNo: ${Global.selectedRecNo!.value}');
 
-      // Query Test1 table
       final test1Data = await _database.query(
         'Test1',
         where: 'RecNo = ?',
         whereArgs: [Global.selectedRecNo!.value],
       );
-      print('[FETCH_DATA] Test1 data retrieved: ${test1Data.length} rows');
-
-      // Query Test2 table
       final test2Data = await _database.query(
         'Test2',
         where: 'RecNo = ?',
         whereArgs: [Global.selectedRecNo!.value],
       );
-      print('[FETCH_DATA] Test2 data retrieved: ${test2Data.length} rows');
 
       setState(() {
-        // Process Test1 data
         tableData = test1Data.map((row) {
           final newRow = Map<String, dynamic>.from(row);
           for (int i = 1; i <= 50; i++) {
@@ -144,20 +200,22 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
           return newRow;
         }).toList();
 
-        // Process Test2 data
         final test2Row = test2Data.isNotEmpty ? test2Data[0] : {};
-
         channelNames.clear();
-        channelColors.clear();
+        graphLineColour.clear();
         maxLoadValues.clear();
-        List<int> channelIndices = [];
+
         for (int i = 1; i <= 50; i++) {
           String? name = test2Row['ChannelName$i']?.toString().trim();
           if (name != null && name.isNotEmpty && name != 'null') {
-            channelIndices.add(i);
             channelNames[i] = name;
-            channelColors[i] = _getDefaultColor(i);
-            print('[FETCH_DATA] Loaded channel $i: $name');
+            final setupChannel = _channelSetupData[name];
+            if (setupChannel != null && setupChannel.graphLineColour != 0 && setupChannel.graphLineColour != const Color(0xFF000000).value) {
+              graphLineColour[i] = Color(setupChannel.graphLineColour);
+            } else {
+              graphLineColour[i] = _getDefaultColor(i);
+            }
+
             if (tableData.isNotEmpty) {
               var values = tableData
                   .map((row) => (row['AbsPer$i'] as num?)?.toDouble())
@@ -169,7 +227,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
               }
             }
           } else {
-            print('[FETCH_DATA] Channel $i is null or empty');
             break;
           }
         }
@@ -179,9 +236,9 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         _calculateYRange();
         _initializeControllers();
       });
-      print('[FETCH_DATA] Data fetched successfully, tableData length: ${tableData.length}, channels: ${channelNames.length}');
+      LogPage.addLog('[$_currentTime] [FETCH_DATA] Data fetched successfully.');
     } catch (e) {
-      print('[FETCH_DATA] Error fetching data: $e');
+      LogPage.addLog('[$_currentTime] [FETCH_DATA] Error fetching data: $e');
       setState(() {
         _fetchError = 'Error fetching data: $e';
       });
@@ -202,16 +259,12 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     _testDurationHrController.text = Global.testDurationHH.value?.toString() ?? '0';
     _testDurationMinController.text = Global.testDurationMM.value?.toString() ?? '0';
     _testDurationSecController.text = Global.testDurationSS.value?.toString() ?? '0';
-    print('[INITIALIZE_CONTROLLERS] Controllers initialized with values: '
-        'fileName=${_fileNameController.text}, '
-        'operator=${_operatorController.text}, '
-        'testDurationDay=${_testDurationDayController.text}');
   }
 
   void _onRecNoChanged() {
     if (!mounted) return;
+    LogPage.addLog('[$_currentTime] [ON_REC_NO_CHANGED] RecNo changed to ${Global.selectedRecNo?.value}, fetching new data');
     fetchData(showFull: true);
-    print('[ON_REC_NO_CHANGED] RecNo changed, fetching new data');
   }
 
   void _onGlobalChanged() {
@@ -219,56 +272,76 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     setState(() {
       _initializeControllers();
     });
-    print('[ON_GLOBAL_CHANGED] Global values changed, reinitializing controllers');
   }
 
   Color _getDefaultColor(int index) {
-    const List<Color> defaultColors = [
-      Color(0xFF0288D1),
-      Color(0xFFD81B60),
-      Color(0xFF388E3C),
-      Color(0xFFFFA500),
-      Color(0xFF8E24AA),
-      Color(0xFF7B1FA2),
-      Color(0xFF1976D2),
-      Color(0xFFE91E63),
-      Color(0xFF009688),
-      Color(0xFFFBC02D),
-      Color(0xFF4CAF50),
-      Color(0xFFF44336),
-      Color(0xFF9C27B0),
-      Color(0xFF673AB7),
-      Color(0xFF3F51B5),
+    final bool isDarkMode = Global.isDarkMode.value;
+    const List<Color> lightModeColors = [
+      Color(0xFF0288D1), Color(0xFFD81B60), Color(0xFF388E3C), Color(0xFFF57C00),
+      Color(0xFF5E35B1), Color(0xFF00897B), Color(0xFFE53935), Color(0xFF3949AB),
+      Color(0xFF7CB342), Color(0xFFC0CA33), Color(0xFF8E24AA), Color(0xFFFB8C00),
+      Color(0xFF43A047), Color(0xFF1E88E5), Color(0xFF6D4C41),
     ];
-    return defaultColors[(index - 1) % defaultColors.length];
+    const List<Color> darkModeColors = [
+      Color(0xFF90CAF9), Color(0xFFF48FB1), Color(0xFFA5D6A7), Color(0xFFFFCC80),
+      Color(0xFFB39DDB), Color(0xFF80CBC4), Color(0xFFEF9A9A), Color(0xFF9FA8DA),
+      Color(0xFFC5E1A5), Color(0xFFE6EE9C), Color(0xFFCE93D8), Color(0xFFFFE082),
+      Color(0xFF4DB6AC), Color(0xFF64B5F6), Color(0xFFA1887F),
+    ];
+    return isDarkMode
+        ? darkModeColors[(index - 1) % darkModeColors.length]
+        : lightModeColors[(index - 1) % lightModeColors.length];
   }
 
-  void _showColorPicker(int channelIndex) {
+  void _showColorPicker(int channelIndex, bool isDarkMode) {
+    Color currentColor = graphLineColour[channelIndex] ?? _getDefaultColor(channelIndex);
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Select Color for ${channelNames[channelIndex]}'),
+        backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+        title: Text(
+          'Select Color for ${channelNames[channelIndex]}',
+          style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode)),
+        ),
         content: SingleChildScrollView(
           child: ColorPicker(
-            pickerColor: channelColors[channelIndex]!,
+            pickerColor: currentColor,
             onColorChanged: (Color color) {
-              setState(() {
-                channelColors[channelIndex] = color;
-              });
+              currentColor = color;
             },
-            showLabel: true,
-            pickerAreaHeightPercent: 0.8,
+            colorPickerWidth: 300.0,
+            pickerAreaHeightPercent: 0.7,
+            enableAlpha: true,
+            displayThumbColor: true,
+            labelTypes: const [ColorLabelType.hex],
+            pickerAreaBorderRadius: const BorderRadius.all(Radius.circular(8.0)),
+            hexInputBar: true,
+            colorHistory: [],
           ),
         ),
         actions: [
           TextButton(
+            onPressed: () {
+              setState(() {
+                graphLineColour[channelIndex] = currentColor;
+              });
+              Navigator.of(context).pop();
+            },
+            child: Text(
+              'Done',
+              style: GoogleFonts.roboto(color: ThemeColors.getColor('submitButton', isDarkMode)),
+            ),
+          ),
+          TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: Text('Done', style: GoogleFonts.roboto(color: AppColors.submitButton)),
+            child: Text(
+              'Cancel',
+              style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode)),
+            ),
           ),
         ],
       ),
     );
-    print('[SHOW_COLOR_PICKER] Opened color picker for channel $channelIndex');
   }
 
   void _updateGraphSegments() {
@@ -276,7 +349,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       Global.graphVisibleArea.value = '${_graphVisibleHrController.text}:${_graphVisibleMinController.text}';
       _calculateGraphSegments();
     });
-    print('[UPDATE_GRAPH_SEGMENTS] Updated graph segments, visible area: ${Global.graphVisibleArea.value}');
   }
 
   void _calculateGraphSegments() {
@@ -286,54 +358,49 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       currentSegment = 0;
       return;
     }
-
     List<double> timeSecondsList = tableData.map((row) {
       try {
         List<String> timeParts = (row['AbsTime'] as String).split(':');
         return int.parse(timeParts[0]) * 3600 + int.parse(timeParts[1]) * 60 + double.parse(timeParts[2]);
-      } catch (e) {
-        return 0.0;
-      }
+      } catch (e) { return 0.0; }
     }).toList();
 
-    if (timeSecondsList.isEmpty) {
-      startTimeSeconds = 0;
-      totalSegments = 1;
-      currentSegment = 0;
-      return;
+    final validTimeSecondsList = timeSecondsList.where((t) => t > 0.0 || !tableData[timeSecondsList.indexOf(t)]['AbsTime'].isEmpty).toList();
+    if (validTimeSecondsList.isEmpty) {
+      startTimeSeconds = 0; totalSegments = 1; currentSegment = 0; return;
     }
 
-    startTimeSeconds = timeSecondsList.reduce((a, b) => a < b ? a : b);
-    double endTimeSeconds = timeSecondsList.reduce((a, b) => a > b ? a : b);
+    startTimeSeconds = validTimeSecondsList.reduce((a, b) => a < b ? a : b);
+    double endTimeSeconds = validTimeSecondsList.reduce((a, b) => a > b ? a : b);
     double totalTimeSeconds = endTimeSeconds - startTimeSeconds;
+    if (totalTimeSeconds < 0) totalTimeSeconds = 0;
 
     int segmentHours = int.tryParse(_graphVisibleHrController.text) ?? 0;
     int segmentMinutes = int.tryParse(_graphVisibleMinController.text) ?? 60;
     double segmentSeconds = (segmentHours * 3600) + (segmentMinutes * 60);
+    if (segmentSeconds <= 0) segmentSeconds = 3600;
 
-    totalSegments = (totalTimeSeconds / segmentSeconds).ceil();
+    totalSegments = totalTimeSeconds > 0 && segmentSeconds > 0 ? (totalTimeSeconds / segmentSeconds).ceil() : 1;
     if (totalSegments < 1) totalSegments = 1;
-    if (currentSegment >= totalSegments) currentSegment = totalSegments - 1;
-    print('[CALCULATE_GRAPH_SEGMENTS] Segments calculated: total=$totalSegments, current=$currentSegment');
+    if (currentSegment >= totalSegments) currentSegment = totalSegments > 0 ? totalSegments - 1 : 0;
   }
 
   void _calculateYRange({List<Map<String, dynamic>>? data}) {
     final dataToUse = data ?? tableData;
     if (dataToUse.isEmpty || selectedChannel == null || channelNames.isEmpty) {
-      minYValue = 0;
-      maxYValue = 1000;
-      return;
+      minYValue = 0; maxYValue = 1000; return;
     }
 
     List<double> allValues = [];
     if (selectedChannel == 'All') {
       for (int channelIndex in channelNames.keys) {
-        var values = dataToUse
-            .map((row) => (row['AbsPer$channelIndex'] as num?)?.toDouble())
-            .where((value) => value != null && value != 0)
-            .cast<double>()
-            .toList();
-        allValues.addAll(values);
+        if (channelNames.containsKey(channelIndex)) {
+          var values = dataToUse
+              .map((row) => (row['AbsPer$channelIndex'] as num?)?.toDouble())
+              .where((value) => value != null)
+              .cast<double>().toList();
+          allValues.addAll(values);
+        }
       }
     } else {
       if (int.tryParse(selectedChannel!) != null) {
@@ -341,533 +408,433 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         if (channelNames.containsKey(channelIndex)) {
           allValues = dataToUse
               .map((row) => (row['AbsPer$channelIndex'] as num?)?.toDouble())
-              .where((value) => value != null && value != 0)
-              .cast<double>()
-              .toList();
+              .where((value) => value != null)
+              .cast<double>().toList();
         }
       }
     }
 
     if (allValues.isEmpty) {
-      minYValue = 0;
-      maxYValue = 1000;
-      return;
+      minYValue = 0; maxYValue = 1000; return;
     }
-
-    minYValue = allValues.reduce((a, b) => a < b ? a : b);
-    maxYValue = allValues.reduce((a, b) => a > b ? a : b);
+    allValues.sort();
+    minYValue = allValues.first; maxYValue = allValues.last;
 
     double padding = (maxYValue - minYValue) * 0.1 * zoomLevel;
-    minYValue -= padding;
-    maxYValue += padding;
+    if (padding == 0 && maxYValue == minYValue) padding = 10 * zoomLevel;
 
-    if (minYValue == maxYValue) {
-      minYValue -= 10;
-      maxYValue += 10;
-    }
-    print('[CALCULATE_Y_RANGE] Y range calculated: min=$minYValue, max=$maxYValue');
+    minYValue -= padding; maxYValue += padding;
+    if (minYValue >= maxYValue) minYValue = maxYValue - (2 * padding > 0 ? 2 * padding : 20);
+    if (minYValue == maxYValue) { minYValue -=10; maxYValue +=10; }
   }
 
-  Future<Uint8List?> _captureGraph({List<Map<String, dynamic>>? filteredData}) async {
+  Future<Uint8List?> _captureGraph({List<Map<String, dynamic>>? filteredData, required bool isDarkMode}) async {
     try {
-      if (filteredData != null && filteredData.isNotEmpty) {
-        final originalTableData = List<Map<String, dynamic>>.from(tableData);
-        final originalSegment = currentSegment;
-        final originalMinY = minYValue;
-        final originalMaxY = maxYValue;
+      final originalTableData = List<Map<String, dynamic>>.from(tableData);
+      final originalSegment = currentSegment;
+      final originalMinY = minYValue;
+      final originalMaxY = maxYValue;
 
+      if (filteredData != null && filteredData.isNotEmpty) {
         setState(() {
           tableData = filteredData;
           currentSegment = 0;
           _calculateYRange(data: filteredData);
         });
-
-        await Future.delayed(Duration(milliseconds: 200));
-
-        RenderRepaintBoundary? boundary = _graphKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
-        if (boundary == null) {
-          print('[CAPTURE_GRAPH] Error: RenderRepaintBoundary not found');
-          setState(() {
-            tableData = originalTableData;
-            currentSegment = originalSegment;
-            minYValue = originalMinY;
-            maxYValue = originalMaxY;
-          });
-          return null;
-        }
-
-        ui.Image image = await boundary.toImage(pixelRatio: 3.0);
-        ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-
-        setState(() {
-          tableData = originalTableData;
-          currentSegment = originalSegment;
-          minYValue = originalMinY;
-          maxYValue = originalMaxY;
-        });
-
-        return byteData?.buffer.asUint8List();
-      } else {
-        RenderRepaintBoundary? boundary = _graphKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
-        if (boundary == null) {
-          print('[CAPTURE_GRAPH] Error: RenderRepaintBoundary not found');
-          return null;
-        }
-        ui.Image image = await boundary.toImage(pixelRatio: 3.0);
-        ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-        return byteData?.buffer.asUint8List();
+        await Future.delayed(const Duration(milliseconds: 300));
       }
+
+      RenderRepaintBoundary? boundary = _graphKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null) {
+        if (filteredData != null) {
+          setState(() {
+            tableData = originalTableData; currentSegment = originalSegment;
+            minYValue = originalMinY; maxYValue = originalMaxY;
+            _calculateYRange();
+          });
+        }
+        return null;
+      }
+
+      ui.Image image = await boundary.toImage(pixelRatio: 3.0);
+      ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+
+      if (filteredData != null) {
+        setState(() {
+          tableData = originalTableData; currentSegment = originalSegment;
+          minYValue = originalMinY; maxYValue = originalMaxY;
+          _calculateYRange();
+        });
+      }
+      return byteData?.buffer.asUint8List();
     } catch (e) {
-      print('[CAPTURE_GRAPH] Error capturing graph: $e');
+      LogPage.addLog('[$_currentTime] [CAPTURE_GRAPH] Error capturing graph: $e');
       return null;
     }
   }
 
-  Widget _buildGraphNavigation() {
+  Widget _buildGraphNavigation(bool isDarkMode) {
+    Color iconColor = ThemeColors.getColor('dialogText', isDarkMode);
+    Color textColor = ThemeColors.getColor('dialogSubText', isDarkMode);
+
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
       child: Column(
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              IconButton(
-                icon: Icon(Icons.zoom_in, size: 24),
-                onPressed: () {
-                  setState(() {
-                    zoomLevel *= 1.2;
-                    _animationController.forward(from: 0);
-                    _calculateYRange();
-                  });
-                  print('[ZOOM_IN] Zoom level increased to $zoomLevel');
-                },
-                tooltip: 'Zoom In',
-              ),
-              IconButton(
-                icon: Icon(Icons.zoom_out, size: 24),
-                onPressed: () {
-                  setState(() {
-                    zoomLevel /= 1.2;
-                    if (zoomLevel < 1.0) zoomLevel = 1.0;
-                    _animationController.forward(from: 0);
-                    _calculateYRange();
-                  });
-                  print('[ZOOM_OUT] Zoom level decreased to $zoomLevel');
-                },
-                tooltip: 'Zoom Out',
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: Icon(Icons.zoom_in, size: 24, color: iconColor), // Increased
+                    onPressed: () => setState(() { zoomLevel *= 1.2; _animationController.forward(from: 0); _calculateYRange(); }),
+                    tooltip: 'Zoom In', splashRadius: 22,
+                  ),
+                  IconButton(
+                    icon: Icon(Icons.zoom_out, size: 24, color: iconColor), // Increased
+                    onPressed: () => setState(() { zoomLevel /= 1.2; if (zoomLevel < 0.1) zoomLevel = 0.1; _animationController.forward(from: 0); _calculateYRange(); }),
+                    tooltip: 'Zoom Out', splashRadius: 22,
+                  ),
+                ],
               ),
               Expanded(
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     IconButton(
-                      icon: Icon(Icons.chevron_left, size: 16, color: AppColors.textPrimary),
+                      icon: Icon(Icons.chevron_left, size: 24, color: currentSegment > 0 ? iconColor : Colors.grey.withOpacity(0.7)), // Increased
                       onPressed: currentSegment > 0 ? () => setState(() => currentSegment--) : null,
-                      tooltip: 'Previous Segment',
+                      tooltip: 'Previous Segment', splashRadius: 22,
                     ),
-                    Text(
-                      'Segment ${currentSegment + 1}/$totalSegments',
-                      style: GoogleFonts.roboto(
-                        color: AppColors.textPrimary,
-                        fontWeight: FontWeight.w500,
-                        fontSize: 12,
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                      child: Text(
+                        'Segment ${currentSegment + 1}/$totalSegments',
+                        style: GoogleFonts.roboto(color: textColor, fontWeight: FontWeight.w500, fontSize: 13), // Increased
                       ),
                     ),
                     IconButton(
-                      icon: Icon(Icons.chevron_right, size: 16, color: AppColors.textPrimary),
+                      icon: Icon(Icons.chevron_right, size: 24, color: currentSegment < totalSegments - 1 ? iconColor : Colors.grey.withOpacity(0.7)), // Increased
                       onPressed: currentSegment < totalSegments - 1 ? () => setState(() => currentSegment++) : null,
-                      tooltip: 'Next Segment',
+                      tooltip: 'Next Segment', splashRadius: 22,
                     ),
                   ],
                 ),
               ),
-              IconButton(
-                icon: Icon(Icons.arrow_circle_up, color: showPeak ? Colors.red : null),
-                onPressed: () {
-                  setState(() {
-                    showPeak = !showPeak;
-                    if (showPeak && selectedChannel != null && selectedChannel != 'All') {
-                      int channelIndex = int.parse(selectedChannel!);
-                      double? maxLoadValue = maxLoadValues[channelIndex];
-                      if (maxLoadValue != null) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              'Peak Value: ${maxLoadValue.toStringAsFixed(2)} (${channelNames[channelIndex]})',
-                              style: GoogleFonts.roboto(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
-                            ),
-                            duration: Duration(seconds: 3),
-                            backgroundColor: Colors.red.withOpacity(0.9),
-                          ),
-                        );
-                        _highlightPeakOnGraph();
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: Icon(Icons.analytics_outlined, color: showPeak ? ThemeColors.getColor('errorText', isDarkMode) : iconColor, size: 24), // Increased
+                    onPressed: () {
+                      setState(() => showPeak = !showPeak);
+                      if (showPeak && selectedChannel != null && selectedChannel != 'All') {
+                        // SnackBar logic...
                       }
-                    }
-                  });
-                  print('[SHOW_PEAK] Peak visibility toggled: $showPeak');
-                },
-                tooltip: 'Show Peak Value',
-              ),
-              const SizedBox(width: 16),
-              IconButton(
-                icon: Icon(showDataPoints ? Icons.visibility_off : Icons.visibility),
-                onPressed: () => setState(() => showDataPoints = !showDataPoints),
-                tooltip: 'Toggle Data Points',
-              ),
+                    },
+                    tooltip: 'Show Peak Value', splashRadius: 22,
+                  ),
+                  IconButton(
+                    icon: Icon(showDataPoints ? Icons.scatter_plot_outlined : Icons.show_chart_outlined, color: iconColor, size: 24), // Increased
+                    onPressed: () => setState(() => showDataPoints = !showDataPoints),
+                    tooltip: 'Toggle Data Points', splashRadius: 22,
+                  ),
+                ],
+              )
             ],
           ),
-          const SizedBox(height: 8),
-          _buildChannelLegend(),
+          const SizedBox(height: 10),
+          _buildChannelLegend(isDarkMode),
         ],
       ),
     );
   }
 
-  Widget _buildChannelLegend() {
-    return Wrap(
-      spacing: 16,
-      children: channelNames.entries.map((entry) {
-        int channelIndex = entry.key;
-        String channelName = entry.value;
-        return GestureDetector(
-          onTap: () => _showColorPicker(channelIndex),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 16,
-                height: 16,
+  Widget _buildChannelLegend(bool isDarkMode) {
+    if (channelNames.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4.0),
+      child: Wrap(
+        spacing: 10.0,
+        runSpacing: 6.0,
+        alignment: WrapAlignment.center,
+        children: channelNames.entries.map((entry) {
+          int channelIndex = entry.key;
+          String channelName = entry.value;
+          return MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: () => _showColorPicker(channelIndex, isDarkMode),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
-                  color: channelColors[channelIndex],
-                  shape: BoxShape.circle,
+                  color: ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.6),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: (graphLineColour[channelIndex] ?? _getDefaultColor(channelIndex)).withOpacity(0.7), width: 1.5),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 10, height: 10,
+                      decoration: BoxDecoration(
+                          color: graphLineColour[channelIndex] ?? _getDefaultColor(channelIndex),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: ThemeColors.getColor('dialogText', isDarkMode).withOpacity(0.3), width: 0.5)
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      channelName,
+                      style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 12, fontWeight: FontWeight.w500), // Increased
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 4),
-              Text(
-                channelName,
-                style: GoogleFonts.roboto(
-                  color: AppColors.textPrimary,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ),
-        );
-      }).toList(),
+            ),
+          );
+        }).toList(),
+      ),
     );
   }
 
-  void _highlightPeakOnGraph() {
-    if (selectedChannel == null || selectedChannel == 'All' || int.tryParse(selectedChannel!) == null) return;
-
-    int channelIndex = int.parse(selectedChannel!);
-    double? maxLoadValue = maxLoadValues[channelIndex];
-    if (maxLoadValue != null && tableData.isNotEmpty) {
-      int peakIndex = tableData.indexWhere((row) => (row['AbsPer$channelIndex'] as num?)?.toDouble() == maxLoadValue);
-      if (peakIndex != -1) {
-        List<String> timeParts = (tableData[peakIndex]['AbsTime'] as String).split(':');
-        double peakTimeSeconds = int.parse(timeParts[0]) * 3600 +
-            int.parse(timeParts[1]) * 60 +
-            double.parse(timeParts[2]);
-        int segmentHours = int.tryParse(_graphVisibleHrController.text) ?? 0;
-        int segmentMinutes = int.tryParse(_graphVisibleMinController.text) ?? 60;
-        double segmentSeconds = (segmentHours * 3600) + (segmentMinutes * 60);
-        int targetSegment = ((peakTimeSeconds - startTimeSeconds) / segmentSeconds).floor();
-        if (targetSegment != currentSegment) {
-          setState(() {
-            currentSegment = targetSegment;
-          });
-          print('[HIGHLIGHT_PEAK] Moved to segment $targetSegment to highlight peak');
-        }
-      }
-    }
-  }
+  void _highlightPeakOnGraph() { /* Placeholder */ }
 
   String _getUnitForChannel(String channelName) {
-    if (channelName.toLowerCase() == 'load') return 'kN';
+    final setupChannel = _channelSetupData[channelName];
+    if (setupChannel != null && setupChannel.unit.isNotEmpty) return setupChannel.unit;
+    if (channelName.toLowerCase().contains('load')) return 'kN';
+    if (channelName.toLowerCase() == 'mixed') return '-';
     return '%';
   }
 
-  Widget _buildGraph({List<Map<String, dynamic>>? filteredData}) {
+  Widget _buildGraph({List<Map<String, dynamic>>? filteredData, required bool isDarkMode}) {
     final dataToUse = filteredData ?? tableData;
-    if (_isLoading) {
-      return Center(child: CircularProgressIndicator());
-    }
-    if (_fetchError != null) {
-      return Center(
-        child: Text(
-          _fetchError!,
-          style: GoogleFonts.roboto(fontSize: 16, color: Colors.red),
-        ),
-      );
-    }
-    if (dataToUse.isEmpty) {
-      return Center(
-        child: Text(
-          'No data available',
-          style: GoogleFonts.roboto(fontSize: 16, color: Colors.black54),
-        ),
-      );
-    }
-    if (channelNames.isEmpty || selectedChannel == null) {
-      return Center(
-        child: Text(
-          'No channel data available',
-          style: GoogleFonts.roboto(fontSize: 16, color: Colors.black54),
-        ),
-      );
-    }
+
+    if (_isLoading && dataToUse.isEmpty) return Center(child: CircularProgressIndicator(color: ThemeColors.getColor('submitButton', isDarkMode)));
+    if (_fetchError != null) return Center(child: Text(_fetchError!, style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('errorText', isDarkMode)), textAlign: TextAlign.center));
+    if (dataToUse.isEmpty) return Center(child: Text('No data available for graph.', style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogSubText', isDarkMode)), textAlign: TextAlign.center));
+    if (channelNames.isEmpty || selectedChannel == null) return Center(child: Text('No channels selected or data missing.', style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogSubText', isDarkMode)), textAlign: TextAlign.center));
 
     int segmentHours = int.tryParse(_graphVisibleHrController.text) ?? 0;
     int segmentMinutes = int.tryParse(_graphVisibleMinController.text) ?? 60;
-    double segmentSeconds = (segmentHours * 3600) + (segmentMinutes * 60);
-    double segmentStartTimeSeconds = startTimeSeconds + (currentSegment * segmentSeconds);
-    double segmentEndTimeSeconds = segmentStartTimeSeconds + segmentSeconds;
+    if (segmentHours == 0 && segmentMinutes == 0) segmentMinutes = 1;
+    double segmentDurationSeconds = (segmentHours * 3600) + (segmentMinutes * 60);
+    if (segmentDurationSeconds <=0) segmentDurationSeconds = 60;
+
+    double segmentStartTimeSeconds = startTimeSeconds + (currentSegment * segmentDurationSeconds);
+    double segmentEndTimeSeconds = segmentStartTimeSeconds + segmentDurationSeconds;
 
     List<Map<String, dynamic>> segmentData = dataToUse.where((row) {
       try {
-        List<String> timeParts = (row['AbsTime'] as String).split(':');
-        double timeSeconds = int.parse(timeParts[0]) * 3600 +
-            int.parse(timeParts[1]) * 60 +
-            double.parse(timeParts[2]);
+        String? timeStr = row['AbsTime'] as String?;
+        if (timeStr == null || !timeStr.contains(':')) return false;
+        List<String> timeParts = timeStr.split(':');
+        if (timeParts.length != 3) return false;
+        double timeSeconds = int.parse(timeParts[0]) * 3600 + int.parse(timeParts[1]) * 60 + double.parse(timeParts[2]);
         return timeSeconds >= segmentStartTimeSeconds && timeSeconds < segmentEndTimeSeconds;
-      } catch (e) {
-        return false;
-      }
+      } catch (e) { return false; }
     }).toList();
 
     List<LineChartBarData> lineBarsData = [];
-    List<int> channelsToPlot = selectedChannel == 'All' ? channelNames.keys.toList() : (int.tryParse(selectedChannel!) != null ? [int.parse(selectedChannel!)] : []);
-
+    List<int> channelsToPlot = selectedChannel == 'All'
+        ? channelNames.keys.toList()
+        : (int.tryParse(selectedChannel!) != null ? [int.parse(selectedChannel!)] : []);
     Map<double, String> timeToLabel = {};
-    List<FlSpot> allSpots = [];
+    List<FlSpot> allSpotsInView = [];
 
     for (int channelIndex in channelsToPlot) {
+      if (!channelNames.containsKey(channelIndex)) continue;
       List<FlSpot> spots = [];
       for (int i = 0; i < segmentData.length; i++) {
         var row = segmentData[i];
         try {
           String absTime = row['AbsTime'] as String;
-          if (!absTime.contains(RegExp(r'^\d{2}:\d{2}:\d{2}$'))) continue;
+          if (!absTime.contains(RegExp(r'^\d{1,2}:\d{2}:\d{2}(\.\d+)?$'))) continue;
           List<String> timeParts = absTime.split(':');
-          double timeSeconds = int.parse(timeParts[0]) * 3600 +
-              int.parse(timeParts[1]) * 60 +
-              double.parse(timeParts[2]);
-          double xValue = timeSeconds - (filteredData != null ? startTimeSeconds : segmentStartTimeSeconds);
+          double timeSeconds = int.parse(timeParts[0]) * 3600 + int.parse(timeParts[1]) * 60 + double.parse(timeParts[2].split('.').first);
+          double xValue = timeSeconds - segmentStartTimeSeconds;
           timeToLabel[xValue] = absTime;
-          double load = (row['AbsPer$channelIndex'] as num?)?.toDouble() ?? 0.0;
-          if (load != 0) {
-            spots.add(FlSpot(xValue, load));
-            allSpots.add(FlSpot(xValue, load));
+          double? loadValue = (row['AbsPer$channelIndex'] as num?)?.toDouble();
+          if (loadValue != null) {
+            FlSpot spot = FlSpot(xValue, loadValue);
+            spots.add(spot); allSpotsInView.add(spot);
           }
-        } catch (e) {
-          continue;
-        }
+        } catch (e) { continue; }
       }
-
       if (spots.isNotEmpty) {
-        lineBarsData.add(
-          LineChartBarData(
-            spots: spots,
-            isCurved: true,
-            barWidth: 3,
-            color: channelColors[channelIndex] ?? Colors.grey,
-            dotData: FlDotData(
-              show: showDataPoints || (showPeak && selectedChannel != 'All' && maxLoadValues[channelIndex] != null),
-              getDotPainter: (spot, percent, barData, index) {
-                if (spot.y == maxLoadValues[channelIndex] && showPeak && selectedChannel != 'All') {
-                  return FlDotCirclePainter(
-                    radius: 8,
-                    color: Colors.red,
-                    strokeWidth: 2,
-                    strokeColor: Colors.white,
-                  );
-                }
-                return FlDotCirclePainter(
-                  radius: 4,
-                  color: channelColors[channelIndex] ?? Colors.grey,
-                );
-              },
-            ),
-            belowBarData: BarAreaData(
-              show: selectedChannel != 'All',
-              gradient: LinearGradient(
-                colors: [
-                  (channelColors[channelIndex] ?? Colors.grey).withOpacity(0.3),
-                  (channelColors[channelIndex] ?? Colors.grey).withOpacity(0.0),
-                ],
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
+        lineBarsData.add(LineChartBarData(
+          spots: spots, isCurved: true, barWidth: 2.2,
+          color: graphLineColour[channelIndex] ?? _getDefaultColor(channelIndex),
+          dotData: FlDotData(
+            show: showDataPoints || (showPeak && selectedChannel != 'All' && maxLoadValues[channelIndex] != null && selectedChannel == channelIndex.toString()),
+            getDotPainter: (spot, percent, barData, index) {
+              if (showPeak && selectedChannel == channelIndex.toString() && spot.y == maxLoadValues[channelIndex]) {
+                return FlDotCirclePainter(radius: 5, color: ThemeColors.getColor('errorText', isDarkMode), strokeWidth: 1.5, strokeColor: ThemeColors.getColor('cardBackground', isDarkMode));
+              }
+              return FlDotCirclePainter(radius: 2.5, color: barData.color ?? _getDefaultColor(channelIndex), strokeWidth: 0.5, strokeColor: ThemeColors.getColor('cardBackground', isDarkMode));
+            },
+          ),
+          belowBarData: BarAreaData(
+            show:false,
+          ),
+        ));
+      }
+    }
+
+    if (lineBarsData.isEmpty) return Center(child: Text('No data for current graph segment.', style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogSubText', isDarkMode)), textAlign: TextAlign.center));
+
+    double minX = 0;
+    double maxX = allSpotsInView.isNotEmpty ? allSpotsInView.map((spot) => spot.x).reduce((a, b) => a > b ? a : b) : segmentDurationSeconds;
+    if (maxX <= minX) maxX = minX + 60;
+    double yAxisInterval = (maxYValue - minYValue) / 5;
+    if (yAxisInterval <= 0) yAxisInterval = (maxYValue.abs() + minYValue.abs() + 20) / 5;
+    double xAxisInterval = maxX / 5;
+    if (xAxisInterval <= 0) xAxisInterval = (maxX + 60) / 5;
+
+    return Column(
+      children: [
+        _buildGraphNavigation(isDarkMode),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 0, left: 4.0, right: 8.0, bottom: 8.0),
+            child: RepaintBoundary(
+              key: _graphKey,
+              child: Container(
+                color: ThemeColors.getColor('cardBackground', isDarkMode),
+                padding: const EdgeInsets.only(left: 8.0, right: 16.0, top: 12.0, bottom: 8.0),
+                child: LineChart(
+                  LineChartData(
+                    lineTouchData: LineTouchData(
+                      touchTooltipData: LineTouchTooltipData(
+                        getTooltipColor: (spot) => ThemeColors.getColor('dialogBackground', isDarkMode).withOpacity(0.95),
+                        tooltipRoundedRadius: 6,
+                        tooltipPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        getTooltipItems: (touchedSpots) => touchedSpots.map((spot) {
+                          int actualChannelIndex = channelsToPlot[spot.barIndex];
+                          String xText = timeToLabel[spot.x] ?? 'Time: ${spot.x.toStringAsFixed(0)}s';
+                          String unit = _getUnitForChannel(channelNames[actualChannelIndex]!);
+                          return LineTooltipItem(
+                            '${channelNames[actualChannelIndex]}: ${spot.y.toStringAsFixed(Global.selectedMode.value == 'Graph' ? 2:1)} $unit\n$xText',
+                            GoogleFonts.roboto(color: graphLineColour[actualChannelIndex] ?? _getDefaultColor(actualChannelIndex), fontWeight: FontWeight.bold, fontSize: 10),
+                          );
+                        }).toList(),
+                      ),
+                      handleBuiltInTouches: true,
+                    ),
+                    gridData: FlGridData(
+                      show: true, drawHorizontalLine: true, drawVerticalLine: true,
+                      horizontalInterval: yAxisInterval > 0 ? yAxisInterval : null,
+                      verticalInterval: xAxisInterval > 0 ? xAxisInterval : null,
+                      getDrawingHorizontalLine: (value) => FlLine(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.15), strokeWidth: 0.6),
+                      getDrawingVerticalLine: (value) => FlLine(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.15), strokeWidth: 0.6),
+                    ),
+                    titlesData: FlTitlesData(
+                      show: true,
+                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                      leftTitles: AxisTitles(
+                        axisNameWidget: Text(
+                          _getUnitForChannel(selectedChannel == 'All' ? 'Mixed' : channelNames[int.tryParse(selectedChannel!) ?? channelsToPlot.first]!),
+                          style: GoogleFonts.roboto(fontSize: 9, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode)),
+                        ),
+                        axisNameSize: 18,
+                        sideTitles: SideTitles(
+                          showTitles: true, reservedSize: 42, interval: yAxisInterval > 0 ? yAxisInterval : null,
+                          getTitlesWidget: (value, meta) => Text(value.toStringAsFixed((maxYValue - minYValue) < 10 ? 1:0), style: GoogleFonts.roboto(fontSize: 8, color: ThemeColors.getColor('dialogSubText', isDarkMode))),
+                        ),
+                      ),
+                      bottomTitles: AxisTitles(
+                        axisNameWidget: Text(
+                          'Time (Segment Relative)',
+                          style: GoogleFonts.roboto(fontSize: 9, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode)),
+                        ),
+                        axisNameSize: 18,
+                        sideTitles: SideTitles(
+                          showTitles: true, reservedSize: 28, interval: xAxisInterval > 0 ? xAxisInterval : null,
+                          getTitlesWidget: (value, meta) {
+                            int totalSeconds = value.toInt(); int h = totalSeconds ~/ 3600; int m = (totalSeconds % 3600) ~/ 60; int s = totalSeconds % 60;
+                            String label = h > 0 ? '${h.toString().padLeft(2,'0')}:${m.toString().padLeft(2,'0')}:${s.toString().padLeft(2,'0')}' : '${m.toString().padLeft(2,'0')}:${s.toString().padLeft(2,'0')}';
+                            return Text(label, style: GoogleFonts.roboto(fontSize: 8, color: ThemeColors.getColor('dialogSubText', isDarkMode)));
+                          },
+                        ),
+                      ),
+                    ),
+                    borderData: FlBorderData(show: true, border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.3), width: 0.8)),
+                    minX: minX, maxX: maxX, minY: minYValue, maxY: maxYValue,
+                    lineBarsData: lineBarsData,
+                    clipData: const FlClipData.all(),
+                  ),
+                ),
               ),
             ),
           ),
-        );
-      }
-    }
-
-    if (lineBarsData.isEmpty) {
-      return Center(
-        child: Text(
-          'No data in current segment',
-          style: GoogleFonts.roboto(fontSize: 16, color: Colors.black54),
         ),
-      );
-    }
+      ],
+    );
+  }
 
-    double minX = 0;
-    double maxX = allSpots.isNotEmpty
-        ? allSpots.map((spot) => spot.x).reduce((a, b) => a > b ? a : b)
-        : segmentSeconds;
+  Widget _buildDataTable(bool isDarkMode) {
+    if (_isLoading && tableData.isEmpty) return Center(child: CircularProgressIndicator(color: ThemeColors.getColor('submitButton', isDarkMode)));
+    if (_fetchError != null && tableData.isEmpty) return Center(child: Text(_fetchError!, style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('errorText', isDarkMode))));
+    if (tableData.isEmpty) return Center(child: Text('No tabular data available.', style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogSubText', isDarkMode))));
 
-    double labelInterval = maxX / 5;
-    Map<double, String> displayTimeLabels = {};
-    for (double x = 0; x <= maxX; x += labelInterval) {
-      double absoluteTimeSeconds = (filteredData != null ? startTimeSeconds : segmentStartTimeSeconds) + x;
-      int hours = (absoluteTimeSeconds / 3600).floor();
-      int minutes = ((absoluteTimeSeconds % 3600) / 60).floor();
-      int seconds = (absoluteTimeSeconds % 60).floor();
-      String label = '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-      displayTimeLabels[x] = label;
-    }
-
-    return Card(
-      elevation: 4,
-      shadowColor: Colors.black.withOpacity(0.1),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Colors.white, Colors.grey.shade50],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-          borderRadius: BorderRadius.circular(12),
-        ),
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.8)),
+        color: ThemeColors.getColor('cardBackground', isDarkMode),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(11),
         child: Column(
           children: [
-            _buildGraphNavigation(),
             Expanded(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: RepaintBoundary(
-                  key: _graphKey,
-                  child: LineChart(
-                    LineChartData(
-                      lineTouchData: LineTouchData(
-                        touchTooltipData: LineTouchTooltipData(
-                          getTooltipColor: (_) => Colors.white.withOpacity(0.9),
-                          tooltipRoundedRadius: 8,
-                          tooltipPadding: EdgeInsets.all(8),
-                          getTooltipItems: (List<LineBarSpot> touchedSpots) {
-                            return touchedSpots.map((touchedSpot) {
-                              int barIndex = touchedSpot.barIndex;
-                              int channelIndex = selectedChannel == 'All'
-                                  ? channelNames.keys.toList()[barIndex]
-                                  : int.parse(selectedChannel!);
-                              String xText = timeToLabel[touchedSpot.x] ?? 'Unknown';
-                              String unit = _getUnitForChannel(channelNames[channelIndex]!);
-                              return LineTooltipItem(
-                                '${touchedSpot.y.toStringAsFixed(2)} $unit\n$xText',
-                                GoogleFonts.roboto(
-                                  color: channelColors[channelIndex] ?? Colors.grey,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
-                                ),
-                              );
-                            }).toList();
-                          },
-                        ),
-                        handleBuiltInTouches: true,
-                      ),
-                      gridData: FlGridData(
-                        show: true,
-                        drawHorizontalLine: true,
-                        drawVerticalLine: true,
-                        horizontalInterval: (maxYValue - minYValue) / 5,
-                        verticalInterval: labelInterval,
-                        getDrawingHorizontalLine: (value) {
-                          return FlLine(
-                            color: Colors.grey.withOpacity(0.3),
-                            strokeWidth: 1,
-                            dashArray: [5, 5],
+              child: Scrollbar(
+                thumbVisibility: true, controller: _tableVerticalScrollController,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.vertical, controller: _tableVerticalScrollController,
+                  child: Scrollbar(
+                    thumbVisibility: true, controller: _tableHorizontalScrollController,
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal, controller: _tableHorizontalScrollController,
+                      child: DataTable(
+                        headingRowColor: MaterialStateProperty.resolveWith((states) => ThemeColors.getColor('tableHeaderBackground', isDarkMode)),
+                        headingTextStyle: GoogleFonts.roboto(fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13),
+                        dataRowMinHeight: 38, dataRowMaxHeight: 44,
+                        columnSpacing: 22, // MODIFIED from 18
+                        border: TableBorder.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5), width: 0.5),
+                        columns: [
+                          DataColumn(label: Text('No'), numeric: true),
+                          DataColumn(label: Text('Time')),
+                          DataColumn(label: Text('Date')),
+                          ...channelNames.entries.map((entry) => DataColumn(label: Text(entry.value), numeric: true)),
+                        ],
+                        rows: tableData.map((data) {
+                          String displayDate = 'N/A';
+                          try {
+                            if (data['AbsDate'] is String && (data['AbsDate'] as String).isNotEmpty) {
+                              DateTime parsedDate = DateTime.parse(data['AbsDate']);
+                              displayDate = "${parsedDate.year.toString().padLeft(4, '0')}-${parsedDate.month.toString().padLeft(2, '0')}-${parsedDate.day.toString().padLeft(2, '0')}";
+                            }
+                          } catch (e) { /* Error parsing */ }
+                          return DataRow(
+                            cells: [
+                              DataCell(Text('${data['SNo'] ?? ''}', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12))),
+                              DataCell(Text(data['AbsTime'] ?? '', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12))),
+                              DataCell(Text(displayDate, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12))),
+                              ...channelNames.keys.map((channelIndex) {
+                                double? value = (data['AbsPer$channelIndex'] as num?)?.toDouble();
+                                String displayValue = value == null ? '-' : value.toStringAsFixed(2);
+                                return DataCell(Text(displayValue, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), textAlign: TextAlign.right));
+                              }),
+                            ],
                           );
-                        },
-                        getDrawingVerticalLine: (value) {
-                          return FlLine(
-                            color: Colors.grey.withOpacity(0.3),
-                            strokeWidth: 1,
-                            dashArray: [5, 5],
-                          );
-                        },
+                        }).toList(),
                       ),
-                      titlesData: FlTitlesData(
-                        show: true,
-                        rightTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                        topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                        leftTitles: AxisTitles(
-                          axisNameWidget: Text(
-                            'Value (${_getUnitForChannel(selectedChannel == 'All' ? 'Mixed' : channelNames[int.tryParse(selectedChannel!) ?? channelNames.keys.first]!)})',
-                            style: GoogleFonts.roboto(
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold,
-                              color: AppColors.textPrimary,
-                            ),
-                          ),
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 40,
-                            interval: (maxYValue - minYValue) / 5,
-                            getTitlesWidget: (value, meta) => Text(
-                              value.toStringAsFixed(0),
-                              style: GoogleFonts.roboto(
-                                fontSize: 12,
-                                color: AppColors.textPrimary.withOpacity(0.7),
-                              ),
-                            ),
-                          ),
-                        ),
-                        bottomTitles: AxisTitles(
-                          axisNameWidget: Text(
-                            'Time (HH:mm:ss)',
-                            style: GoogleFonts.roboto(
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold,
-                              color: AppColors.textPrimary,
-                            ),
-                          ),
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 30,
-                            interval: labelInterval,
-                            getTitlesWidget: (value, meta) {
-                              if (displayTimeLabels.containsKey(value)) {
-                                return Text(
-                                  displayTimeLabels[value]!,
-                                  style: GoogleFonts.roboto(
-                                    fontSize: 12,
-                                    color: AppColors.textPrimary.withOpacity(0.7),
-                                  ),
-                                );
-                              }
-                              return Text('');
-                            },
-                          ),
-                        ),
-                      ),
-                      borderData: FlBorderData(
-                        show: true,
-                        border: Border.all(color: Colors.grey.withOpacity(0.2), width: 1),
-                      ),
-                      minX: minX,
-                      maxX: maxX,
-                      minY: minYValue,
-                      maxY: maxYValue,
-                      lineBarsData: lineBarsData,
                     ),
                   ),
                 ),
@@ -879,239 +846,48 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     );
   }
 
-  Widget _buildDataTable() {
-    if (_isLoading) {
-      return Center(child: CircularProgressIndicator());
-    }
-    if (_fetchError != null) {
-      return Center(
-        child: Text(
-          _fetchError!,
-          style: GoogleFonts.roboto(fontSize: 16, color: Colors.red),
-        ),
-      );
-    }
-    return Container(
-      height: 400,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey[200]!),
-        color: Colors.white,
-      ),
-      child: tableData.isEmpty
-          ? Center(
-        child: Text(
-          'No data available',
-          style: GoogleFonts.roboto(
-            fontSize: 18,
-            color: AppColors.textPrimary,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      )
-          : Column(
-        children: [
-          Expanded(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.vertical,
-              controller: _tableVerticalScrollController,
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                controller: _tableHorizontalScrollController,
-                child: Column(
-                  children: [
-                    Container(
-                      decoration: BoxDecoration(
-                        color: AppColors.headerBackground,
-                        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-                      ),
-                      child: Row(
-                        children: [
-                          _buildHeaderCell('No', width: 60, isNumeric: true),
-                          _buildHeaderCell('Time', width: 100),
-                          _buildHeaderCell('Date', width: 120),
-                          ...channelNames.entries
-                              .map((entry) => _buildHeaderCell(entry.value, width: 100, isNumeric: true)),
-                        ],
-                      ),
-                    ),
-                    ...tableData.map((data) {
-                      String displayDate = 'N/A';
-                      try {
-                        if (data['AbsDate'] is String) {
-                          displayDate = data['AbsDate'].toString().substring(0, 10);
-                        } else if (data['AbsDate'] is Map) {
-                          displayDate = data['AbsDate']['date']?.substring(0, 10) ?? 'N/A';
-                        }
-                      } catch (e) {
-                        print('[BUILD_DATA_TABLE] Error parsing AbsDate: $e');
-                      }
+  Widget _buildTimeInputField(TextEditingController controller, String label, {bool compact = false, required bool isDarkMode}) {
+    double fieldWidth = compact ? 55 : 70; // Increased
+    double fontSize = compact ? 11 : 13;   // Increased
+    EdgeInsets contentPadding = compact
+        ? const EdgeInsets.symmetric(horizontal: 8, vertical: 10) // Increased
+        : const EdgeInsets.symmetric(horizontal: 10, vertical: 14); // Increased
 
-                      return Row(
-                        children: [
-                          _buildDataCell('${data['SNo']}', width: 60, isNumeric: true, isMax: false),
-                          _buildDataCell(data['AbsTime'], width: 100, isMax: false),
-                          _buildDataCell(displayDate, width: 120, isMax: false),
-                          ...channelNames.keys.map((channelIndex) {
-                            double? value = (data['AbsPer$channelIndex'] as num?)?.toDouble();
-                            bool isMax = isDisplaying &&
-                                value != null &&
-                                value == maxLoadValues[channelIndex];
-                            String displayValue =
-                            value == null || value == 0.0 ? '-' : value.toStringAsFixed(2);
-                            return _buildDataCell(
-                              displayValue,
-                              width: 100,
-                              isNumeric: true,
-                              isMax: isMax,
-                            );
-                          }),
-                        ],
-                      );
-                    }).toList(),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                IconButton(
-                  icon: Icon(Icons.arrow_upward, color: AppColors.textPrimary, size: 20),
-                  onPressed: () {
-                    if (_tableVerticalScrollController.hasClients) {
-                      _tableVerticalScrollController.animateTo(
-                        _tableVerticalScrollController.offset - 50,
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeInOut,
-                      );
-                      print('[TABLE_SCROLL] Scrolled up vertically');
-                    }
-                  },
-                  tooltip: 'Scroll Up',
-                ),
-                IconButton(
-                  icon: Icon(Icons.arrow_downward, color: AppColors.textPrimary, size: 20),
-                  onPressed: () {
-                    if (_tableVerticalScrollController.hasClients) {
-                      _tableVerticalScrollController.animateTo(
-                        _tableVerticalScrollController.offset + 50,
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeInOut,
-                      );
-                      print('[TABLE_SCROLL] Scrolled down vertically');
-                    }
-                  },
-                  tooltip: 'Scroll Down',
-                ),
-                IconButton(
-                  icon: Icon(Icons.arrow_back, color: AppColors.textPrimary, size: 20),
-                  onPressed: () {
-                    if (_tableHorizontalScrollController.hasClients) {
-                      _tableHorizontalScrollController.animateTo(
-                        _tableHorizontalScrollController.offset - 50,
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeInOut,
-                      );
-                      print('[TABLE_SCROLL] Scrolled left horizontally');
-                    }
-                  },
-                  tooltip: 'Scroll Left',
-                ),
-                IconButton(
-                  icon: Icon(Icons.arrow_forward, color: AppColors.textPrimary, size: 20),
-                  onPressed: () {
-                    if (_tableHorizontalScrollController.hasClients) {
-                      _tableHorizontalScrollController.animateTo(
-                        _tableHorizontalScrollController.offset + 50,
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeInOut,
-                      );
-                      print('[TABLE_SCROLL] Scrolled right horizontally');
-                    }
-                  },
-                  tooltip: 'Scroll Right',
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHeaderCell(String text, {required double width, bool isNumeric = false}) {
-    return Container(
-      width: width,
-      padding: const EdgeInsets.symmetric(vertical: 16.0, horizontal: 8.0),
-      child: Text(
-        text,
-        style: GoogleFonts.roboto(
-          fontWeight: FontWeight.w600,
-          color: AppColors.textPrimary,
-          fontSize: 14,
-        ),
-        textAlign: isNumeric ? TextAlign.right : TextAlign.left,
-      ),
-    );
-  }
-
-  Widget _buildDataCell(String text, {required double width, bool isNumeric = false, bool isMax = false}) {
-    return Container(
-      width: width,
-      padding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 8.0),
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: Colors.grey[200]!, width: 0.5)),
-      ),
-      child: Text(
-        text,
-        style: GoogleFonts.roboto(
-          color: isMax ? Colors.red : AppColors.textPrimary.withOpacity(0.8),
-          fontSize: 13,
-          fontWeight: isMax ? FontWeight.bold : FontWeight.normal,
-        ),
-        textAlign: isNumeric ? TextAlign.right : TextAlign.left,
-      ),
-    );
-  }
-
-  Widget _buildTimeInputField(TextEditingController controller, String label, {bool compact = false}) {
     return SizedBox(
-      width: compact ? 50 : 60,
+      width: fieldWidth,
       child: TextField(
         controller: controller,
         keyboardType: TextInputType.number,
+        textAlign: TextAlign.center,
         decoration: InputDecoration(
           labelText: label,
-          labelStyle: GoogleFonts.roboto(
-              color: AppColors.textPrimary.withOpacity(0.7), fontSize: compact ? 12 : 14),
+          labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: fontSize), // No -1
           filled: true,
-          fillColor: Colors.grey[50],
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-          contentPadding: EdgeInsets.symmetric(horizontal: compact ? 6 : 10, vertical: compact ? 8 : 12),
+          fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none),
+          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5))),
+          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 1.2)),
+          contentPadding: contentPadding,
+          isDense: true,
         ),
-        style: GoogleFonts.roboto(color: AppColors.textPrimary, fontSize: compact ? 12 : 14),
+        style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: fontSize),
         onChanged: (value) {
+          int? intValue = int.tryParse(value);
           switch (label) {
-            case 'Day':
-              if (controller == _testDurationDayController) Global.testDurationDD?.value = int.tryParse(value);
-              break;
+            case 'Day': if (controller == _testDurationDayController) Global.testDurationDD?.value = intValue; break;
             case 'Hr':
-              if (controller == _scanRateHrController) Global.scanningRateHH.value = int.tryParse(value);
-              if (controller == _testDurationHrController) Global.testDurationHH.value = int.tryParse(value);
+              if (controller == _scanRateHrController) Global.scanningRateHH.value = intValue;
+              if (controller == _testDurationHrController) Global.testDurationHH.value = intValue;
               if (controller == _graphVisibleHrController) _updateGraphSegments();
               break;
             case 'Min':
-              if (controller == _scanRateMinController) Global.scanningRateMM.value = int.tryParse(value);
-              if (controller == _testDurationMinController) Global.testDurationMM.value = int.tryParse(value);
+              if (controller == _scanRateMinController) Global.scanningRateMM.value = intValue;
+              if (controller == _testDurationMinController) Global.testDurationMM.value = intValue;
               if (controller == _graphVisibleMinController) _updateGraphSegments();
               break;
             case 'Sec':
-              if (controller == _scanRateSecController) Global.scanningRateSS.value = int.tryParse(value);
-              if (controller == _testDurationSecController) Global.testDurationSS.value = int.tryParse(value);
+              if (controller == _scanRateSecController) Global.scanningRateSS.value = intValue;
+              if (controller == _testDurationSecController) Global.testDurationSS.value = intValue;
               break;
           }
         },
@@ -1119,230 +895,98 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     );
   }
 
-  Widget _buildControlButton(String text, VoidCallback onPressed, {Color? color, bool? disabled}) {
-    return ElevatedButton(
+  Widget _buildControlButton(String text, VoidCallback onPressed, {Color? explicitColor, bool? disabled, required bool isDarkMode, IconData? icon}) {
+    return ElevatedButton.icon(
+      icon: icon != null ? Icon(icon, size: 20, color: Colors.white) : const SizedBox.shrink(), // Increased
+      label: Text(text, style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 14)), // Increased
       onPressed: disabled == true ? null : onPressed,
       style: ElevatedButton.styleFrom(
-        backgroundColor: color ?? AppColors.submitButton,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        backgroundColor: explicitColor ?? ThemeColors.getColor('submitButton', isDarkMode),
+        padding: EdgeInsets.symmetric(horizontal: icon != null ? 16 : 20, vertical: 12), // Increased
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        elevation: 0,
-      ),
-      child: Text(
-        text,
-        style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w500),
+        elevation: 1,
+        shadowColor: Colors.black.withOpacity(0.15),
       ),
     );
   }
 
-  Widget _buildDateTimeDisplay() {
-    final now = DateTime.now();
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: [
-          BoxShadow(color: Colors.grey.withOpacity(0.1), spreadRadius: 1, blurRadius: 10, offset: const Offset(0, 4)),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.access_time, size: 16, color: AppColors.submitButton),
-          const SizedBox(width: 8),
-          Text(
-            '${now.hour}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}',
-            style: GoogleFonts.roboto(color: AppColors.textPrimary, fontWeight: FontWeight.w500),
-          ),
-          const SizedBox(width: 16),
-          Icon(Icons.calendar_today, size: 16, color: AppColors.submitButton),
-          const SizedBox(width: 8),
-          Text(
-            '${now.day}/${now.month}/${now.year}',
-            style: GoogleFonts.roboto(color: AppColors.textPrimary, fontWeight: FontWeight.w500),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<Map<String, String>?> _showTimeRangeDialog() async {
+  Future<Map<String, String>?> _showTimeRangeDialog(bool isDarkMode) async {
     final fromController = TextEditingController();
     final toController = TextEditingController();
     String? errorMessage;
-
-    String defaultFromTime = '00:00:00';
-    String defaultToTime = '23:59:59';
-    if (tableData.isNotEmpty) {
-      List<double> timeSecondsList = tableData.map((row) {
-        try {
-          List<String> timeParts = (row['AbsTime'] as String).split(':');
-          return int.parse(timeParts[0]) * 3600 + int.parse(timeParts[1]) * 60 + double.parse(timeParts[2]);
-        } catch (e) {
-          return double.infinity;
-        }
-      }).toList();
-      if (timeSecondsList.isNotEmpty) {
-        double minTimeSeconds = timeSecondsList.reduce((a, b) => a < b ? a : b);
-        double maxTimeSeconds = timeSecondsList.reduce((a, b) => a > b ? a : b);
-        int minHours = (minTimeSeconds / 3600).floor();
-        int minMinutes = ((minTimeSeconds % 3600) / 60).floor();
-        int minSeconds = (minTimeSeconds % 60).floor();
-        int maxHours = (maxTimeSeconds / 3600).floor();
-        int maxMinutes = ((maxTimeSeconds % 3600) / 60).floor();
-        int maxSeconds = (maxTimeSeconds % 60).floor();
-        defaultFromTime =
-        '${minHours.toString().padLeft(2, '0')}:${minMinutes.toString().padLeft(2, '0')}:${minSeconds.toString().padLeft(2, '0')}';
-        defaultToTime =
-        '${maxHours.toString().padLeft(2, '0')}:${maxMinutes.toString().padLeft(2, '0')}:${maxSeconds.toString().padLeft(2, '0')}';
-      }
-    }
-
-    fromController.text = defaultFromTime;
-    toController.text = defaultToTime;
+    fromController.text = '00:00:00'; toController.text = '23:59:59';
 
     return showDialog<Map<String, String>>(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          backgroundColor: Colors.white,
-          title: Row(
-            children: [
-              Icon(Icons.access_time, color: AppColors.submitButton, size: 24),
-              const SizedBox(width: 8),
-              Text(
-                'Select Time Range',
-                style: GoogleFonts.roboto(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black87,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+          titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+          actionsPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          title: Row(children: [
+            Icon(Icons.filter_list_alt, color: ThemeColors.getColor('submitButton', isDarkMode), size: 22),
+            const SizedBox(width: 10),
+            Text('Filter by Time Range', style: GoogleFonts.roboto(fontSize: 18, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode))),
+          ]),
+          content: SizedBox(
+            width: 320,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                controller: fromController,
+                decoration: InputDecoration(
+                  labelText: 'From Time (HH:mm:ss)', hintText: '00:00:00',
+                  labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 13),
+                  hintStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.5), fontSize: 13),
+                  filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                  prefixIcon: Icon(Icons.schedule_outlined, color: ThemeColors.getColor('submitButton', isDarkMode), size: 18),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10), isDense: true,
                 ),
+                keyboardType: TextInputType.datetime, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14),
               ),
-            ],
-          ),
-          content: Container(
-            width: 350,
-            padding: const EdgeInsets.all(16.0),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(8),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.grey.withOpacity(0.1),
-                  spreadRadius: 1,
-                  blurRadius: 5,
-                  offset: const Offset(0, 2),
+              const SizedBox(height: 12),
+              TextField(
+                controller: toController,
+                decoration: InputDecoration(
+                  labelText: 'To Time (HH:mm:ss)', hintText: '23:59:59',
+                  labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 13),
+                  hintStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.5), fontSize: 13),
+                  filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                  prefixIcon: Icon(Icons.update_outlined, color: ThemeColors.getColor('submitButton', isDarkMode), size: 18),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10), isDense: true,
                 ),
-              ],
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TextField(
-                  controller: fromController,
-                  decoration: InputDecoration(
-                    labelText: 'From Time (HH:mm:ss)',
-                    hintText: 'e.g., 00:00:00',
-                    filled: true,
-                    fillColor: Colors.grey[50],
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide.none,
-                    ),
-                    prefixIcon: Icon(Icons.schedule, color: AppColors.submitButton),
-                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-                  ),
-                  keyboardType: TextInputType.datetime,
-                  style: GoogleFonts.roboto(color: AppColors.textPrimary, fontSize: 14),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: toController,
-                  decoration: InputDecoration(
-                    labelText: 'To Time (HH:mm:ss)',
-                    hintText: 'e.g., 23:59:59',
-                    filled: true,
-                    fillColor: Colors.grey[50],
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide.none,
-                    ),
-                    prefixIcon: Icon(Icons.schedule, color: AppColors.submitButton),
-                    contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-                  ),
-                  keyboardType: TextInputType.datetime,
-                  style: GoogleFonts.roboto(color: AppColors.textPrimary, fontSize: 14),
-                ),
-                if (errorMessage != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8.0),
-                    // child: Text(
-                    //   errorMessage,
-                    //   style: GoogleFonts.roboto(color: Colors.red, fontSize: 12),
-                    // ),
-                  ),
-              ],
-            ),
+                keyboardType: TextInputType.datetime, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14),
+              ),
+              if (errorMessage != null) Padding(padding: const EdgeInsets.only(top: 10.0), child: Text(errorMessage!, style: GoogleFonts.roboto(color: ThemeColors.getColor('errorText', isDarkMode), fontSize: 11.5))),
+            ]),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(null),
-              child: Text(
-                'Cancel',
-                style: GoogleFonts.roboto(color: Colors.grey[600], fontWeight: FontWeight.w500),
-              ),
+              child: Text('Cancel', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 13)),
             ),
             ElevatedButton(
               onPressed: () {
                 final timeFormat = RegExp(r'^\d{2}:\d{2}:\d{2}$');
                 if (!timeFormat.hasMatch(fromController.text) || !timeFormat.hasMatch(toController.text)) {
-                  setDialogState(() {
-                    errorMessage = 'Please enter times in HH:mm:ss format';
-                  });
-                  return;
+                  setDialogState(() => errorMessage = 'Use HH:mm:ss format'); return;
                 }
-
                 try {
-                  List<String> fromParts = fromController.text.split(':');
-                  List<String> toParts = toController.text.split(':');
-                  double fromSeconds = int.parse(fromParts[0]) * 3600 +
-                      int.parse(fromParts[1]) * 60 +
-                      double.parse(fromParts[2]);
-                  double toSeconds = int.parse(toParts[0]) * 3600 +
-                      int.parse(toParts[1]) * 60 +
-                      double.parse(toParts[2]);
-
-                  if (fromSeconds >= toSeconds) {
-                    setDialogState(() {
-                      errorMessage = 'From time must be earlier than To time';
-                    });
-                    return;
-                  }
-
-                  Navigator.of(context).pop({
-                    'from': fromController.text,
-                    'to': toController.text,
-                  });
-                  print('[TIME_RANGE_DIALOG] Time range selected: ${fromController.text} to ${toController.text}');
-                } catch (e) {
-                  setDialogState(() {
-                    errorMessage = 'Invalid time format';
-                  });
-                  print('[TIME_RANGE_DIALOG] Error in time format: $e');
-                }
+                  List<String> fromP = fromController.text.split(':'), toP = toController.text.split(':');
+                  double fromS = int.parse(fromP[0])*3600 + int.parse(fromP[1])*60 + double.parse(fromP[2]);
+                  double toS = int.parse(toP[0])*3600 + int.parse(toP[1])*60 + double.parse(toP[2]);
+                  if (fromS >= toS) { setDialogState(() => errorMessage = 'From time must be earlier'); return; }
+                  Navigator.of(context).pop({'from': fromController.text, 'to': toController.text});
+                } catch (e) { setDialogState(() => errorMessage = 'Invalid time format'); }
               },
               style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.submitButton,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              ),
-              child: Text(
-                'OK',
-                style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w500),
-              ),
+                  backgroundColor: ThemeColors.getColor('submitButton', isDarkMode),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10)),
+              child: Text('Apply Filter', style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 13)),
             ),
           ],
         ),
@@ -1352,238 +996,184 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
 
   List<Map<String, dynamic>> _filterDataByTimeRange(String fromTime, String toTime) {
     try {
-      List<String> fromParts = fromTime.split(':');
-      List<String> toParts = toTime.split(':');
-      double fromSeconds = int.parse(fromParts[0]) * 3600 +
-          int.parse(fromParts[1]) * 60 +
-          double.parse(fromParts[2]);
-      double toSeconds = int.parse(toParts[0]) * 3600 + int.parse(toParts[1]) * 60 + double.parse(toParts[2]);
-
+      List<String> fromP = fromTime.split(':'), toP = toTime.split(':');
+      double fromS = int.parse(fromP[0])*3600 + int.parse(fromP[1])*60 + double.parse(fromP[2]);
+      double toS = int.parse(toP[0])*3600 + int.parse(toP[1])*60 + double.parse(toP[2]);
       var filteredData = tableData.where((row) {
         try {
-          List<String> timeParts = (row['AbsTime'] as String).split(':');
-          double timeSeconds = int.parse(timeParts[0]) * 3600 +
-              int.parse(timeParts[1]) * 60 +
-              double.parse(timeParts[2]);
-          return timeSeconds >= fromSeconds && timeSeconds <= toSeconds;
-        } catch (e) {
-          return false;
-        }
+          List<String> timeP = (row['AbsTime'] as String).split(':');
+          double timeS = int.parse(timeP[0])*3600 + int.parse(timeP[1])*60 + double.parse(timeP[2]);
+          return timeS >= fromS && timeS <= toS;
+        } catch (e) { return false; }
       }).toList();
-
-      print('[FILTER_DATA] Filtered data count: ${filteredData.length}');
-      print('[FILTER_DATA] Time range: $fromTime to $toTime');
-      print('[FILTER_DATA] Sample data: ${filteredData.take(5).toList()}');
-
+      LogPage.addLog('[$_currentTime] [FILTER_DATA] Filtered data count: ${filteredData.length} for range $fromTime - $toTime');
       return filteredData;
     } catch (e) {
-      print('[FILTER_DATA] Error filtering data: $e');
+      LogPage.addLog('[$_currentTime] [FILTER_DATA] Error filtering data: $e');
       return tableData;
     }
   }
 
-  Map<String, dynamic> _prepareChannelData(String channel) {
-    print('[CHANNEL_DATA] Preparing data for channel: $channel');
-    Map<String, dynamic> data = {
-      'channelName': channel == 'All' ? 'All Channels' : channelNames[int.parse(channel)],
-      'dataPoints': [],
-    };
-
-    List<Map<String, dynamic>> segmentData = tableData.where((row) {
-      try {
-        List<String> timeParts = (row['AbsTime'] as String).split(':');
-        double timeSeconds = int.parse(timeParts[0]) * 3600 +
-            int.parse(timeParts[1]) * 60 +
-            double.parse(timeParts[2]);
-        double segmentStartTimeSeconds =
-            startTimeSeconds + (currentSegment * ((int.tryParse(_graphVisibleHrController.text) ?? 0) * 3600 + (int.tryParse(_graphVisibleMinController.text) ?? 60) * 60));
-        double segmentEndTimeSeconds = segmentStartTimeSeconds + ((int.tryParse(_graphVisibleHrController.text) ?? 0) * 3600 + (int.tryParse(_graphVisibleMinController.text) ?? 60) * 60);
-        return timeSeconds >= segmentStartTimeSeconds && timeSeconds < segmentEndTimeSeconds;
-      } catch (e) {
-        return false;
-      }
-    }).toList();
-
-    if (channel == 'All') {
-      for (int channelIndex in channelNames.keys) {
-        List<Map<String, dynamic>> points = segmentData.map((row) {
-          return {
-            'time': row['AbsTime'],
-            'value': (row['AbsPer$channelIndex'] as num?)?.toDouble() ?? 0.0,
-          };
-        }).toList();
-        data['dataPoints'].add({
-          'channelIndex': channelIndex,
-          'channelName': channelNames[channelIndex],
-          'points': points,
-        });
-        print('[CHANNEL_DATA] Added ${points.length} points for channel ${channelNames[channelIndex]} (index $channelIndex)');
-      }
-    } else {
-      int channelIndex = int.parse(channel);
-      List<Map<String, dynamic>> points = segmentData.map((row) {
-        return {
-          'time': row['AbsTime'],
-          'value': (row['AbsPer$channelIndex'] as num?)?.toDouble() ?? 0.0,
-        };
-      }).toList();
-      data['dataPoints'] = points;
-      print('[CHANNEL_DATA] Added ${points.length} points for channel ${channelNames[channelIndex]} (index $channelIndex)');
-    }
-
-    return data;
-  }
-
-  Widget _buildChannelSelector() {
+  Widget _buildChannelSelector(bool isDarkMode) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      height: 42, // Increased
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0), // Increased
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: ThemeColors.getColor('textFieldBackground', isDarkMode),
         borderRadius: BorderRadius.circular(8),
-        boxShadow: [
-          BoxShadow(color: Colors.grey.withOpacity(0.1), spreadRadius: 1, blurRadius: 5, offset: const Offset(0, 2)),
-        ],
+        border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.6)),
       ),
-      child: DropdownButton<String>(
-        value: selectedChannel,
-        onChanged: (String? newValue) async {
-          if (newValue != null) {
-            setState(() {
-              selectedChannel = newValue;
-              _calculateYRange();
-            });
-            try {
-              final channelData = _prepareChannelData(newValue);
-              final window = await DesktopMultiWindow.createWindow(jsonEncode({
-                'channel': newValue,
-                'channelData': channelData,
-              }));
-              window.setFrame(const Offset(0, 0) & const Size(800, 600));
-              window.center();
-              final channelTitle = newValue == 'All' ? 'All Channels' : channelNames[int.parse(newValue)];
-              window.setTitle('Graph for $channelTitle');
-              window.show();
-              print('[CHANNEL_SELECTOR] Opened new window for channel: $newValue');
-            } catch (e) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Failed to open new window: $e')),
-              );
-              print('[CHANNEL_SELECTOR] Error opening new window: $e');
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: selectedChannel,
+          isDense: true,
+          style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14, fontWeight: FontWeight.w500), // Increased
+          dropdownColor: ThemeColors.getColor('dropdownBackground', isDarkMode),
+          icon: Icon(Icons.arrow_drop_down_rounded, color: ThemeColors.getColor('dialogText', isDarkMode), size: 24), // Increased
+          onChanged: (String? newValue) {
+            if (newValue != null) {
+              setState(() { selectedChannel = newValue; _calculateYRange(); if (showPeak && selectedChannel != 'All') _highlightPeakOnGraph(); });
             }
-          }
-        },
-        items: [
-          if (channelNames.isNotEmpty)
-            DropdownMenuItem<String>(
-              value: 'All',
-              child: Text(
-                'All',
-                style: GoogleFonts.roboto(
-                  color: AppColors.textPrimary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
+          },
+          items: [
+            DropdownMenuItem<String>(value: 'All', child: Text('All Channels')),
+            ...channelNames.entries.map<DropdownMenuItem<String>>((entry) => DropdownMenuItem<String>(value: entry.key.toString(), child: Text(entry.value))),
+          ].map((item) => DropdownMenuItem<String>(
+            value: item.value,
+            child: Text(
+              (item.child as Text).data!,
+              style: GoogleFonts.roboto(
+                  color: ThemeColors.getColor('dialogText', isDarkMode),
+                  fontSize: 14, // Increased
+                  fontWeight: FontWeight.w500
               ),
             ),
-          ...channelNames.entries.map<DropdownMenuItem<String>>(
-                (entry) => DropdownMenuItem<String>(
-              value: entry.key.toString(),
-              child: Text(
-                entry.value,
-                style: GoogleFonts.roboto(
-                  color: AppColors.textPrimary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ),
-        ],
-        underline: Container(),
-        icon: Icon(Icons.arrow_drop_down, color: AppColors.textPrimary),
+          )).toList(),
+        ),
       ),
     );
   }
 
-  Widget _buildFullInputSection() {
+  void _openFloatingGraphWindow(bool isDarkMode) {
+    late OverlayEntry entry;
+    Offset position = const Offset(100, 100);
+
+    Map<String, List<Map<String, dynamic>>> dataByChannel = {};
+    for (var channelIndex in channelNames.keys) {
+      List<Map<String, dynamic>> channelDataPoints = [];
+      for (var row in tableData) {
+        String timeStr = row['AbsTime'] as String? ?? "00:00:00";
+        DateTime? parsedTime; try { List<String> parts = timeStr.split(':'); if (parts.length == 3) { parsedTime = DateTime.now().copyWith(hour: int.parse(parts[0]), minute: int.parse(parts[1]), second: int.parse(parts[2].split('.').first), millisecond: 0, microsecond: 0); } } catch (e) { /* ignore */ }
+        channelDataPoints.add({'time': timeStr, 'value': (row['AbsPer$channelIndex'] as num?)?.toDouble() ?? 0.0, 'Timestamp': (parsedTime ?? DateTime.now()).millisecondsSinceEpoch.toDouble()});
+      }
+      dataByChannel[channelIndex.toString()] = channelDataPoints;
+    }
+
+    Map<String, Channel> channelConfigs = {};
+    for (var entry in channelNames.entries) {
+      final setupChannel = _channelSetupData[entry.value];
+      channelConfigs[entry.key.toString()] = Channel(
+        recNo: (Global.selectedRecNo?.value ?? 0).toDouble(), channelName: entry.value, startingCharacter: setupChannel?.startingCharacter ?? '', dataLength: setupChannel?.dataLength ?? 7, decimalPlaces: setupChannel?.decimalPlaces ?? 2, unit: setupChannel?.unit ?? _getUnitForChannel(entry.value), chartMaximumValue: setupChannel?.chartMaximumValue ?? maxLoadValues[entry.key]?.toDouble() ?? 1000.0, chartMinimumValue: setupChannel?.chartMinimumValue ?? 0.0, targetAlarmMax: setupChannel?.targetAlarmMax ?? 0.0, targetAlarmMin: setupChannel?.targetAlarmMin ?? 0.0, graphLineColour: graphLineColour[entry.key]?.value ?? _getDefaultColor(entry.key).value, targetAlarmColour: setupChannel?.targetAlarmColour ?? Colors.red.value,
+      );
+    }
+    Map<String, Color> convertedgraphLineColour = { for (var entry in graphLineColour.entries) entry.key.toString(): entry.value };
+
+    entry = OverlayEntry(builder: (context) => Positioned(
+      left: position.dx, top: position.dy,
+      child: SaveMultiWindowGraph(
+        windowId: 'window_${_windowEntries.length}', initialData: dataByChannel, channelColors: convertedgraphLineColour, channelConfigs: channelConfigs, entry: entry,
+        onPositionUpdate: (newPosition) => position = newPosition,
+        onClose: (closedEntry) { if (mounted) setState(() { _windowEntries.remove(closedEntry); closedEntry.remove(); }); },
+      ),
+    ));
+    Overlay.of(context).insert(entry);
+    if (mounted) setState(() => _windowEntries.add(entry));
+  }
+
+  Widget _buildStyledAddButton(bool isDarkMode) {
+    return SizedBox(
+      height: 42, // Increased
+      child: ElevatedButton.icon(
+        icon: const Icon(Icons.add_chart_outlined, color: Colors.white, size: 20), // Increased
+        label: Text('Add Window', style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13.5)), // Increased
+        onPressed: () => _openFloatingGraphWindow(isDarkMode),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: ThemeColors.getColor('submitButton', isDarkMode),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10), // Increased
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          elevation: 1.5,
+          shadowColor: ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.3),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFullInputSection(bool isDarkMode) {
     return Card(
       elevation: 0,
-      color: Colors.white,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.grey[200]!)),
+      color: ThemeColors.getColor('cardBackground', isDarkMode),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7)),
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(12.0),
         child: Column(
           children: [
             Row(
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: _fileNameController,
-                    decoration: InputDecoration(
-                      labelText: 'File Name',
-                      labelStyle: GoogleFonts.roboto(color: AppColors.textPrimary.withOpacity(0.7)),
-                      filled: true,
-                      fillColor: Colors.grey[50],
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-                    ),
-                    style: GoogleFonts.roboto(color: AppColors.textPrimary),
-                    onChanged: (value) => Global.selectedFileName.value = value,
+                Expanded(child: TextField(
+                  controller: _fileNameController,
+                  decoration: InputDecoration(
+                    labelText: 'File Name', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 14), // Increased
+                    filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5))),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 1.2)),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16), // Increased
+                    isDense: true,
                   ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: TextField(
-                    controller: _operatorController,
-                    decoration: InputDecoration(
-                      labelText: 'Operator',
-                      labelStyle: GoogleFonts.roboto(color: AppColors.textPrimary.withOpacity(0.7)),
-                      filled: true,
-                      fillColor: Colors.grey[50],
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-                    ),
-                    style: GoogleFonts.roboto(color: AppColors.textPrimary),
-                    onChanged: (value) => Global.operatorName.value = value,
+                  style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 15), // Increased
+                  onChanged: (value) => Global.selectedFileName.value = value,
+                )),
+                const SizedBox(width: 12),
+                Expanded(child: TextField(
+                  controller: _operatorController,
+                  decoration: InputDecoration(
+                    labelText: 'Operator', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 14), // Increased
+                    filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5))),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 1.2)),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16), // Increased
+                    isDense: true,
                   ),
-                ),
+                  style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 15), // Increased
+                  onChanged: (value) => Global.operatorName.value = value,
+                )),
               ],
             ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Flexible(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('Scan Rate:', style: GoogleFonts.roboto(color: AppColors.textPrimary, fontWeight: FontWeight.w500, fontSize: 14)),
-                      const SizedBox(width: 8),
-                      _buildTimeInputField(_scanRateHrController, 'Hr'),
-                      const SizedBox(width: 8),
-                      _buildTimeInputField(_scanRateMinController, 'Min'),
-                      const SizedBox(width: 8),
-                      _buildTimeInputField(_scanRateSecController, 'Sec'),
-                    ],
-                  ),
-                ),
-                Flexible(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('Test Duration:', style: GoogleFonts.roboto(color: AppColors.textPrimary, fontWeight: FontWeight.w500, fontSize: 14)),
-                      const SizedBox(width: 4),
-                      _buildTimeInputField(_testDurationDayController, 'Day'),
-                      const SizedBox(width: 4),
-                      _buildTimeInputField(_testDurationHrController, 'Hr'),
-                      const SizedBox(width: 4),
-                      _buildTimeInputField(_testDurationMinController, 'Min'),
-                      const SizedBox(width: 4),
-                      _buildTimeInputField(_testDurationSecController, 'Sec'),
-                    ],
-                  ),
-                ),
-              ],
+            const SizedBox(height: 12),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    Text('Scan Rate:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6), // Increased
+                    _buildTimeInputField(_scanRateHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
+                    _buildTimeInputField(_scanRateMinController, 'Min', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
+                    _buildTimeInputField(_scanRateSecController, 'Sec', compact: true, isDarkMode: isDarkMode),
+                  ]),
+                  const SizedBox(width: 16),
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    Text('Test Duration:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6), // Increased
+                    _buildTimeInputField(_testDurationDayController, 'Day', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
+                    _buildTimeInputField(_testDurationHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
+                    _buildTimeInputField(_testDurationMinController, 'Min', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
+                    _buildTimeInputField(_testDurationSecController, 'Sec', compact: true, isDarkMode: isDarkMode),
+                  ]),
+                ],
+              ),
             ),
           ],
         ),
@@ -1591,95 +1181,46 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     );
   }
 
-  Widget _buildLeftSection() {
+  Widget _buildLeftSection(bool isDarkMode) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildFullInputSection(),
-        const SizedBox(height: 16),
+        _buildFullInputSection(isDarkMode),
+        const SizedBox(height: 12),
         if (Global.selectedMode.value == 'Table' || Global.selectedMode.value == 'Combined')
           Expanded(
             child: Card(
               elevation: 0,
-              color: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.grey[200]!)),
+              margin: EdgeInsets.zero,
+              color: ThemeColors.getColor('cardBackground', isDarkMode),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+                side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7)),
+              ),
               child: Padding(
-                padding: const EdgeInsets.all(16.0),
+                padding: const EdgeInsets.all(12.0),
                 child: Column(
                   children: [
-                    Expanded(child: _buildDataTable()),
-                    if (Global.selectedMode.value == 'Table')
-                      Padding(
-                        padding: const EdgeInsets.only(top: 16.0),
-                        child: _buildControlButton(
-                          'Export Table',
-                              () async {
-                            final timeRange = await _showTimeRangeDialog();
-                            List<Map<String, dynamic>> filteredData = tableData;
-                            if (timeRange != null) {
-                              filteredData = _filterDataByTimeRange(timeRange['from']!, timeRange['to']!);
-                              print('[EXPORT_TABLE] Exporting table with ${filteredData.length} records from ${timeRange['from']} to ${timeRange['to']}');
-                            } else {
-                              print('[EXPORT_TABLE] Exporting full table with ${filteredData.length} records');
-                            }
-                            print('[EXPORT_TABLE] File name: ${_fileNameController.text}');
-                            print('[EXPORT_TABLE] Channels included: ${channelNames.values.join(", ")}');
-                            ExportUtils.exportBasedOnMode(
-                              context: context,
-                              mode: 'Table',
-                              tableData: filteredData,
-                              fileName: _fileNameController.text,
-                              graphImage: null,
-                            );
-                          },
-                          color: Colors.blue,
-                        ),
-                      ),
-                    if (Global.selectedMode.value == 'Combined')
-                      Padding(
-                        padding: const EdgeInsets.only(top: 16.0),
-                        child: _buildControlButton(
-                          'Export All',
-                              () async {
-                            final timeRange = await _showTimeRangeDialog();
-                            List<Map<String, dynamic>> filteredData = tableData;
-                            if (timeRange != null) {
-                              filteredData = _filterDataByTimeRange(timeRange['from']!, timeRange['to']!);
-                              print('[EXPORT_COMBINED] Exporting combined data with ${filteredData.length} records from ${timeRange['from']} to ${timeRange['to']}');
-                            } else {
-                              print('[EXPORT_COMBINED] Exporting full combined data with ${filteredData.length} records');
-                            }
-                            print('[EXPORT_COMBINED] File name: ${_fileNameController.text}');
-                            print('[EXPORT_COMBINED] Channels included: ${channelNames.values.join(", ")}');
-
-                            List<Map<String, dynamic>> originalData = List.from(tableData);
-                            setState(() {
-                              tableData = filteredData;
-                              _calculateYRange();
-                              _calculateGraphSegments();
-                            });
-                            print('[EXPORT_COMBINED] Temporarily set tableData to filtered data for graph capture');
-
-                            Uint8List? graphImage = await _captureGraph();
-                            print('[EXPORT_COMBINED] Graph image captured: ${graphImage != null ? 'Yes' : 'No'}');
-
-                            setState(() {
-                              tableData = originalData;
-                              _calculateYRange();
-                              _calculateGraphSegments();
-                            });
-                            print('[EXPORT_COMBINED] Restored original tableData');
-
-                            ExportUtils.exportBasedOnMode(
-                              context: context,
-                              mode: 'Combined',
-                              tableData: filteredData,
-                              fileName: _fileNameController.text,
-                              graphImage: graphImage,
-                            );
-                          },
-                          color: Colors.blue,
-                        ),
+                    Expanded(child: _buildDataTable(isDarkMode)),
+                    const SizedBox(height: 12),
+                    if (Global.selectedMode.value == 'Table' || Global.selectedMode.value == 'Combined')
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (Global.selectedMode.value == 'Table')
+                            _buildControlButton('Export Table', () async {
+                              final timeRange = await _showTimeRangeDialog(isDarkMode);
+                              List<Map<String, dynamic>> data = timeRange != null ? _filterDataByTimeRange(timeRange['from']!, timeRange['to']!) : tableData;
+                              ExportUtils.exportBasedOnMode(context: context, mode: 'Table', tableData: data, fileName: _fileNameController.text, graphImage: null, authSettings: await DatabaseManager().getAuthSettings(), channelNames: channelNames, isDarkMode: isDarkMode);
+                            }, isDarkMode: isDarkMode, icon: Icons.table_chart_outlined),
+                          if (Global.selectedMode.value == 'Combined')
+                            _buildControlButton('Export All (Table & Graph)', () async {
+                              final timeRange = await _showTimeRangeDialog(isDarkMode);
+                              List<Map<String, dynamic>> data = timeRange != null ? _filterDataByTimeRange(timeRange['from']!, timeRange['to']!) : tableData;
+                              Uint8List? graphImg = await _captureGraph(filteredData: timeRange != null ? data : null, isDarkMode: isDarkMode);
+                              ExportUtils.exportBasedOnMode(context: context, mode: 'Combined', tableData: data, fileName: _fileNameController.text, graphImage: graphImg, authSettings: await DatabaseManager().getAuthSettings(), channelNames: channelNames, isDarkMode: isDarkMode);
+                            }, isDarkMode: isDarkMode, icon: Icons.summarize_outlined),
+                        ],
                       ),
                   ],
                 ),
@@ -1690,187 +1231,91 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     );
   }
 
-  Widget _buildRightSection() {
+  Widget _buildRightSection(bool isDarkMode) {
+    // Conditional elevation for the graph card
+    double graphCardElevation = (selectedChannel == 'All') ? 0.0 : 2.0;
+
     if (Global.selectedMode.value == 'Graph') {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Card(
-            elevation: 0,
-            color: Colors.white,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.grey[200]!)),
+            elevation: 0, // Controls card always flat
+            color: ThemeColors.getColor('cardBackground', isDarkMode),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
             child: Padding(
-              padding: const EdgeInsets.all(8.0),
+              padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 8.0),
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    SizedBox(
-                      width: 100,
-                      child: TextField(
-                        controller: _fileNameController,
-                        decoration: InputDecoration(
-                          labelText: 'File Name',
-                          labelStyle: GoogleFonts.roboto(color: AppColors.textPrimary.withOpacity(0.7), fontSize: 12, fontWeight: FontWeight.bold),
-                          filled: true,
-                          fillColor: Colors.grey[50],
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-                        ),
-                        style: GoogleFonts.roboto(color: AppColors.textPrimary, fontSize: 12, fontWeight: FontWeight.bold),
-                        onChanged: (value) => Global.selectedFileName.value = value,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      width: 100,
-                      child: TextField(
-                        controller: _operatorController,
-                        decoration: InputDecoration(
-                          labelText: 'Operator',
-                          labelStyle: GoogleFonts.roboto(color: AppColors.textPrimary.withOpacity(0.7), fontSize: 12, fontWeight: FontWeight.bold),
-                          filled: true,
-                          fillColor: Colors.grey[50],
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-                        ),
-                        style: GoogleFonts.roboto(color: AppColors.textPrimary, fontSize: 12, fontWeight: FontWeight.bold),
-                        onChanged: (value) => Global.operatorName.value = value,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Flexible(
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text('Scan Rate:', style: GoogleFonts.roboto(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 12)),
-                          const SizedBox(width: 4),
-                          _buildTimeInputField(_scanRateHrController, 'Hr', compact: true),
-                          const SizedBox(width: 4),
-                          _buildTimeInputField(_scanRateMinController, 'Min', compact: true),
-                          const SizedBox(width: 4),
-                          _buildTimeInputField(_scanRateSecController, 'Sec', compact: true),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Flexible(
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text('Test Duration:', style: GoogleFonts.roboto(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 12)),
-                          const SizedBox(width: 4),
-                          _buildTimeInputField(_testDurationDayController, 'Day', compact: true),
-                          const SizedBox(width: 4),
-                          _buildTimeInputField(_testDurationHrController, 'Hr', compact: true),
-                          const SizedBox(width: 4),
-                          _buildTimeInputField(_testDurationMinController, 'Min', compact: true),
-                          const SizedBox(width: 4),
-                          _buildTimeInputField(_testDurationSecController, 'Sec', compact: true),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Flexible(
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text('Segment:', style: GoogleFonts.roboto(color: AppColors.textPrimary, fontWeight: FontWeight.bold, fontSize: 12)),
-                          const SizedBox(width: 4),
-                          _buildTimeInputField(_graphVisibleHrController, 'Hr', compact: true),
-                          const SizedBox(width: 4),
-                          _buildTimeInputField(_graphVisibleMinController, 'Min', compact: true),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    _buildChannelSelector(),
-                  ],
+                    SizedBox(width: 130, child: TextField( // Increased
+                      controller: _fileNameController, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500), // Increased
+                      decoration: InputDecoration(labelText: 'File', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none), contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), isDense: true), // Increased
+                      onChanged: (v) => Global.selectedFileName.value = v,
+                    )),
+                    SizedBox(width: 110, child: TextField( // Increased
+                      controller: _operatorController, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500), // Increased
+                      decoration: InputDecoration(labelText: 'Operator', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none), contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), isDense: true), // Increased
+                      onChanged: (v) => Global.operatorName.value = v,
+                    )),
+                    Row(mainAxisSize: MainAxisSize.min, children: [
+                      Text('Seg:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 13)), const SizedBox(width: 4), // Increased
+                      _buildTimeInputField(_graphVisibleHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 2), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 2),
+                      _buildTimeInputField(_graphVisibleMinController, 'Min', compact: true, isDarkMode: isDarkMode),
+                    ]),
+                    _buildChannelSelector(isDarkMode),
+                    _buildStyledAddButton(isDarkMode),
+                  ].expand((w) => [w, const SizedBox(width: 8)]).toList()..removeLast(), // Consistent spacing
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
           Expanded(
             child: Card(
-              elevation: 0,
-              color: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.grey[200]!)),
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    Expanded(child: _buildGraph()),
-                    const SizedBox(height: 16),
-                    _buildControlButton(
-                      'Export Graph',
-                          () async {
-                        final timeRange = await _showTimeRangeDialog();
-                        List<Map<String, dynamic>> filteredData = tableData;
-                        if (timeRange != null) {
-                          filteredData = _filterDataByTimeRange(timeRange['from']!, timeRange['to']!);
-                          print('[EXPORT_GRAPH] Exporting graph with ${filteredData.length} records from ${timeRange['from']} to ${timeRange['to']}');
-                        } else {
-                          print('[EXPORT_GRAPH] Exporting full graph with ${filteredData.length} records');
-                        }
-                        print('[EXPORT_GRAPH] File name: ${_fileNameController.text}');
-                        print('[EXPORT_GRAPH] Channels included: ${channelNames.values.join(", ")}');
-                        print('[EXPORT_GRAPH] Sample data (first 5 rows): ${filteredData.take(5).toList()}');
-                        Uint8List? graphImage = await _captureGraph(filteredData: filteredData);
-                        print('[EXPORT_GRAPH] Graph image captured: ${graphImage != null ? 'Yes' : 'No'}');
-                        ExportUtils.exportBasedOnMode(
-                          context: context,
-                          mode: 'Graph',
-                          tableData: filteredData,
-                          fileName: _fileNameController.text,
-                          graphImage: graphImage,
-                        );
-                      },
-                      color: Colors.blue,
-                    ),
-                  ],
-                ),
-              ),
+              elevation: graphCardElevation, // Conditional shadow
+              margin: EdgeInsets.zero,
+              color: ThemeColors.getColor('cardBackground', isDarkMode),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
+              child: _buildGraph(isDarkMode: isDarkMode),
             ),
           ),
+          const SizedBox(height: 12),
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            _buildControlButton('Export Graph', () async {
+              final timeRange = await _showTimeRangeDialog(isDarkMode);
+              List<Map<String, dynamic>> data = timeRange != null ? _filterDataByTimeRange(timeRange['from']!, timeRange['to']!) : tableData;
+              Uint8List? graphImg = await _captureGraph(filteredData: timeRange != null ? data : null, isDarkMode: isDarkMode);
+              ExportUtils.exportBasedOnMode(context: context, mode: 'Graph', tableData: [], fileName: _fileNameController.text, graphImage: graphImg, authSettings: await DatabaseManager().getAuthSettings(), channelNames: channelNames, isDarkMode: isDarkMode);
+            }, isDarkMode: isDarkMode, icon: Icons.image_search_outlined),
+          ]),
         ],
       );
-    } else {
+    } else { // Combined View - Right Side (Graph)
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              Flexible(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('Graph Segment:', style: GoogleFonts.roboto(color: AppColors.textPrimary, fontWeight: FontWeight.w500, fontSize: 14)),
-                    const SizedBox(width: 8),
-                    _buildTimeInputField(_graphVisibleHrController, 'Hr'),
-                    const SizedBox(width: 8),
-                    _buildTimeInputField(_graphVisibleMinController, 'Min'),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 16),
-              _buildDateTimeDisplay(),
-              const SizedBox(width: 16),
-              _buildChannelSelector(),
-            ],
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8.0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                Text('Graph Seg:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6), // Increased
+                _buildTimeInputField(_graphVisibleHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
+                _buildTimeInputField(_graphVisibleMinController, 'Min', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 12),
+                _buildChannelSelector(isDarkMode), const SizedBox(width: 12),
+                _buildStyledAddButton(isDarkMode),
+              ],
+            ),
           ),
-          const SizedBox(height: 16),
           Expanded(
             child: Card(
-              elevation: 0,
-              color: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: Colors.grey[200]!)),
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: _buildGraph(),
-              ),
+              elevation: graphCardElevation, // Conditional shadow
+              margin: EdgeInsets.zero,
+              color: ThemeColors.getColor('cardBackground', isDarkMode),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
+              child: _buildGraph(isDarkMode: isDarkMode),
             ),
           ),
         ],
@@ -1880,77 +1325,82 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return Scaffold(
-        backgroundColor: AppColors.background,
-        body: SafeArea(
-          child: Center(child: CircularProgressIndicator()),
-        ),
-      );
-    }
-    if (_fetchError != null) {
-      return Scaffold(
-        backgroundColor: AppColors.background,
-        body: SafeArea(
-          child: Center(
-            child: Text(
-              _fetchError!,
-              style: GoogleFonts.roboto(fontSize: 16, color: Colors.red),
+    return ValueListenableBuilder<bool>(
+      valueListenable: Global.isDarkMode,
+      builder: (context, isDarkMode, child) {
+        if (_isLoading && !_isDatabaseInitialized) {
+          return Scaffold(backgroundColor: ThemeColors.getColor('appBackground', isDarkMode), body: Center(child: CircularProgressIndicator(color: ThemeColors.getColor('submitButton', isDarkMode))));
+        }
+        if ((_fetchError != null && tableData.isEmpty && channelNames.isEmpty) || (Global.selectedRecNo?.value == null && !_isLoading)) {
+          return Scaffold(
+            backgroundColor: ThemeColors.getColor('appBackground', isDarkMode),
+            body: SafeArea(child: Center(child: Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.error_outline_rounded, color: ThemeColors.getColor('errorText', isDarkMode), size: 44), const SizedBox(height: 12),
+                Text(_fetchError ?? "No data record selected or an error occurred.", textAlign: TextAlign.center, style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500)),
+                const SizedBox(height: 18),
+                ElevatedButton.icon(
+                  icon: Icon(Icons.refresh_rounded, color: Colors.white, size: 18),
+                  label: Text("Retry / Re-initialize", style: GoogleFonts.roboto(color: Colors.white, fontSize: 13)),
+                  style: ElevatedButton.styleFrom(backgroundColor: ThemeColors.getColor('submitButton', isDarkMode), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)),
+                  onPressed: () => _initializeAndFetchData(),
+                )
+              ]),
+            ))),
+          );
+        }
+
+        return Scaffold(
+          backgroundColor: ThemeColors.getColor('appBackground', isDarkMode),
+          body: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(12.0),
+              child: ValueListenableBuilder<String>(
+                valueListenable: Global.selectedMode,
+                builder: (context, mode, _) {
+                  bool showLeft = mode == 'Table' || mode == 'Combined';
+                  bool showRight = mode == 'Graph' || mode == 'Combined';
+                  int leftFlex = mode == 'Combined' ? 1 : (mode == 'Table' ? 1 : 0);
+                  int rightFlex = mode == 'Combined' ? (showLeft ? 1 : 2) : (mode == 'Graph' ? 1 : 0); // Give graph more space if it's alone or combined with table
+                  if (mode == 'Table') rightFlex = 0;
+                  if (mode == 'Graph') leftFlex = 0;
+
+
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (showLeft) Expanded(flex: leftFlex, child: _buildLeftSection(isDarkMode)),
+                      if (showLeft && showRight) const SizedBox(width: 12),
+                      if (showRight) Expanded(flex: rightFlex, child: _buildRightSection(isDarkMode)),
+                    ],
+                  );
+                },
+              ),
             ),
           ),
-        ),
-      );
-    }
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: ValueListenableBuilder<String>(
-            valueListenable: Global.selectedMode,
-            builder: (context, mode, child) {
-              print('[BUILD] Building UI for mode: $mode');
-              return Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (mode == 'Table' || mode == 'Combined') Expanded(flex: 1, child: _buildLeftSection()),
-                  if (mode == 'Graph' || mode == 'Combined') Expanded(flex: 1, child: _buildRightSection()),
-                ],
-              );
-            },
-          ),
-        ),
-      ),
+        );
+      },
     );
   }
 
   @override
   void dispose() {
-    _fileNameController.dispose();
-    _operatorController.dispose();
-    _scanRateHrController.dispose();
-    _scanRateMinController.dispose();
-    _scanRateSecController.dispose();
-    _testDurationDayController.dispose();
-    _testDurationHrController.dispose();
-    _testDurationMinController.dispose();
-    _testDurationSecController.dispose();
-    _graphVisibleHrController.dispose();
-    _graphVisibleMinController.dispose();
-    _tableHorizontalScrollController.dispose();
-    _tableVerticalScrollController.dispose();
+    _fileNameController.dispose(); _operatorController.dispose();
+    _scanRateHrController.dispose(); _scanRateMinController.dispose(); _scanRateSecController.dispose();
+    _testDurationDayController.dispose(); _testDurationHrController.dispose(); _testDurationMinController.dispose(); _testDurationSecController.dispose();
+    _graphVisibleHrController.dispose(); _graphVisibleMinController.removeListener(_updateGraphSegments); _graphVisibleMinController.dispose();
+    _tableHorizontalScrollController.dispose(); _tableVerticalScrollController.dispose();
     _animationController.dispose();
+
     Global.selectedRecNo?.removeListener(_onRecNoChanged);
-    Global.selectedFileName.removeListener(_onGlobalChanged);
+    Global.selectedFileName.removeListener(_onGlobalChanged); Global.selectedDBName.removeListener(_onGlobalChanged);
     Global.operatorName.removeListener(_onGlobalChanged);
-    Global.scanningRateHH.removeListener(_onGlobalChanged);
-    Global.scanningRateMM.removeListener(_onGlobalChanged);
-    Global.scanningRateSS.removeListener(_onGlobalChanged);
-    Global.testDurationDD?.removeListener(_onGlobalChanged);
-    Global.testDurationHH.removeListener(_onGlobalChanged);
-    Global.testDurationMM.removeListener(_onGlobalChanged);
-    Global.testDurationSS.removeListener(_onGlobalChanged);
-    print('[DISPOSE] OpenFilePage disposed, database closed');
+    Global.scanningRateHH.removeListener(_onGlobalChanged); Global.scanningRateMM.removeListener(_onGlobalChanged); Global.scanningRateSS.removeListener(_onGlobalChanged);
+    Global.testDurationDD?.removeListener(_onGlobalChanged); Global.testDurationHH.removeListener(_onGlobalChanged); Global.testDurationMM.removeListener(_onGlobalChanged); Global.testDurationSS.removeListener(_onGlobalChanged);
+    Global.isDarkMode.removeListener(_onThemeChanged);
+
+    LogPage.addLog('[$_currentTime] [DISPOSE] OpenFilePage disposed.');
     super.dispose();
   }
 }

@@ -1,14 +1,14 @@
 class Channel {
-  final double recNo; // Changed to double to handle REAL
+  final double recNo;
   final String channelName;
   final String startingCharacter;
   final int dataLength;
   final int decimalPlaces;
   final String unit;
-  final double chartMaximumValue; // Changed to double to handle REAL
-  final double chartMinimumValue; // Changed to double to handle REAL
-  final double targetAlarmMax; // Changed to double to handle REAL
-  final double targetAlarmMin; // Changed to double to handle REAL
+  final double chartMaximumValue;
+  final double chartMinimumValue;
+  final double targetAlarmMax;
+  final double targetAlarmMin;
   final int graphLineColour;
   final int targetAlarmColour;
 
@@ -28,23 +28,88 @@ class Channel {
   });
 
   factory Channel.fromJson(Map<String, dynamic> json) {
+    // Helper to safely parse dynamic values to int
+    int _parseToInt(dynamic value, int defaultValue) {
+      if (value == null) return defaultValue;
+      if (value is int) return value;
+      if (value is double) return value.toInt();
+      if (value is String) {
+        int? parsedInt = int.tryParse(value);
+        if (parsedInt != null) return parsedInt;
+        double? parsedDouble = double.tryParse(value);
+        if (parsedDouble != null) return parsedDouble.toInt();
+        return defaultValue;
+      }
+      return defaultValue;
+    }
+
+    // Helper to safely parse dynamic values to double
+    double _parseToDouble(dynamic value, double defaultValue) {
+      if (value == null) return defaultValue;
+      if (value is double) return value;
+      if (value is int) return value.toDouble();
+      if (value is String) return double.tryParse(value) ?? defaultValue;
+      return defaultValue;
+    }
+
+    // Helper to parse color strings (hex RRGGBB, #RRGGBB, RRGGBBAA, #RRGGBBAA, or shorthand like F0C) to int (AARRGGBB)
+    int _parseColor(dynamic colorValue, int defaultValue) {
+      if (colorValue is String && colorValue.isNotEmpty) {
+        String hex = colorValue.replaceAll('#', '').toUpperCase();
+
+        // Expand shorthand hex (e.g., F0C to FF00CC)
+        if (hex.length == 3) {
+          hex = hex.split('').map((c) => c + c).join('');
+        }
+
+        // Add full opacity (FF) if RRGGBB
+        if (hex.length == 6) {
+          hex = 'FF$hex';
+        }
+
+        // Parse AARRGGBB
+        if (hex.length == 8) {
+          try {
+            return int.parse(hex, radix: 16);
+          } catch (e) {
+            print('Error parsing color "$colorValue" (processed as "$hex"): $e');
+            return defaultValue;
+          }
+        }
+        print('Invalid color format "$colorValue". Using default.');
+        return defaultValue;
+      } else if (colorValue is int) {
+        return colorValue;
+      }
+      return defaultValue;
+    }
+
+    // Default colors
+    const int defaultGraphColor = 0xFF000000; // Black
+    const int defaultAlarmColor = 0xFFFF0000; // Red
+
     return Channel(
-      recNo: (json['RecNo'] is int ? json['RecNo'].toDouble() : json['RecNo']) as double,
+      recNo: _parseToDouble(json['RecNo'], 0.0),
       channelName: json['ChannelName'] as String? ?? '',
       startingCharacter: json['StartingCharacter'] as String? ?? '',
-      dataLength: json['DataLength'] as int? ?? 0,
-      decimalPlaces: json['DecimalPlaces'] as int? ?? 0,
+      dataLength: _parseToInt(json['DataLength'], 7), // Default to 7 for format like 'L123.4'
+      decimalPlaces: _parseToInt(json['DecimalPlaces'], 1), // Default to 1 decimal place
       unit: json['Unit'] as String? ?? '',
-      chartMaximumValue: (json['ChartMaximumValue'] is int ? json['ChartMaximumValue'].toDouble() : json['ChartMaximumValue']) as double? ?? 0.0,
-      chartMinimumValue: (json['ChartMinimumValue'] is int ? json['ChartMinimumValue'].toDouble() : json['ChartMinimumValue']) as double? ?? 0.0,
-      targetAlarmMax: (json['TargetAlarmMax'] is int ? json['TargetAlarmMax'].toDouble() : json['TargetAlarmMax']) as double? ?? 0.0,
-      targetAlarmMin: (json['TargetAlarmMin'] is int ? json['TargetAlarmMin'].toDouble() : json['TargetAlarmMin']) as double? ?? 0.0,
-      graphLineColour: json['GraphLineColour'] as int? ?? 0,
-      targetAlarmColour: json['TargetAlarmColour'] as int? ?? 0,
+      chartMaximumValue: _parseToDouble(json['ChartMaximumValue'], 100.0),
+      chartMinimumValue: _parseToDouble(json['ChartMinimumValue'], 0.0),
+      targetAlarmMax: _parseToDouble(json['TargetAlarmMax'], 0.0),
+      targetAlarmMin: _parseToDouble(json['TargetAlarmMin'], 0.0),
+      graphLineColour: _parseColor(json['graphLineColour'], defaultGraphColor),
+      targetAlarmColour: _parseColor(json['TargetAlarmColour'], defaultAlarmColor),
     );
   }
 
   Map<String, dynamic> toJson() {
+    // Convert int color (AARRGGBB) to hex string (RRGGBB)
+    String _toColorHexString(int colorValue) {
+      return colorValue.toRadixString(16).padLeft(8, '0').substring(2).toUpperCase();
+    }
+
     return {
       'RecNo': recNo,
       'ChannelName': channelName,
@@ -56,8 +121,8 @@ class Channel {
       'ChartMinimumValue': chartMinimumValue,
       'TargetAlarmMax': targetAlarmMax,
       'TargetAlarmMin': targetAlarmMin,
-      'GraphLineColour': graphLineColour,
-      'TargetAlarmColour': targetAlarmColour,
+      'ChannelColour': _toColorHexString(graphLineColour),
+      'TargetAlarmColour': _toColorHexString(targetAlarmColour),
     };
   }
 
@@ -65,11 +130,17 @@ class Channel {
   String toString() {
     return 'Channel('
         'recNo: $recNo, '
-        'channelName: $channelName, '
-        'startingCharacter: $startingCharacter, '
-        'unit: $unit, '
+        'channelName: "$channelName", '
+        'startingCharacter: "$startingCharacter", '
         'dataLength: $dataLength, '
-        'decimalPlaces: $decimalPlaces'
+        'decimalPlaces: $decimalPlaces, '
+        'unit: "$unit", '
+        'chartMaximumValue: $chartMaximumValue, '
+        'chartMinimumValue: $chartMinimumValue, '
+        'targetAlarmMax: $targetAlarmMax, '
+        'targetAlarmMin: $targetAlarmMin, '
+        'graphLineColour: #${graphLineColour.toRadixString(16).padLeft(8, '0').toUpperCase()}, '
+        'targetAlarmColour: #${targetAlarmColour.toRadixString(16).padLeft(8, '0').toUpperCase()}'
         ')';
   }
 }

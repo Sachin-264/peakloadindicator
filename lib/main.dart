@@ -1,102 +1,19 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as path;
+import 'package:google_fonts/google_fonts.dart';
+import 'package:lucide_icons/lucide_icons.dart';
+import 'Pages/LoginPage/loginpage.dart';
 import 'Pages/homepage.dart';
-import 'constants/colors.dart'; // Assuming AppColors is defined here
+import 'SplashScreen.dart';
+import 'constants/colors.dart';
+import 'constants/database_manager.dart';
+import 'constants/global.dart';
+import 'constants/theme.dart';
 
-// Global notifier for isScanning
 ValueNotifier<bool> isScanningNotifier = ValueNotifier<bool>(false);
 
-// Database manager for persistent storage
-class DatabaseManager {
-  static final DatabaseManager _instance = DatabaseManager._internal();
-  Database? _database;
-
-  factory DatabaseManager() => _instance;
-
-  DatabaseManager._internal();
-
-  Future<Database> get database async {
-    if (_database != null && _database!.isOpen) return _database!;
-
-    final appDocumentsDir = await getApplicationDocumentsDirectory();
-    final dbPath = path.join(appDocumentsDir.path, 'Countronics.db');
-
-    await Directory(path.dirname(dbPath)).create(recursive: true);
-    _database = await databaseFactoryFfi.openDatabase(dbPath);
-    await _initializeDatabase();
-    return _database!;
-  }
-
-  Future<void> _initializeDatabase() async {
-    final db = _database;
-    if (db == null) return;
-
-    await db.execute('''
-      CREATE TABLE IF NOT EXISTS Test (
-        RecNo REAL PRIMARY KEY,
-        FName TEXT,
-        OperatorName TEXT,
-        TDate TEXT,
-        TTime TEXT,
-        ScanningRate REAL,
-        ScanningRateHH REAL,
-        ScanningRateMM REAL,
-        ScanningRateSS REAL,
-        TestDurationDD REAL,
-        TestDurationHH REAL,
-        TestDurationMM REAL,
-        GraphVisibleArea REAL,
-        BaseLine REAL,
-        FullScale REAL,
-        Descrip TEXT,
-        AbsorptionPer REAL,
-        NOR REAL,
-        FLName TEXT,
-        XAxis TEXT,
-        XAxisRecNo REAL,
-        XAxisUnit TEXT,
-        XAxisCode REAL,
-        TotalChannel INTEGER,
-        MaxYAxis REAL,
-        MinYAxis REAL
-      )
-    ''');
-    await db.execute('''
-      CREATE TABLE IF NOT EXISTS Test1 (
-        RecNo REAL,
-        SNo REAL,
-        SlNo REAL,
-        ChangeTime TEXT,
-        AbsDate TEXT,
-        AbsTime TEXT,
-        AbsDateTime TEXT,
-        Shown TEXT,
-        AbsAvg REAL,
-        ${List.generate(50, (i) => 'AbsPer${i + 1} REAL').join(', ')}
-      )
-    ''');
-    await db.execute('''
-      CREATE TABLE IF NOT EXISTS Test2 (
-        RecNo REAL PRIMARY KEY,
-        ${List.generate(50, (i) => 'ChannelName${i + 1} TEXT').join(', ')}
-      )
-    ''');
-  }
-
-  Future<void> close() async {
-    if (_database != null && _database!.isOpen) {
-      await _database!.close();
-      _database = null;
-    }
-  }
-}
-
-// Custom Title Bar Widget
-class CustomTitleBar extends StatelessWidget {
+class CustomTitleBar extends StatefulWidget {
   final String title;
 
   const CustomTitleBar({
@@ -105,155 +22,29 @@ class CustomTitleBar extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Container(
-      height: 48,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [Color(0xFF2D2D2D), Color(0xFF1A1A1A)], // Dark grey to black
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        border: Border.all(
-          color: Colors.white.withOpacity(0.1),
-          width: 1,
-        ),
-        borderRadius: const BorderRadius.only(
-          topLeft: Radius.circular(12),
-          topRight: Radius.circular(12),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.3),
-            blurRadius: 10,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          // App Icon
-          Padding(
-            padding: const EdgeInsets.only(left: 12),
-            child: Icon(
-              Icons.analytics, // Replace with your app icon (e.g., Image.asset)
-              color: Colors.white.withOpacity(0.9),
-              size: 24,
-            ),
-          ),
-          // Title
-          Expanded(
-            child: MoveWindow(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  title,
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.9),
-                    fontWeight: FontWeight.w600,
-                    fontSize: 16,
-                    letterSpacing: 1.2,
-                    shadows: [
-                      Shadow(
-                        color: Colors.black.withOpacity(0.5),
-                        blurRadius: 2,
-                        offset: const Offset(1, 1),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-          // Minimize Button
-          WindowButton(
-            icon: Icons.remove,
-            onPressed: () => appWindow.minimize(),
-            tooltip: 'Minimize',
-          ),
-          // Maximize/Restore Button
-          WindowButton(
-            icon: appWindow.isMaximized ? Icons.filter_none : Icons.crop_square,
-            onPressed: () => appWindow.maximizeOrRestore(),
-            tooltip: appWindow.isMaximized ? 'Restore' : 'Maximize',
-          ),
-          // Close Button
-          ValueListenableBuilder<bool>(
-            valueListenable: isScanningNotifier,
-            builder: (context, isScanning, child) {
-              return WindowButton(
-                icon: Icons.close,
-                onPressed: () async {
-                  if (isScanning) {
-                    final shouldClose = await showDialog<bool>(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        title: const Text('Confirm Close'),
-                        content: const Text(
-                            'Scanning is active. Are you sure you want to close the application?'),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.of(context).pop(false),
-                            child: const Text('Cancel'),
-                          ),
-                          TextButton(
-                            onPressed: () => Navigator.of(context).pop(true),
-                            child: const Text('Close'),
-                          ),
-                        ],
-                      ),
-                    );
-                    if (shouldClose == true) {
-                      appWindow.close();
-                    }
-                  } else {
-                    appWindow.close();
-                  }
-                },
-                tooltip: 'Close',
-                isClose: true,
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
+  State<CustomTitleBar> createState() => _CustomTitleBarState();
 }
 
-// Custom WindowButton Widget with Hover and Animation
-class WindowButton extends StatefulWidget {
-  final IconData icon;
-  final VoidCallback onPressed;
-  final String tooltip;
-  final bool isClose;
-
-  const WindowButton({
-    super.key,
-    required this.icon,
-    required this.onPressed,
-    required this.tooltip,
-    this.isClose = false,
-  });
-
-  @override
-  State<WindowButton> createState() => _WindowButtonState();
-}
-
-class _WindowButtonState extends State<WindowButton> with SingleTickerProviderStateMixin {
+class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProviderStateMixin {
+  late Stream<DateTime> _timeStream;
   bool _isHovered = false;
   late AnimationController _controller;
   late Animation<double> _scaleAnimation;
+  late Animation<Color?> _colorAnimation;
+  late Animation<double> _timeFadeAnimation;
 
   @override
   void initState() {
     super.initState();
+    _timeStream = Stream.periodic(const Duration(seconds: 1), (_) => DateTime.now());
     _controller = AnimationController(
-      duration: const Duration(milliseconds: 150),
+      duration: const Duration(milliseconds: 300),
       vsync: this,
     );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.15).animate(
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.1).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOutCubic),
+    );
+    _timeFadeAnimation = Tween<double>(begin: 0.6, end: 1.0).animate(
       CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
     );
   }
@@ -266,6 +57,251 @@ class _WindowButtonState extends State<WindowButton> with SingleTickerProviderSt
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: Global.isDarkMode,
+      builder: (context, isDarkMode, _) {
+        _colorAnimation = ColorTween(
+          begin: ThemeColors.getColor('titleBarText', isDarkMode),
+          end: ThemeColors.getColor('titleBarIcon', isDarkMode),
+        ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOutCubic));
+
+        return MouseRegion(
+          onEnter: (_) {
+            setState(() => _isHovered = true);
+            _controller.forward();
+          },
+          onExit: (_) {
+            setState(() => _isHovered = false);
+            _controller.reverse();
+          },
+          child: Container(
+            height: 56,
+            decoration: BoxDecoration(
+              gradient: ThemeColors.getTitleBarGradient(isDarkMode),
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(12),
+                topRight: Radius.circular(12),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(_isHovered ? 0.3 : 0.2),
+                  blurRadius: 12,
+                  spreadRadius: _isHovered ? 2 : 0,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(left: 16),
+                  child: ScaleTransition(
+                    scale: _scaleAnimation,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        boxShadow: _isHovered
+                            ? [
+                          BoxShadow(
+                            color: ThemeColors.getColor('sidebarGlow', isDarkMode).withOpacity(0.4),
+                            blurRadius: 8,
+                            spreadRadius: 2,
+                          ),
+                        ]
+                            : [],
+                      ),
+                      child: Icon(
+                        LucideIcons.cpu,
+                        color: _colorAnimation.value,
+                        size: 28,
+                      ),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: MoveWindow(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          AnimatedBuilder(
+                            animation: _colorAnimation,
+                            builder: (context, child) {
+                              return Text(
+                                widget.title,
+                                style: GoogleFonts.poppins(
+                                  color: _colorAnimation.value,
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 20,
+                                  letterSpacing: 0.8,
+                                ),
+                              );
+                            },
+                          ),
+                          FadeTransition(
+                            opacity: _timeFadeAnimation,
+                            child: StreamBuilder<DateTime>(
+                              stream: _timeStream,
+                              builder: (context, snapshot) {
+                                final time = snapshot.data?.toString().substring(11, 19) ?? '00:00:00';
+                                return Padding(
+                                  padding: const EdgeInsets.only(right: 16),
+                                  child: Text(
+                                    time,
+                                    style: GoogleFonts.poppins(
+                                      color: ThemeColors.getColor('titleBarText', isDarkMode),
+                                      fontWeight: FontWeight.w500,
+                                      fontSize: 16,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                WindowButton(
+                  icon: Icons.remove,
+                  onPressed: () => appWindow.minimize(),
+                  tooltip: 'Minimize',
+                  isDarkMode: isDarkMode,
+                ),
+                WindowButton(
+                  icon: appWindow.isMaximized ? Icons.filter_none : Icons.crop_square,
+                  onPressed: () => appWindow.maximizeOrRestore(),
+                  tooltip: appWindow.isMaximized ? 'Restore' : 'Maximize',
+                  isDarkMode: isDarkMode,
+                ),
+                ValueListenableBuilder<bool>(
+                  valueListenable: isScanningNotifier,
+                  builder: (context, isScanning, child) {
+                    return WindowButton(
+                      icon: Icons.close,
+                      onPressed: () async {
+                        if (isScanning) {
+                          final shouldClose = await showDialog<bool>(
+                            context: context,
+                            builder: (context) => AlertDialog(
+                              title: Text(
+                                'Confirm Close',
+                                style: GoogleFonts.poppins(
+                                  color: ThemeColors.getColor('dialogText', isDarkMode),
+                                ),
+                              ),
+                              content: Text(
+                                'Scanning is active. Are you sure you want to close the application?',
+                                style: GoogleFonts.poppins(
+                                  color: ThemeColors.getColor('dialogSubText', isDarkMode),
+                                ),
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.of(context).pop(false),
+                                  child: Text(
+                                    'Cancel',
+                                    style: GoogleFonts.poppins(
+                                      color: ThemeColors.getColor('submitButton', isDarkMode),
+                                    ),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () => Navigator.of(context).pop(true),
+                                  child: Text(
+                                    'Close',
+                                    style: GoogleFonts.poppins(
+                                      color: ThemeColors.getColor('resetButton', isDarkMode),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                          );
+                          if (shouldClose == true) {
+                            appWindow.close();
+                          }
+                        } else {
+                          if (Navigator.of(context).canPop()) {
+                            Navigator.of(context).pop();
+                          } else {
+                            appWindow.close();
+                          }
+                        }
+                      },
+                      tooltip: 'Close',
+                      isClose: true,
+                      isDarkMode: isDarkMode,
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class WindowButton extends StatefulWidget {
+  final IconData icon;
+  final VoidCallback onPressed;
+  final String tooltip;
+  final bool isClose;
+  final bool isDarkMode;
+
+  const WindowButton({
+    super.key,
+    required this.icon,
+    required this.onPressed,
+    required this.tooltip,
+    this.isClose = false,
+    required this.isDarkMode,
+  });
+
+  @override
+  State<WindowButton> createState() => _WindowButtonState();
+}
+
+class _WindowButtonState extends State<WindowButton> with SingleTickerProviderStateMixin {
+  bool _isHovered = false;
+  bool _isPressed = false;
+  late AnimationController _controller;
+  late Animation<double> _scaleAnimation;
+  late Animation<Color?> _colorAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.15).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOutCubic),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _colorAnimation = ColorTween(
+      begin: ThemeColors.getColor('titleBarIcon', widget.isDarkMode),
+      end: ThemeColors.getColor('submitButton', widget.isDarkMode),
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOutCubic));
+
     return MouseRegion(
       onEnter: (_) {
         setState(() => _isHovered = true);
@@ -275,26 +311,52 @@ class _WindowButtonState extends State<WindowButton> with SingleTickerProviderSt
         setState(() => _isHovered = false);
         _controller.reverse();
       },
-      child: Tooltip(
-        message: widget.tooltip,
-        child: Material(
-          color: widget.isClose
-              ? (_isHovered ? Colors.redAccent : Colors.red)
-              : (_isHovered ? Colors.white.withOpacity(0.2) : Colors.transparent),
-          shape: const CircleBorder(),
-          child: InkWell(
-            onTap: widget.onPressed,
-            customBorder: const CircleBorder(),
+      child: GestureDetector(
+        onTapDown: (_) => setState(() => _isPressed = true),
+        onTapUp: (_) {
+          setState(() => _isPressed = false);
+          widget.onPressed();
+        },
+        onTapCancel: () => setState(() => _isPressed = false),
+        child: Tooltip(
+          message: widget.tooltip,
+          textStyle: GoogleFonts.poppins(
+            color: Colors.white,
+            fontSize: 12,
+          ),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.8),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: widget.isClose
+                  ? (_isHovered ? Colors.red[700] : Colors.red[600])
+                  : (_isHovered
+                  ? ThemeColors.getColor('submitButton', widget.isDarkMode).withOpacity(0.2)
+                  : Colors.transparent),
+              shape: BoxShape.circle,
+              boxShadow: _isHovered
+                  ? [
+                BoxShadow(
+                  color: ThemeColors.getColor('sidebarGlow', widget.isDarkMode).withOpacity(0.3),
+                  blurRadius: 6,
+                  spreadRadius: 1,
+                ),
+              ]
+                  : [],
+            ),
             child: ScaleTransition(
               scale: _scaleAnimation,
-              child: SizedBox(
-                width: 40,
-                height: 40,
-                child: Icon(
-                  widget.icon,
-                  color: Colors.white.withOpacity(0.9),
-                  size: 18,
-                ),
+              child: Icon(
+                widget.icon,
+                color: widget.isClose
+                    ? Colors.white.withOpacity(_isPressed ? 0.7 : 0.9)
+                    : _colorAnimation.value,
+                size: 18,
               ),
             ),
           ),
@@ -307,11 +369,9 @@ class _WindowButtonState extends State<WindowButton> with SingleTickerProviderSt
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize database
   sqfliteFfiInit();
   databaseFactory = databaseFactoryFfi;
 
-  // Initialize bitsdojo_window
   doWhenWindowReady(() {
     const initialSize = Size(1280, 720);
     appWindow.minSize = const Size(800, 600);
@@ -331,56 +391,79 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Peak Load Indicator',
-      debugShowCheckedModeBanner: false, // Disable debug banner
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        primarySwatch: Colors.grey,
+        primarySwatch: Colors.teal,
         scaffoldBackgroundColor: Colors.transparent,
+        textTheme: GoogleFonts.poppinsTextTheme(),
       ),
       home: const HomePageWrapper(),
     );
   }
 }
 
-class HomePageWrapper extends StatelessWidget {
+class HomePageWrapper extends StatefulWidget {
   const HomePageWrapper({super.key});
 
   @override
+  State<HomePageWrapper> createState() => _HomePageWrapperState();
+}
+
+class _HomePageWrapperState extends State<HomePageWrapper> {
+  final ValueNotifier<bool> _isDarkMode = ValueNotifier<bool>(false);
+
+  Future<bool> _loadWithMinimumDuration() async {
+    try {
+      final results = await Future.wait([
+        DatabaseManager().isAuthRequired(),
+        Future.delayed(const Duration(seconds: 3)),
+      ]);
+      return results[0] as bool;
+    } catch (e) {
+      print('Error in _loadWithMinimumDuration: $e');
+      rethrow;
+    }
+  }
+
+  @override
+  void dispose() {
+    _isDarkMode.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            (AppColors.background ?? Colors.grey[100]!).withOpacity(0.8),
-            Colors.white,
-          ],
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-        ),
-        border: Border.all(
-          color: Colors.grey[800]!, // Dark grey border
-          width: 2,
-        ),
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.3),
-            blurRadius: 12,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      margin: const EdgeInsets.all(8),
-      child: Scaffold(
-        backgroundColor: Colors.transparent,
-        body: Column(
-          children: [
-            const CustomTitleBar(title: 'Peak Load Indicator'),
-            Expanded(
-              child: HomePage(), // Replace with SerialPortScreen if needed
+    return ValueListenableBuilder<bool>(
+      valueListenable: _isDarkMode,
+      builder: (context, isDarkMode, child) {
+        return Container(
+          child: Scaffold(
+            backgroundColor: Colors.transparent,
+            body: FutureBuilder<bool>(
+              future: _loadWithMinimumDuration(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const SplashScreen();
+                }
+                if (snapshot.hasError) {
+                  print('Database error: ${snapshot.error}');
+                  return Center(
+                    child: Text(
+                      'Error loading database: ${snapshot.error}',
+                      style: GoogleFonts.poppins(
+                        color: ThemeColors.getColor('sidebarText', isDarkMode),
+                        fontSize: 16,
+                      ),
+                    ),
+                  );
+                }
+                final requireAuth = snapshot.data ?? false;
+                return requireAuth ? const LoginPage() : const HomePage();
+              },
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 }
