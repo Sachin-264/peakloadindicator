@@ -2,9 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:lucide_icons/lucide_icons.dart';
-import 'package:path/path.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import '../../constants/colors.dart';
+import '../../constants/database_manager.dart';
 import '../../constants/global.dart';
 import '../../constants/loader_widget.dart';
 import '../../constants/message_utils.dart';
@@ -54,12 +52,15 @@ class _NewTestPageState extends State<NewTestPage> with SingleTickerProviderStat
     });
 
     try {
-      sqfliteFfiInit();
-      databaseFactory = databaseFactoryFfi;
+      // REMOVED: Direct sqfliteFfiInit and databaseFactory setup
+      // sqfliteFfiInit();
+      // databaseFactory = databaseFactoryFfi;
+      // final databasesPath = await getDatabasesPath();
+      // final path = join(databasesPath, 'Countronics.db');
+      // final database = await openDatabase(path);
 
-      final databasesPath = await getDatabasesPath();
-      final path = join(databasesPath, 'Countronics.db');
-      final database = await openDatabase(path);
+      // CHANGED: Use DatabaseManager to get the database instance
+      final database = await DatabaseManager().database;
 
       final List<Map<String, dynamic>> data = await database.query('ChannelSetup');
       print('Fetched channels from ChannelSetup: $data');
@@ -69,7 +70,8 @@ class _NewTestPageState extends State<NewTestPage> with SingleTickerProviderStat
         _isLoading = false;
       });
 
-      await database.close();
+      // REMOVED: Explicit database.close() as DatabaseManager manages it
+      // await database.close();
     } catch (e) {
       setState(() {
         _isLoading = false;

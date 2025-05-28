@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:peakloadindicator/Pages/setup/Autocomplete.dart';
 import 'package:window_manager/window_manager.dart';
 import '../constants/database_manager.dart';
 import '../constants/message_utils.dart';
@@ -16,9 +17,7 @@ import 'NavPages/new_file.dart';
 import 'NavPages/serialportscreen.dart';
 import 'Open_FIle/file_browser_page.dart';
 import 'Open_FIle/open_file.dart';
-
 import 'logScreen/log.dart';
-import 'setup/Autocomplete.dart';
 import 'setup/channel_setup_screen.dart';
 
 class HomePage extends StatefulWidget {
@@ -42,6 +41,7 @@ class _HomePageState extends State<HomePage>
   static final DateTime _appStartTime = DateTime.now();
   Map<String, dynamic>? _autoStartData;
   int _activeChannels = 0;
+  bool _isHovered = false; // Added for action button hover effects
 
   @override
   void initState() {
@@ -87,9 +87,8 @@ class _HomePageState extends State<HomePage>
   String get _currentTime => DateTime.now().toString().substring(0, 19);
 
   Future<void> _loadSystemData() async {
-    final dbManager = DatabaseManager();
-    final autoStartData = await dbManager.getAutoStartData();
-    final channels = await dbManager.getSelectedChannels();
+    final autoStartData = await DatabaseManager().getAutoStartData();
+    final channels = await DatabaseManager().getSelectedChannels();
     if (mounted) {
       setState(() {
         _autoStartData = autoStartData;
@@ -99,13 +98,13 @@ class _HomePageState extends State<HomePage>
   }
 
   void _startAutoStartCheck() {
-    final dbManager = DatabaseManager();
+    _autoStartTimer?.cancel();
     _autoStartTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
       if (!mounted) {
         timer.cancel();
         return;
       }
-      final autoStartData = await dbManager.getAutoStartData();
+      final autoStartData = await DatabaseManager().getAutoStartData();
       if (autoStartData == null) {
         print('[HomePage] No AutoStart data found, stopping timer');
         timer.cancel();
@@ -116,29 +115,31 @@ class _HomePageState extends State<HomePage>
       final endTimeHr = (autoStartData['EndTimeHr'] as num?)?.toDouble() ?? 0.0;
       final endTimeMin = (autoStartData['EndTimeMin'] as num?)?.toDouble() ?? 0.0;
       final scanTimeSec = (autoStartData['ScanTimeSec'] as num?)?.toDouble() ?? 0.0;
+
       final now = DateTime.now();
       final currentHr = now.hour.toDouble();
       final currentMin = now.minute.toDouble();
-      print('[HomePage] Checking time: Current=$currentHr:$currentMin, Start=$startTimeHr:$startTimeMin');
+
       if (currentHr == startTimeHr.floor() && currentMin == startTimeMin.floor()) {
-        print('[HomePage] Time match found, fetching channels');
-        final channels = await dbManager.getSelectedChannels();
+        print('[HomePage] Time match found for AutoStart, fetching channels');
+        final channels = await DatabaseManager().getSelectedChannels();
         if (channels.isEmpty) {
-          print('[HomePage] No channels found in SelectChannel, skipping AutoStart');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'No channels configured in SelectChannel',
-                style: GoogleFonts.poppins(
-                  color: ThemeColors.getColor('sidebarText', Global.isDarkMode.value),
+          print('[HomePage] No channels found in SelectChannel for AutoStart, skipping.');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'AutoStart: No channels selected. Please configure channels in Setup.',
+                  style: GoogleFonts.poppins(color: ThemeColors.getColor('sidebarText', Global.isDarkMode.value)),
                 ),
+                backgroundColor: Colors.orange,
               ),
-              backgroundColor: Colors.red,
-            ),
-          );
+            );
+          }
           return;
         }
-        print('[HomePage] Switching to AutoStartScreen with ${channels.length} channels');
+
+        print('[HomePage] AutoStart triggered: Switching to AutoStartScreen with ${channels.length} channels');
         timer.cancel();
         if (mounted) {
           setState(() {
@@ -432,7 +433,6 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
@@ -694,6 +694,54 @@ class _HomePageState extends State<HomePage>
     );
   }
 
+  Widget _buildProminentActionButton({
+    required String text,
+    required IconData icon,
+    required VoidCallback onPressed,
+    required bool isDarkMode,
+  }) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      child: GestureDetector(
+        onTap: onPressed,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          width: 180,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          decoration: BoxDecoration(
+            gradient: ThemeColors.getButtonGradient(isDarkMode),
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(_isHovered ? 0.3 : 0.2),
+                blurRadius: 8,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: Colors.white, size: 22),
+              const SizedBox(width: 10),
+              Text(
+                text,
+                style: GoogleFonts.poppins(
+                  fontSize: 14,
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildDashboard(bool isDarkMode) {
     final uptime = DateTime.now().difference(_appStartTime);
     final uptimeStr = '${uptime.inHours}h ${uptime.inMinutes % 60}m';
@@ -726,8 +774,53 @@ class _HomePageState extends State<HomePage>
               ),
             ),
             const SizedBox(height: 24),
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              decoration: BoxDecoration(
+                color: ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.9),
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.15),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _buildProminentActionButton(
+                    text: 'Start Scan',
+                    icon: LucideIcons.play,
+                    onPressed: () {
+                      setState(() {
+                        _selectedIndex = 0;
+                        _pages[0] = _originalNewTestPage;
+                      });
+                      _animationController.forward(from: 0.0);
+                      _logActivity('Quick Action: Start Scan');
+                    },
+                    isDarkMode: isDarkMode,
+                  ),
+                  _buildProminentActionButton(
+                    text: 'Open File',
+                    icon: LucideIcons.folderOpen,
+                    onPressed: () => _showOpenFileDialog(context),
+                    isDarkMode: isDarkMode,
+                  ),
+                  _buildProminentActionButton(
+                    text: 'Mode',
+                    icon: LucideIcons.monitor,
+                    onPressed: () => _showSetupDialog(context),
+                    isDarkMode: isDarkMode,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
             GridView.count(
-              crossAxisCount: MediaQuery.of(context).size.width > 1200 ? 4 : 2,
+              crossAxisCount: MediaQuery.of(context).size.width > 1200 ? 3 : 2,
               crossAxisSpacing: 24,
               mainAxisSpacing: 24,
               shrinkWrap: true,
@@ -766,36 +859,6 @@ class _HomePageState extends State<HomePage>
                           .map((log) => _buildLogItem(log, isDarkMode))
                           .toList(),
                     ),
-                  ),
-                  isDarkMode: isDarkMode,
-                ),
-                _buildDashboardCard(
-                  title: 'Quick Actions',
-                  icon: LucideIcons.activity,
-                  content: Wrap(
-                    spacing: 12,
-                    runSpacing: 12,
-                    children: [
-                      _buildActionButton(
-                        text: 'Start Scan',
-                        icon: LucideIcons.play,
-                        onPressed: () {
-                          setState(() {
-                            _selectedIndex = 0;
-                            _pages[0] = _originalNewTestPage;
-                          });
-                          _animationController.forward(from: 0.0);
-                          _logActivity('Quick Action: Start Scan');
-                        },
-                        isDarkMode: isDarkMode,
-                      ),
-                      _buildActionButton(
-                        text: 'View Data',
-                        icon: LucideIcons.eye,
-                        onPressed: () => _showOpenFileDialog(context),
-                        isDarkMode: isDarkMode,
-                      ),
-                    ],
                   ),
                   isDarkMode: isDarkMode,
                 ),
@@ -942,47 +1005,6 @@ class _HomePageState extends State<HomePage>
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildActionButton({
-    required String text,
-    required IconData icon,
-    required VoidCallback onPressed,
-    required bool isDarkMode,
-  }) {
-    return GestureDetector(
-      onTap: onPressed,
-      child: Container(
-        width: 140,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          gradient: ThemeColors.getButtonGradient(isDarkMode),
-          borderRadius: BorderRadius.circular(8),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.2),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, color: Colors.white, size: 18),
-            const SizedBox(width: 6),
-            Text(
-              text,
-              style: GoogleFonts.poppins(
-                fontSize: 12,
-                color: Colors.white,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -1170,7 +1192,7 @@ class _SidebarLogoState extends State<SidebarLogo> with SingleTickerProviderStat
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 600), // Faster animation
+      duration: const Duration(milliseconds: 600),
     )..forward();
     _scaleAnimation = Tween<double>(begin: 1.0, end: 1.05).animate(
       CurvedAnimation(parent: _controller, curve: const Interval(0.0, 0.3, curve: Curves.easeOut)),

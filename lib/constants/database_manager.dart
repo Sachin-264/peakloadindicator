@@ -1,27 +1,34 @@
+import 'package:peakloadindicator/constants/sessionmanager.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:path/path.dart' as path;
-import 'package:path_provider/path_provider.dart'; // Ensure this is imported
+import 'package:path_provider/path_provider.dart';
 import 'dart:io';
-import 'package:flutter/material.dart'; // Keep if Channel.dart or other Flutter widgets are used
-import '../Pages/NavPages/channel.dart'; // Assuming Channel is a class defined here
-import '../Pages/logScreen/log.dart'; // Assuming LogPage is a class defined here
+// import 'package:flutter/material.dart'; // Only include if actually used
+import '../Pages/NavPages/channel.dart'; // Only include if actually used
+import '../Pages/logScreen/log.dart';
 
 class DatabaseManager {
   static final DatabaseManager _instance = DatabaseManager._internal();
   Database? _database;
-  static const int _dbVersion = 6; // INCREMENTED VERSION TO 6
+  static const int _dbVersion = 7;
 
   factory DatabaseManager() => _instance;
 
   DatabaseManager._internal();
 
   Future<Database> get database async {
-    if (_database != null && _database!.isOpen) return _database!;
-
     final databasesPath = await getDatabasesPath();
     final dbPath = path.join(databasesPath, 'Countronics.db');
 
+    if (_database != null && _database!.isOpen) {
+      // If database is already open, ensure it's registered with SessionDatabaseManager
+      SessionDatabaseManager().addManagedDatabase(dbPath, _database!);
+      return _database!;
+    }
+
+    // Ensure the directory exists before attempting to open the database
     await Directory(path.dirname(dbPath)).create(recursive: true);
+
     _database = await databaseFactoryFfi.openDatabase(
       dbPath,
       options: OpenDatabaseOptions(
@@ -30,10 +37,13 @@ class DatabaseManager {
           print('[DatabaseManager] Creating database version $version');
           LogPage.addLog('[${_currentTime}] Creating database version $version');
           await _initializeDatabase(db);
+          // Register the newly created database with SessionDatabaseManager
+          SessionDatabaseManager().addManagedDatabase(dbPath, db);
         },
         onUpgrade: (db, oldVersion, newVersion) async {
           print('[DatabaseManager] Upgrading database from $oldVersion to $newVersion');
           LogPage.addLog('[${_currentTime}] Upgrading database from $oldVersion to $newVersion');
+          // --- Your existing upgrade logic ---
           if (oldVersion < 2) {
             await db.execute('''
               CREATE TABLE IF NOT EXISTS AuthSettings (
@@ -56,13 +66,11 @@ class DatabaseManager {
             LogPage.addLog('[${_currentTime}] Added AuthSettings and ChannelSetup tables');
           }
           if (oldVersion < 3) {
-            // Add columns only if they don't exist
             await addColumnIfNotExists(db, 'AuthSettings', 'companyName', 'TEXT');
             await addColumnIfNotExists(db, 'AuthSettings', 'companyAddress', 'TEXT');
             await addColumnIfNotExists(db, 'AuthSettings', 'logoPath', 'TEXT');
           }
           if (oldVersion < 4) {
-            // Recreate ChannelSetup for schema change, preserving existing data if possible
             await db.execute('''
               CREATE TABLE IF NOT EXISTS ChannelSetup_New (
                 RecNo INTEGER PRIMARY KEY,
@@ -83,7 +91,6 @@ class DatabaseManager {
             LogPage.addLog('[${_currentTime}] Updated ChannelSetup table schema (v4)');
           }
           if (oldVersion < 5) {
-            // Create new ChannelSetup table with full schema
             await db.execute('''
               CREATE TABLE IF NOT EXISTS ChannelSetup_New (
                 RecNo INTEGER PRIMARY KEY,
@@ -100,7 +107,6 @@ class DatabaseManager {
                 ChartMinimumValue REAL
               )
             ''');
-            // Migrate existing data, preserving available columns
             await db.execute('''
               INSERT INTO ChannelSetup_New (
                 RecNo, ChannelName, Unit, TargetAlarmMax, TargetAlarmMin, TargetAlarmColour
@@ -109,7 +115,6 @@ class DatabaseManager {
                 RecNo, ChannelName, Unit, TargetAlarmMax, TargetAlarmMin, TargetAlarmColour
               FROM ChannelSetup
             ''');
-            // Populate StartingCharacter and other new fields with defaults
             await db.execute('''
               UPDATE ChannelSetup_New
               SET StartingCharacter = COALESCE(StartingCharacter, CASE
@@ -121,18 +126,16 @@ class DatabaseManager {
                 WHEN ChannelName = 'Channel E' THEN 'E'
                 ELSE SUBSTR(ChannelName, 1, 1)
               END),
-              DataLength = COALESCE(DataLength, 7), -- Assuming format like 'L123.4'
-              DecimalPlaces = COALESCE(DecimalPlaces, 1), -- One decimal place for values like 123.4
-              graphLineColour = COALESCE(graphLineColour, 'FF0000'), -- Default red (AARRGGBB)
-              ChartMaximumValue = COALESCE(ChartMaximumValue, 100.0), -- Default max value
-              ChartMinimumValue = COALESCE(ChartMinimumValue, 0.0) -- Default min value
+              DataLength = COALESCE(DataLength, 7),
+              DecimalPlaces = COALESCE(DecimalPlaces, 1),
+              graphLineColour = COALESCE(graphLineColour, 'FF0000'),
+              ChartMaximumValue = COALESCE(ChartMaximumValue, 100.0),
+              ChartMinimumValue = COALESCE(ChartMinimumValue, 0.0)
             ''');
-            // Drop old table and rename new one
             await db.execute('DROP TABLE ChannelSetup');
             await db.execute('ALTER TABLE ChannelSetup_New RENAME TO ChannelSetup');
             LogPage.addLog('[${_currentTime}] Updated ChannelSetup table schema (v5)');
           }
-          // NEW: Add ComPort table for version 6
           if (oldVersion < 6) {
             await db.execute('''
               CREATE TABLE IF NOT EXISTS ComPort (
@@ -146,18 +149,25 @@ class DatabaseManager {
             ''');
             LogPage.addLog('[${_currentTime}] Added ComPort table');
           }
+          if (oldVersion < 7) {
+            await addColumnIfNotExists(db, 'Test', 'TestDurationSS', 'REAL');
+            LogPage.addLog('[${_currentTime}] Added TestDurationSS column to Test table');
+          }
+          // Register the upgraded database with SessionDatabaseManager
+          SessionDatabaseManager().addManagedDatabase(dbPath, db);
         },
         onOpen: (db) async {
           print('[DatabaseManager] Opening database');
           LogPage.addLog('[${_currentTime}] Opening database');
           await db.execute('PRAGMA key = "Countronics2025"');
+          // Register the opened database with SessionDatabaseManager
+          SessionDatabaseManager().addManagedDatabase(dbPath, db);
         },
       ),
     );
     return _database!;
   }
 
-  // Helper function to add a column if it doesn't exist
   Future<void> addColumnIfNotExists(Database db, String table, String column, String type) async {
     final columns = await db.rawQuery('PRAGMA table_info($table)');
     final columnNames = columns.map((col) => col['name'] as String).toList();
@@ -172,6 +182,7 @@ class DatabaseManager {
   Future<void> _initializeDatabase(Database db) async {
     print('[DatabaseManager] Initializing database schema');
     LogPage.addLog('[${_currentTime}] Initializing database schema');
+    // --- Your existing _initializeDatabase logic ---
     await db.execute('''
       CREATE TABLE IF NOT EXISTS Test (
         RecNo REAL PRIMARY KEY,
@@ -186,6 +197,7 @@ class DatabaseManager {
         TestDurationDD REAL,
         TestDurationHH REAL,
         TestDurationMM REAL,
+        TestDurationSS REAL,
         GraphVisibleArea REAL,
         BaseLine REAL,
         FullScale REAL,
@@ -199,7 +211,8 @@ class DatabaseManager {
         XAxisCode REAL,
         TotalChannel INTEGER,
         MaxYAxis REAL,
-        MinYAxis REAL
+        MinYAxis REAL,
+        DBName TEXT
       )
     ''');
     await db.execute('''
@@ -269,7 +282,6 @@ class DatabaseManager {
         logoPath TEXT
       )
     ''');
-    // NEW: ComPort table creation for fresh installs
     await db.execute('''
       CREATE TABLE IF NOT EXISTS ComPort (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -283,6 +295,8 @@ class DatabaseManager {
     print('[DatabaseManager] Database schema initialized');
     LogPage.addLog('[${_currentTime}] Database schema initialized');
   }
+
+  // --- Your existing data access methods (getAutoStartData, getSelectedChannels, etc.) ---
 
   Future<Map<String, dynamic>?> getAutoStartData() async {
     final db = await database;
@@ -396,11 +410,10 @@ class DatabaseManager {
     }
   }
 
-  // NEW: Save ComPort settings to database
   Future<void> saveComPortSettings(String port, int baudRate, int dataBits, String parity, int stopBits) async {
     final db = await database;
     try {
-      await db.delete('ComPort'); // Delete existing settings
+      await db.delete('ComPort');
       await db.insert('ComPort', {
         'selectedPort': port,
         'baudRate': baudRate,
@@ -417,7 +430,6 @@ class DatabaseManager {
     }
   }
 
-  // NEW: Get ComPort settings from database
   Future<Map<String, dynamic>?> getComPortSettings() async {
     final db = await database;
     try {
@@ -437,13 +449,20 @@ class DatabaseManager {
     }
   }
 
+  // Modified close method to explicitly unregister from SessionDatabaseManager
   Future<void> close() async {
+    final String mainDbPath = path.join(await getDatabasesPath(), 'Countronics.db');
     if (_database != null && _database!.isOpen) {
       await _database!.close();
-      _database = null;
-      print('[DatabaseManager] Database closed');
-      LogPage.addLog('[${_currentTime}] Database closed');
+      _database = null; // Set to null after closing to release the reference
+      print('[DatabaseManager] Main database connection (Countronics.db) closed.');
+      LogPage.addLog('[${_currentTime}] Main database closed');
+    } else {
+      print('[DatabaseManager] Main database connection was already closed or null.');
     }
+    // Explicitly unregister from SessionDatabaseManager's tracking map
+    SessionDatabaseManager().removeManagedDatabase(mainDbPath);
+    print('[DatabaseManager] Main DB unregistered from SessionDatabaseManager tracking.');
   }
 
   String get _currentTime => DateTime.now().toString().substring(0, 19);

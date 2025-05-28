@@ -1,3 +1,5 @@
+import 'package:flutter/material.dart'; // Import for Color.value
+
 class Channel {
   final double recNo;
   final String channelName;
@@ -7,8 +9,8 @@ class Channel {
   final String unit;
   final double chartMaximumValue;
   final double chartMinimumValue;
-  final double targetAlarmMax;
-  final double targetAlarmMin;
+  final double? targetAlarmMax; // Made nullable
+  final double? targetAlarmMin; // Made nullable
   final int graphLineColour;
   final int targetAlarmColour;
 
@@ -21,8 +23,8 @@ class Channel {
     required this.unit,
     required this.chartMaximumValue,
     required this.chartMinimumValue,
-    required this.targetAlarmMax,
-    required this.targetAlarmMin,
+    this.targetAlarmMax, // No longer required in constructor
+    this.targetAlarmMin, // No longer required in constructor
     required this.graphLineColour,
     required this.targetAlarmColour,
   });
@@ -43,13 +45,22 @@ class Channel {
       return defaultValue;
     }
 
-    // Helper to safely parse dynamic values to double
+    // Helper to safely parse dynamic values to non-nullable double
     double _parseToDouble(dynamic value, double defaultValue) {
       if (value == null) return defaultValue;
       if (value is double) return value;
       if (value is int) return value.toDouble();
       if (value is String) return double.tryParse(value) ?? defaultValue;
       return defaultValue;
+    }
+
+    // NEW Helper to safely parse dynamic values to nullable double
+    double? _parseToNullableDouble(dynamic value) {
+      if (value == null) return null;
+      if (value is double) return value;
+      if (value is int) return value.toDouble();
+      if (value is String) return double.tryParse(value);
+      return null; // Return null if parsing fails or type is unsupported
     }
 
     // Helper to parse color strings (hex RRGGBB, #RRGGBB, RRGGBBAA, #RRGGBBAA, or shorthand like F0C) to int (AARRGGBB)
@@ -72,19 +83,24 @@ class Channel {
           try {
             return int.parse(hex, radix: 16);
           } catch (e) {
-            print('Error parsing color "$colorValue" (processed as "$hex"): $e');
+            // print('Error parsing color "$colorValue" (processed as "$hex"): $e'); // Removed debug print
             return defaultValue;
           }
         }
-        print('Invalid color format "$colorValue". Using default.');
+        // print('Invalid color format "$colorValue". Using default.'); // Removed debug print
         return defaultValue;
       } else if (colorValue is int) {
+        // If it's an int, assume it's already AARRGGBB.
+        // If it's FF0000 etc. (RGB only), convert to AARRGGBB (add FF alpha).
+        if (colorValue & 0xFF000000 == 0) {
+          return 0xFF000000 | colorValue;
+        }
         return colorValue;
       }
       return defaultValue;
     }
 
-    // Default colors
+    // Default colors (AARRGGBB format)
     const int defaultGraphColor = 0xFF000000; // Black
     const int defaultAlarmColor = 0xFFFF0000; // Red
 
@@ -92,21 +108,23 @@ class Channel {
       recNo: _parseToDouble(json['RecNo'], 0.0),
       channelName: json['ChannelName'] as String? ?? '',
       startingCharacter: json['StartingCharacter'] as String? ?? '',
-      dataLength: _parseToInt(json['DataLength'], 7), // Default to 7 for format like 'L123.4'
-      decimalPlaces: _parseToInt(json['DecimalPlaces'], 1), // Default to 1 decimal place
+      dataLength: _parseToInt(json['DataLength'], 7),
+      decimalPlaces: _parseToInt(json['DecimalPlaces'], 1),
       unit: json['Unit'] as String? ?? '',
       chartMaximumValue: _parseToDouble(json['ChartMaximumValue'], 100.0),
       chartMinimumValue: _parseToDouble(json['ChartMinimumValue'], 0.0),
-      targetAlarmMax: _parseToDouble(json['TargetAlarmMax'], 0.0),
-      targetAlarmMin: _parseToDouble(json['TargetAlarmMin'], 0.0),
-      graphLineColour: _parseColor(json['graphLineColour'], defaultGraphColor),
+      targetAlarmMax: _parseToNullableDouble(json['TargetAlarmMax']), // Use new nullable parser
+      targetAlarmMin: _parseToNullableDouble(json['TargetAlarmMin']), // Use new nullable parser
+      graphLineColour: _parseColor(json['ChannelColour'], defaultGraphColor), // Assuming 'ChannelColour' is the field for graph line color in JSON
       targetAlarmColour: _parseColor(json['TargetAlarmColour'], defaultAlarmColor),
     );
   }
 
   Map<String, dynamic> toJson() {
-    // Convert int color (AARRGGBB) to hex string (RRGGBB)
+    // When converting to JSON, if targetAlarmMax/Min are null,
+    // we should include them as null, not as 0.0, to preserve nullability.
     String _toColorHexString(int colorValue) {
+      // Ensure it's 8 characters (AARRGGBB) for consistency, then take RRGGBB part
       return colorValue.toRadixString(16).padLeft(8, '0').substring(2).toUpperCase();
     }
 
@@ -119,9 +137,9 @@ class Channel {
       'Unit': unit,
       'ChartMaximumValue': chartMaximumValue,
       'ChartMinimumValue': chartMinimumValue,
-      'TargetAlarmMax': targetAlarmMax,
-      'TargetAlarmMin': targetAlarmMin,
-      'ChannelColour': _toColorHexString(graphLineColour),
+      'TargetAlarmMax': targetAlarmMax, // Will be null or double
+      'TargetAlarmMin': targetAlarmMin, // Will be null or double
+      'ChannelColour': _toColorHexString(graphLineColour), // Matches DB column name
       'TargetAlarmColour': _toColorHexString(targetAlarmColour),
     };
   }

@@ -6,19 +6,20 @@ import 'package:lucide_icons/lucide_icons.dart';
 import 'Pages/LoginPage/loginpage.dart';
 import 'Pages/homepage.dart';
 import 'SplashScreen.dart';
-import 'constants/colors.dart';
 import 'constants/database_manager.dart';
 import 'constants/global.dart';
-import 'constants/theme.dart';
+import 'constants/theme.dart'; // Ensure this file defines ThemeColors correctly
 
 ValueNotifier<bool> isScanningNotifier = ValueNotifier<bool>(false);
 
 class CustomTitleBar extends StatefulWidget {
   final String title;
+  final Color? customColor; // Optional custom color for title and icon
 
   const CustomTitleBar({
     super.key,
     required this.title,
+    this.customColor,
   });
 
   @override
@@ -30,7 +31,6 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
   bool _isHovered = false;
   late AnimationController _controller;
   late Animation<double> _scaleAnimation;
-  late Animation<Color?> _colorAnimation;
   late Animation<double> _timeFadeAnimation;
 
   @override
@@ -60,10 +60,8 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
     return ValueListenableBuilder<bool>(
       valueListenable: Global.isDarkMode,
       builder: (context, isDarkMode, _) {
-        _colorAnimation = ColorTween(
-          begin: ThemeColors.getColor('titleBarText', isDarkMode),
-          end: ThemeColors.getColor('titleBarIcon', isDarkMode),
-        ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOutCubic));
+        final titleBarTextColor = widget.customColor != null ? Colors.black : ThemeColors.getColor('titleBarText', isDarkMode);
+        final iconColor = widget.customColor != null ? Colors.black : ThemeColors.getColor('titleBarText', isDarkMode);
 
         return MouseRegion(
           onEnter: (_) {
@@ -77,7 +75,8 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
           child: Container(
             height: 56,
             decoration: BoxDecoration(
-              gradient: ThemeColors.getTitleBarGradient(isDarkMode),
+              color: widget.customColor,
+              gradient: widget.customColor == null ? ThemeColors.getTitleBarGradient(isDarkMode) : null,
               borderRadius: const BorderRadius.only(
                 topLeft: Radius.circular(12),
                 topRight: Radius.circular(12),
@@ -112,7 +111,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
                       ),
                       child: Icon(
                         LucideIcons.cpu,
-                        color: _colorAnimation.value,
+                        color: iconColor,
                         size: 28,
                       ),
                     ),
@@ -125,19 +124,14 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          AnimatedBuilder(
-                            animation: _colorAnimation,
-                            builder: (context, child) {
-                              return Text(
-                                widget.title,
-                                style: GoogleFonts.poppins(
-                                  color: _colorAnimation.value,
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 20,
-                                  letterSpacing: 0.8,
-                                ),
-                              );
-                            },
+                          Text(
+                            widget.title,
+                            style: GoogleFonts.poppins(
+                              color: titleBarTextColor,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 20,
+                              letterSpacing: 0.8,
+                            ),
                           ),
                           FadeTransition(
                             opacity: _timeFadeAnimation,
@@ -150,7 +144,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
                                   child: Text(
                                     time,
                                     style: GoogleFonts.poppins(
-                                      color: ThemeColors.getColor('titleBarText', isDarkMode),
+                                      color: titleBarTextColor,
                                       fontWeight: FontWeight.w500,
                                       fontSize: 16,
                                     ),
@@ -379,6 +373,16 @@ void main() async {
     appWindow.alignment = Alignment.center;
     appWindow.title = 'Peak Load Indicator';
     appWindow.show();
+
+    // **NEW: Add a small delay and then force a re-render**
+    // This is a common workaround for initial blank window issues with bitsdojo_window
+    Future.delayed(const Duration(milliseconds: 100), () {
+      // This will trigger a re-layout and re-paint for the window.
+      // It's a bit of a hack, but often solves the "white screen until resize" problem.
+      appWindow.size = Size(appWindow.size.width + 1, appWindow.size.height + 1);
+      appWindow.size = initialSize; // Restore original size immediately
+    });
+
   });
 
   runApp(const MyApp());
@@ -394,7 +398,7 @@ class MyApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         primarySwatch: Colors.teal,
-        scaffoldBackgroundColor: Colors.transparent,
+        scaffoldBackgroundColor: Colors.black87,
         textTheme: GoogleFonts.poppinsTextTheme(),
       ),
       home: const HomePageWrapper(),
@@ -410,7 +414,15 @@ class HomePageWrapper extends StatefulWidget {
 }
 
 class _HomePageWrapperState extends State<HomePageWrapper> {
-  final ValueNotifier<bool> _isDarkMode = ValueNotifier<bool>(false);
+  // Cache the Future result to avoid re-running it on rebuild
+  late final Future<bool> _authFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    // Initialize the Future in initState so it only runs once
+    _authFuture = _loadWithMinimumDuration();
+  }
 
   Future<bool> _loadWithMinimumDuration() async {
     try {
@@ -426,41 +438,35 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
   }
 
   @override
-  void dispose() {
-    _isDarkMode.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
-      valueListenable: _isDarkMode,
+      valueListenable: Global.isDarkMode,
       builder: (context, isDarkMode, child) {
-        return Container(
-          child: Scaffold(
-            backgroundColor: Colors.transparent,
-            body: FutureBuilder<bool>(
-              future: _loadWithMinimumDuration(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const SplashScreen();
-                }
-                if (snapshot.hasError) {
-                  print('Database error: ${snapshot.error}');
-                  return Center(
-                    child: Text(
-                      'Error loading database: ${snapshot.error}',
-                      style: GoogleFonts.poppins(
-                        color: ThemeColors.getColor('sidebarText', isDarkMode),
-                        fontSize: 16,
-                      ),
+        final scaffoldBgColor = ThemeColors.getColor('background', isDarkMode);
+
+        return Scaffold(
+          backgroundColor: scaffoldBgColor,
+          body: FutureBuilder<bool>(
+            future: _authFuture, // Use the cached Future
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const SplashScreen();
+              }
+              if (snapshot.hasError) {
+                print('Database error: ${snapshot.error}');
+                return Center(
+                  child: Text(
+                    'Error loading database: ${snapshot.error}',
+                    style: GoogleFonts.poppins(
+                      color: ThemeColors.getColor('sidebarText', isDarkMode),
+                      fontSize: 16,
                     ),
-                  );
-                }
-                final requireAuth = snapshot.data ?? false;
-                return requireAuth ? const LoginPage() : const HomePage();
-              },
-            ),
+                  ),
+                );
+              }
+              final requireAuth = snapshot.data ?? false;
+              return requireAuth ? const LoginPage() : const HomePage();
+            },
           ),
         );
       },

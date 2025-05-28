@@ -6,11 +6,12 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-// import 'dart:convert';
+// import 'dart:convert'; // Not used, can remove
 import '../../constants/database_manager.dart';
 import '../../constants/export.dart';
 import '../../constants/global.dart';
 import '../../constants/theme.dart';
+import '../../constants/sessionmanager.dart'; // NEW: Import SessionDatabaseManager
 import '../NavPages/channel.dart';
 import '../Secondary_window/save_secondary_window.dart';
 import 'package:flutter/rendering.dart';
@@ -61,7 +62,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
   bool showDataPoints = false;
   double zoomLevel = 1.0;
   bool showPeak = false;
-  late Database _database;
+  late Database _database; // This will hold the reference to the session-specific DB
   bool _isDatabaseInitialized = false;
   bool _isLoading = true;
   String? _fetchError;
@@ -107,7 +108,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       _fetchError = null;
     });
     try {
-      await _initializeDatabase();
+      await _initializeDatabase(); // This is where the core change will be
       await _fetchChannelSetupData();
       setState(() {
         _isDatabaseInitialized = true;
@@ -122,29 +123,41 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     }
   }
 
+  // MODIFIED: This method now uses SessionDatabaseManager
   Future<void> _initializeDatabase() async {
-    sqfliteFfiInit();
-    databaseFactory = databaseFactoryFfi;
+    // These lines should typically be called once at app startup (e.g., in main.dart)
+    // and are not needed here if sqflite_common_ffi is already initialized globally.
+    // sqfliteFfiInit();
+    // databaseFactory = databaseFactoryFfi;
+
+    // Ensure the data folder exists if it doesn't already
     final appDocumentsDir = await getApplicationSupportDirectory();
     final dataDirPath = path.join(appDocumentsDir.path, 'CountronicsData');
     await Directory(dataDirPath).create(recursive: true);
 
-    final dbName = Global.selectedDBName.value ?? 'Countronics.db';
-    final dbPath = path.join(dataDirPath, dbName);
+    // Get the database name from Global.selectedDBName. This is the session-specific DB name.
+    final dbName = Global.selectedDBName.value; // This should be populated before calling OpenFilePage
+    if (dbName == null || dbName.isEmpty) {
+      throw Exception("Database name (DBName) not provided in Global.selectedDBName. Cannot open session database.");
+    }
 
-    _database = await openDatabase(
-      dbPath,
-      onOpen: (db) async {
-        await db.execute('PRAGMA key = "Countronics2025"');
-      },
-    );
-    LogPage.addLog('[$_currentTime] [INITIALIZE_DATABASE] Database initialized at path: $dbPath');
+    // CRITICAL CHANGE: Use SessionDatabaseManager to open the session-specific database.
+    // This ensures it is tracked and will be closed by SessionDatabaseManager().closeAllSessionDatabases().
+    // IMPORTANT: Session-specific databases in 'CountronicsData' are generally NOT encrypted
+    // with the main app's PRAGMA key unless you specifically applied it when creating them.
+    // Your SerialPortScreen._saveData does NOT apply a key to the session DBs, so remove PRAGMA key here.
+    _database = await SessionDatabaseManager().openSessionDatabase(dbName);
+
+    LogPage.addLog('[$_currentTime] [INITIALIZE_DATABASE] Session database opened and tracked: $dbName');
   }
 
+  // This method still fetches from the main database (Countronics.db)
+  // to get the ChannelSetup data, which is correct.
   Future<void> _fetchChannelSetupData() async {
-    if (!_isDatabaseInitialized) return;
+    // We need to get the main application database for ChannelSetup data
+    final mainDatabase = await DatabaseManager().database;
     try {
-      final List<Map<String, dynamic>> channelSetupRaw = await _database.query('ChannelSetup');
+      final List<Map<String, dynamic>> channelSetupRaw = await mainDatabase.query('ChannelSetup');
       _channelSetupData.clear();
       for (var row in channelSetupRaw) {
         final channel = Channel.fromJson(row);
@@ -155,10 +168,13 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       LogPage.addLog('[$_currentTime] Fetched ${_channelSetupData.length} entries from ChannelSetup');
     } catch (e) {
       LogPage.addLog('[$_currentTime] Error fetching ChannelSetup data: $e');
+      // If ChannelSetup is critical and fails, you might want to throw or set an error state.
     }
   }
 
   Future<void> fetchData({bool showFull = false}) async {
+    // This method now uses the _database instance which is the session-specific DB
+    // opened and tracked by SessionDatabaseManager.
     if (!_isDatabaseInitialized || Global.selectedRecNo?.value == null) {
       LogPage.addLog('[$_currentTime] [FETCH_DATA] Skipping fetch: database not initialized or RecNo is null');
       setState(() {
@@ -178,6 +194,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     try {
       LogPage.addLog('[$_currentTime] [FETCH_DATA] Fetching data for RecNo: ${Global.selectedRecNo!.value}');
 
+      // Using the _database which is the session-specific one
       final test1Data = await _database.query(
         'Test1',
         where: 'RecNo = ?',
@@ -209,7 +226,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
           String? name = test2Row['ChannelName$i']?.toString().trim();
           if (name != null && name.isNotEmpty && name != 'null') {
             channelNames[i] = name;
-            final setupChannel = _channelSetupData[name];
+            final setupChannel = _channelSetupData[name]; // Get config from main DB
             if (setupChannel != null && setupChannel.graphLineColour != 0 && setupChannel.graphLineColour != const Color(0xFF000000).value) {
               graphLineColour[i] = Color(setupChannel.graphLineColour);
             } else {
@@ -634,7 +651,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         if (timeStr == null || !timeStr.contains(':')) return false;
         List<String> timeParts = timeStr.split(':');
         if (timeParts.length != 3) return false;
-        double timeSeconds = int.parse(timeParts[0]) * 3600 + int.parse(timeParts[1]) * 60 + double.parse(timeParts[2]);
+        double timeSeconds = int.parse(timeParts[0]) * 3600 + int.parse(timeParts[1]) * 60 + double.parse(timeParts[2].split('.').first);
         return timeSeconds >= segmentStartTimeSeconds && timeSeconds < segmentEndTimeSeconds;
       } catch (e) { return false; }
     }).toList();
@@ -1386,6 +1403,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
 
   @override
   void dispose() {
+    // Dispose of all controllers and listeners as usual.
     _fileNameController.dispose(); _operatorController.dispose();
     _scanRateHrController.dispose(); _scanRateMinController.dispose(); _scanRateSecController.dispose();
     _testDurationDayController.dispose(); _testDurationHrController.dispose(); _testDurationMinController.dispose(); _testDurationSecController.dispose();
@@ -1399,6 +1417,19 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     Global.scanningRateHH.removeListener(_onGlobalChanged); Global.scanningRateMM.removeListener(_onGlobalChanged); Global.scanningRateSS.removeListener(_onGlobalChanged);
     Global.testDurationDD?.removeListener(_onGlobalChanged); Global.testDurationHH.removeListener(_onGlobalChanged); Global.testDurationMM.removeListener(_onGlobalChanged); Global.testDurationSS.removeListener(_onGlobalChanged);
     Global.isDarkMode.removeListener(_onThemeChanged);
+
+    // CRITICAL: Close the session-specific database opened by this page.
+    // This is explicitly done here because this widget is the one that opened it.
+    // SessionDatabaseManager will also close it if it's still open during a global closure.
+    if (_isDatabaseInitialized && _database.isOpen) {
+      try {
+        _database.close();
+        LogPage.addLog('[$_currentTime] [DISPOSE] Session database for OpenFilePage explicitly closed.');
+      } catch (e) {
+        LogPage.addLog('[$_currentTime] [DISPOSE] Error closing session database for OpenFilePage: $e');
+      }
+    }
+    _isDatabaseInitialized = false; // Reset flag
 
     LogPage.addLog('[$_currentTime] [DISPOSE] OpenFilePage disposed.');
     super.dispose();

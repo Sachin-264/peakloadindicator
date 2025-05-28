@@ -4,6 +4,8 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../constants/colors.dart';
 import '../../Pages/homepage.dart';
 import '../../constants/database_manager.dart';
+import '../../constants/theme.dart';
+import '../../main.dart'; // Ensure CustomTitleBar is accessible
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -12,38 +14,57 @@ class LoginPage extends StatefulWidget {
   _LoginPageState createState() => _LoginPageState();
 }
 
-class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMixin {
+class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _masterPasswordController = TextEditingController();
   final TextEditingController _newUsernameController = TextEditingController();
   final TextEditingController _newPasswordController = TextEditingController();
-  bool _isLoading = true;
-  bool _showSuccessAnimation = false;
+
+  // State variables for overall app loading (initial splash) and login process
+  bool _isLoading = true; // For initial database check / app startup
+  bool _isAuthenticating = false; // NEW: For specific login button loading
+  bool _showSuccessAnimation = false; // For login button success checkmark
   String? _errorMessage;
-  late AnimationController _animationController;
+
+  // Animation controllers for different purposes
+  late AnimationController _appLoadAnimationController; // Renamed for initial app loading/error
   late Animation<double> _fadeAnimation;
   late Animation<double> _scaleAnimation;
+
+  late AnimationController _loginSuccessAnimationController; // NEW: For login button success
+  late Animation<double> _loginSuccessScaleAnimation; // NEW: For login button success scale
+
   static const String _masterPassword = 'admin@1234';
-  static const Color _accentColor = Color(0xFF455A64); // Muted blue-grey
+  static const Color _accentColor = Color(0xFF455A64);
 
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
+
+    // Initial App Load/Error Animations
+    _appLoadAnimationController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
     );
     _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+      CurvedAnimation(parent: _appLoadAnimationController, curve: Curves.easeInOut),
     );
     _scaleAnimation = Tween<double>(begin: 0.9, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
+      CurvedAnimation(parent: _appLoadAnimationController, curve: Curves.easeOut),
     );
-    _checkDatabase();
-    _animationController.forward();
 
-    // Preload GIF
+    // Login Button Success Animation
+    _loginSuccessAnimationController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500), // A snappier duration for the checkmark
+    );
+    _loginSuccessScaleAnimation = Tween<double>(begin: 0.5, end: 1.0).animate( // From smaller to full size
+      CurvedAnimation(parent: _loginSuccessAnimationController, curve: Curves.easeOutBack), // Pop-out effect
+    );
+
+    _checkDatabase();
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       precacheImage(const AssetImage('assets/images/logo_animation.gif'), context)
           .then((_) {
@@ -57,49 +78,63 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
   Future<void> _checkDatabase() async {
     setState(() {
       _isLoading = true;
-      _errorMessage = null; // Clear any previous error
-    });
-
-    try {
-      await DatabaseManager().database;
-      setState(() {
-        _isLoading = false;
-      });
-    } catch (e) {
-      print('Database initialization error: $e');
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Error initializing database. Please try again.';
-      });
-    }
-  }
-
-  Future<void> _login() async {
-    setState(() {
-      _isLoading = true;
       _errorMessage = null;
     });
 
     try {
+      await DatabaseManager().database;
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+        // If successful, no need to forward _appLoadAnimationController,
+        // as the login form will appear immediately.
+      }
+    } catch (e) {
+      print('Database initialization error: $e');
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = 'Error initializing database. Please try again.';
+        });
+        _appLoadAnimationController.forward(from: 0.0); // Animate error screen
+      }
+    }
+  }
+
+  Future<void> _login() async {
+    // Prevent multiple taps or login attempts while one is in progress or success animation is playing
+    if (_isAuthenticating || _showSuccessAnimation) {
+      return;
+    }
+
+    setState(() {
+      _isAuthenticating = true; // Start login-specific loading
+      _errorMessage = null;
+      _showSuccessAnimation = false; // Ensure success animation is off initially
+    });
+
+    try {
       final authData = await DatabaseManager().getAuthSettings();
+      await Future.delayed(const Duration(milliseconds: 800)); // Simulate network/auth delay
+
       if (authData != null) {
         final storedUsername = authData['username'] as String? ?? '';
         final storedPassword = authData['password'] as String? ?? '';
         if (_usernameController.text == storedUsername && _passwordController.text == storedPassword) {
           setState(() {
-            _showSuccessAnimation = true;
+            _showSuccessAnimation = true; // Trigger success animation
           });
-          await Future.delayed(const Duration(seconds: 1));
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (context) => const HomePage()),
-          );
+          _loginSuccessAnimationController.forward(from: 0.0); // Start the success animation
+          await Future.delayed(const Duration(seconds: 1)); // Wait for success animation to play
+          if (mounted) {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(builder: (context) => const HomePage()),
+            );
+          }
         } else {
-          setState(() {
-            _isLoading = false;
-            _errorMessage = 'Invalid username or password';
-          });
-          await Future.delayed(const Duration(milliseconds: 300));
+          // Incorrect credentials
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -129,17 +164,74 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
           }
         }
       } else {
-        setState(() {
-          _isLoading = false;
-          _errorMessage = 'No authentication settings found';
-        });
+        // No authentication settings found
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 24),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'No authentication settings found. Please reset credentials.',
+                      style: GoogleFonts.montserrat(
+                        fontSize: 16,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              backgroundColor: AppColors.cardBackground,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              margin: const EdgeInsets.all(16),
+              duration: const Duration(seconds: 5),
+              elevation: 6,
+            ),
+          );
+        }
       }
     } catch (e) {
       print('Login error: $e');
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Error during login. Please try again.';
-      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.error_outline, color: AppColors.errorText, size: 24),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Error during login. Please try again.',
+                    style: GoogleFonts.montserrat(
+                      fontSize: 16,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: AppColors.cardBackground,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            margin: const EdgeInsets.all(16),
+            duration: const Duration(seconds: 4),
+            elevation: 6,
+          ),
+        );
+      }
+    } finally {
+      // Always reset the authenticating flag when the process finishes,
+      // regardless of success or failure.
+      if (mounted) {
+        setState(() {
+          _isAuthenticating = false;
+          // _showSuccessAnimation remains true until navigation to allow the checkmark to stay
+          // If navigation doesn't happen (e.g., wrong password), it will be reset on next login attempt.
+        });
+      }
     }
   }
 
@@ -155,7 +247,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               backgroundColor: AppColors.cardBackground,
               contentPadding: const EdgeInsets.all(24),
-              content: Container(
+              content: SizedBox(
                 width: 360,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -225,12 +317,13 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                             if (_masterPasswordController.text == _masterPassword) {
                               if (isResetting) {
                                 if (_newUsernameController.text.isEmpty || _newPasswordController.text.isEmpty) {
-                                  Navigator.of(context).pop();
+                                  // Show a snackbar for empty fields
+                                  Navigator.of(context).pop(); // Close dialog first
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     SnackBar(
                                       content: Row(
                                         children: [
-                                          Icon(Icons.error_outline, color: AppColors.errorText, size: 24),
+                                          Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 24),
                                           const SizedBox(width: 8),
                                           Expanded(
                                             child: Text(
@@ -243,20 +336,21 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                           ),
                                         ],
                                       ),
-                                      backgroundColor: AppColors.cardBackground,
+                                      backgroundColor: AppColors.cardBackground, // Corrected parameter placement
                                       behavior: SnackBarBehavior.floating,
                                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                       margin: const EdgeInsets.all(16),
                                       duration: const Duration(seconds: 4),
+                                      elevation: 6, // Added elevation for consistency
                                     ),
                                   );
-                                  return;
+                                  return; // Stop here
                                 }
                                 try {
                                   await DatabaseManager().saveAuthSettings(
                                     true,
                                     _newUsernameController.text,
-                                    _newPasswordController.text
+                                    _newPasswordController.text,
                                   );
                                   Navigator.of(context).pop();
                                   ScaffoldMessenger.of(context).showSnackBar(
@@ -276,13 +370,17 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                           ),
                                         ],
                                       ),
-                                      backgroundColor: AppColors.cardBackground,
+                                      backgroundColor: AppColors.cardBackground, // Corrected parameter placement
                                       behavior: SnackBarBehavior.floating,
                                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                       margin: const EdgeInsets.all(16),
                                       duration: const Duration(seconds: 3),
+                                      elevation: 6, // Added elevation for consistency
                                     ),
                                   );
+                                  // Also clear login fields so user can use new credentials
+                                  _usernameController.clear();
+                                  _passwordController.clear();
                                 } catch (e) {
                                   print('Password reset error: $e');
                                   Navigator.of(context).pop();
@@ -303,11 +401,12 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                           ),
                                         ],
                                       ),
-                                      backgroundColor: AppColors.cardBackground,
+                                      backgroundColor: AppColors.cardBackground, // Corrected parameter placement
                                       behavior: SnackBarBehavior.floating,
                                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                       margin: const EdgeInsets.all(16),
                                       duration: const Duration(seconds: 4),
+                                      elevation: 6, // Added elevation for consistency
                                     ),
                                   );
                                 }
@@ -320,7 +419,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                 });
                               }
                             } else {
-                              Navigator.of(context).pop();
+                              Navigator.of(context).pop(); // Close dialog first
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
                                   content: Row(
@@ -338,11 +437,12 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
                                       ),
                                     ],
                                   ),
-                                  backgroundColor: AppColors.cardBackground,
+                                  backgroundColor: AppColors.cardBackground, // Corrected parameter placement
                                   behavior: SnackBarBehavior.floating,
                                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                   margin: const EdgeInsets.all(16),
                                   duration: const Duration(seconds: 4),
+                                  elevation: 6, // Added elevation for consistency
                                 ),
                               );
                               _masterPasswordController.clear();
@@ -368,7 +468,8 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     _masterPasswordController.dispose();
     _newUsernameController.dispose();
     _newPasswordController.dispose();
-    _animationController.dispose();
+    _appLoadAnimationController.dispose(); // Dispose the renamed controller
+    _loginSuccessAnimationController.dispose(); // Dispose the new controller
     super.dispose();
   }
 
@@ -376,288 +477,381 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppColors.background,
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(56.0),
+        child: CustomTitleBar(title: 'Countronics Smart Logger', customColor: Colors.white),
+      ),
       body: Stack(
         children: [
           Positioned.fill(
-            child: CustomPaint(
-              painter: WaveformBackgroundPainter(),
-            ),
+            child: AnimatedWaveformBackground(),
+          ),
+          Positioned.fill(
+            child: LoggerPulseBackground(),
           ),
           Positioned.fill(
             child: AnimatedIconBackground(),
           ),
           SafeArea(
-            child: _isLoading
-                ? Center(
-              child: CircularProgressIndicator(
-                color: _accentColor,
-                strokeWidth: 4,
-                backgroundColor: AppColors.headerBackground,
-              ),
-            )
-                : _errorMessage != null
-                ? Center(
-              child: ScaleTransition(
-                scale: _scaleAnimation,
-                child: Container(
-                  width: 400,
-                  margin: const EdgeInsets.symmetric(horizontal: 16),
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: AppColors.cardBackground,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: AppColors.headerBackground,
-                      width: 1,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.grey.withOpacity(0.2),
-                        blurRadius: 10,
-                        spreadRadius: 2,
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.error_outline,
-                        color: AppColors.errorText,
-                        size: 48,
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        _errorMessage!,
-                        style: GoogleFonts.montserrat(
-                          color: AppColors.textPrimary,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 24),
-                      _buildButton(
-                        text: 'Retry',
-                        color: _accentColor,
-                        textColor: Colors.white,
-                        onTap: () {
-                          setState(() {
-                            _errorMessage = null; // Clear error
-                            _isLoading = true; // Show loading
-                          });
-                          _checkDatabase(); // Retry database check
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            )
-                : FadeTransition(
-              opacity: _fadeAnimation,
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  return SingleChildScrollView(
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        minHeight: constraints.maxHeight,
-                      ),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const SizedBox(height: 24),
-                          Center(
-                            child: Container(
-                              width: constraints.maxWidth * 0.9 > 400
-                                  ? 400
-                                  : constraints.maxWidth * 0.9,
-                              child: Column(
-                                children: [
-                                  // GIF
-                                  Container(
-                                    width: 400,
-                                    height: 120,
-                                    decoration: BoxDecoration(
-                                      color: AppColors.cardBackground,
-                                      borderRadius:
-                                      BorderRadius.circular(12),
-                                      border: Border.all(
-                                        color:
-                                        AppColors.headerBackground,
-                                        width: 1,
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.grey
-                                              .withOpacity(0.1),
-                                          blurRadius: 8,
-                                          spreadRadius: 1,
-                                        ),
-                                      ],
-                                    ),
-                                    child: ClipRRect(
-                                      borderRadius:
-                                      BorderRadius.circular(12),
-                                      child: Image.asset(
-                                        'assets/images/logo_animation.gif',
-                                        fit: BoxFit.cover,
-                                        color: AppColors
-                                            .headerBackground
-                                            .withOpacity(0.5),
-                                        colorBlendMode:
-                                        BlendMode.multiply,
-                                        errorBuilder: (context, error,
-                                            stackTrace) {
-                                          print(
-                                              'GIF render error: $error');
-                                          return Container(
-                                            color: AppColors
-                                                .cardBackground,
-                                            child: Center(
-                                              child: Icon(
-                                                Icons.thermostat,
-                                                color: _accentColor,
-                                                size: 48,
-                                              ),
-                                            ),
-                                          );
-                                        },
-                                        frameBuilder: (context, child,
-                                            frame, wasSynchronouslyLoaded) {
-                                          if (frame == null) {
-                                            return Center(
-                                              child:
-                                              CircularProgressIndicator(
-                                                color: _accentColor,
-                                                strokeWidth: 2,
-                                              ),
-                                            );
-                                          }
-                                          return child;
-                                        },
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 16),
-                                  Text(
-                                    'Countronics Smart Logger',
-                                    style: GoogleFonts.montserrat(
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.w700,
-                                      color: AppColors.textPrimary,
-                                    ),
-                                    textAlign: TextAlign.center,
-                                  ),
-                                  const SizedBox(height: 24),
-                                  // Login Form
-                                  Container(
-                                    padding: const EdgeInsets.all(24),
-                                    decoration: BoxDecoration(
-                                      color: AppColors.cardBackground,
-                                      borderRadius:
-                                      BorderRadius.circular(12),
-                                      border: Border.all(
-                                        color: AppColors
-                                            .headerBackground,
-                                        width: 1,
-                                      ),
-                                      boxShadow: [
-                                        BoxShadow(
-                                          color: Colors.grey
-                                              .withOpacity(0.1),
-                                          blurRadius: 8,
-                                          spreadRadius: 1,
-                                        ),
-                                      ],
-                                    ),
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Text(
-                                          'System Access',
-                                          style: GoogleFonts.montserrat(
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.w700,
-                                            color:
-                                            AppColors.textPrimary,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 16),
-                                        _buildTextField(
-                                          controller:
-                                          _usernameController,
-                                          label: 'Username',
-                                          icon: Icons.person,
-                                          obscureText: false,
-                                        ),
-                                        const SizedBox(height: 12),
-                                        _buildTextField(
-                                          controller:
-                                          _passwordController,
-                                          label: 'Password',
-                                          icon: Icons.lock,
-                                          obscureText: true,
-                                        ),
-                                        const SizedBox(height: 12),
-                                        Align(
-                                          alignment:
-                                          Alignment.centerRight,
-                                          child: TextButton(
-                                            onPressed:
-                                            _showForgotPasswordDialog,
-                                            child: Text(
-                                              'Reset Credentials',
-                                              style: GoogleFonts
-                                                  .montserrat(
-                                                fontSize: 14,
-                                                color: _accentColor,
-                                                fontWeight:
-                                                FontWeight.w600,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                        const SizedBox(height: 16),
-                                        Stack(
-                                          alignment: Alignment.center,
-                                          children: [
-                                            _buildButton(
-                                              text: 'Login',
-                                              color: _accentColor,
-                                              textColor: Colors.white,
-                                              onTap: _login,
-                                              isProminent: true,
-                                            ),
-                                            if (_showSuccessAnimation)
-                                              ScaleTransition(
-                                                scale: _scaleAnimation,
-                                                child: Icon(
-                                                  Icons.check_circle,
-                                                  color: _accentColor,
-                                                  size: 40,
-                                                ),
-                                              ),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const SizedBox(height: 24),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 500),
+              transitionBuilder: (child, animation) {
+                // Apply FadeTransition only for loading and error widgets that take full screen
+                if (child.key == const ValueKey('loadingScreen') || child.key == const ValueKey('errorScreen')) {
+                  return FadeTransition(opacity: animation, child: child);
+                }
+                return child; // No animation for login form as it's typically present from start
+              },
+              child: _isLoading
+                  ? _buildLoadingWidget()
+                  : _errorMessage != null
+                  ? _buildErrorWidget()
+                  : _buildLoginForm(),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildLoadingWidget() {
+    return Center(
+      key: const ValueKey('loadingScreen'), // Unique key for AnimatedSwitcher
+      child: FadeTransition(
+        opacity: _fadeAnimation,
+        child: ScaleTransition(
+          scale: _scaleAnimation,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Image.asset(
+                'assets/images/logo_animation.gif',
+                width: 180,
+                height: 180,
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) {
+                  return Icon(
+                    Icons.thermostat,
+                    color: _accentColor,
+                    size: 100,
+                  );
+                },
+                frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+                  if (frame == null) {
+                    return SizedBox(
+                      width: 100,
+                      height: 100,
+                      child: CircularProgressIndicator(
+                        color: _accentColor,
+                        strokeWidth: 4,
+                      ),
+                    );
+                  }
+                  return child;
+                },
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Initializing Application...',
+                style: GoogleFonts.montserrat(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'Please wait while we prepare your workspace.',
+                style: GoogleFonts.montserrat(
+                  fontSize: 16,
+                  color: AppColors.textPrimary.withOpacity(0.7),
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildErrorWidget() {
+    return Center(
+      key: const ValueKey('errorScreen'), // Unique key for AnimatedSwitcher
+      child: ScaleTransition(
+        scale: _scaleAnimation,
+        child: Container(
+          width: 400,
+          margin: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: AppColors.cardBackground,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: AppColors.headerBackground,
+              width: 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.grey.withOpacity(0.2),
+                blurRadius: 10,
+                spreadRadius: 2,
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.error_outline,
+                color: AppColors.errorText,
+                size: 48,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _errorMessage ?? 'Unknown Error',
+                style: GoogleFonts.montserrat(
+                  color: AppColors.textPrimary,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              _buildButton(
+                text: 'Retry',
+                color: _accentColor,
+                textColor: Colors.white,
+                onTap: () {
+                  setState(() {
+                    _errorMessage = null;
+                    _isLoading = true; // Set isLoading to true to show the loading screen again
+                  });
+                  _appLoadAnimationController.reset(); // Reset animation for the retry
+                  _checkDatabase();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLoginForm() {
+    return LayoutBuilder(
+      key: const ValueKey('loginForm'), // Unique key for AnimatedSwitcher
+      builder: (context, constraints) {
+        return SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: constraints.maxHeight,
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const SizedBox(height: 24),
+                Center(
+                  child: SizedBox( // Use SizedBox instead of Container with dynamic width * 0.9 for simplicity
+                    width: constraints.maxWidth * 0.9 > 400 ? 400 : constraints.maxWidth * 0.9,
+                    child: Column(
+                      children: [
+                        Container(
+                          width: 400, // Fixed width based on the original design
+                          height: 120,
+                          decoration: BoxDecoration(
+                            color: AppColors.cardBackground,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: AppColors.headerBackground,
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.grey.withOpacity(0.1),
+                                blurRadius: 8,
+                                spreadRadius: 1,
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Image.asset(
+                              'assets/images/logo_animation.gif',
+                              fit: BoxFit.cover,
+                              color: AppColors.headerBackground.withOpacity(0.5),
+                              colorBlendMode: BlendMode.multiply,
+                              errorBuilder: (context, error, stackTrace) {
+                                print('GIF render error: $error');
+                                return Container(
+                                  color: AppColors.cardBackground,
+                                  child: Center(
+                                    child: Icon(
+                                      Icons.thermostat,
+                                      color: _accentColor,
+                                      size: 48,
+                                    ),
+                                  ),
+                                );
+                              },
+                              frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+                                if (frame == null) {
+                                  return Center(
+                                    child: CircularProgressIndicator(
+                                      color: _accentColor,
+                                      strokeWidth: 2,
+                                    ),
+                                  );
+                                }
+                                return child;
+                              },
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Countronics Smart Logger',
+                          style: GoogleFonts.montserrat(
+                            fontSize: 24,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.textPrimary,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 24),
+                        Container(
+                          padding: const EdgeInsets.all(24),
+                          decoration: BoxDecoration(
+                            color: AppColors.cardBackground,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: AppColors.headerBackground,
+                              width: 1,
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.grey.withOpacity(0.1),
+                                blurRadius: 8,
+                                spreadRadius: 1,
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                'System Access',
+                                style: GoogleFonts.montserrat(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.textPrimary,
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              _buildTextField(
+                                controller: _usernameController,
+                                label: 'Username',
+                                icon: Icons.person,
+                                obscureText: false,
+                              ),
+                              const SizedBox(height: 12),
+                              _buildTextField(
+                                controller: _passwordController,
+                                label: 'Password',
+                                icon: Icons.lock,
+                                obscureText: true,
+                              ),
+                              const SizedBox(height: 12),
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton(
+                                  onPressed: _showForgotPasswordDialog,
+                                  child: Text(
+                                    'Reset Credentials',
+                                    style: GoogleFonts.montserrat(
+                                      fontSize: 14,
+                                      color: _accentColor,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+                              // Modified Login Button with AnimatedSwitcher for loading/success
+                              GestureDetector(
+                                // Disable tap when authenticating or showing success
+                                onTap: _isAuthenticating || _showSuccessAnimation ? null : _login,
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 200),
+                                  padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
+                                  decoration: BoxDecoration(
+                                    color: (_isAuthenticating || _showSuccessAnimation)
+                                        ? _accentColor.withOpacity(0.7) // Dim button while busy
+                                        : _accentColor,
+                                    borderRadius: BorderRadius.circular(10),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: _accentColor.withOpacity(0.4),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 3),
+                                      ),
+                                    ],
+                                  ),
+                                  child: AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 300),
+                                    transitionBuilder: (Widget child, Animation<double> animation) {
+                                      // Fade and scale transition for the content inside the button
+                                      return FadeTransition(
+                                        opacity: animation,
+                                        child: ScaleTransition(scale: animation, child: child),
+                                      );
+                                    },
+                                    child: _isAuthenticating
+                                        ? SizedBox(
+                                      key: const ValueKey('loginLoader'), // Key for AnimatedSwitcher
+                                      width: 24, // Size of the loader
+                                      height: 24,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 3,
+                                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                      ),
+                                    )
+                                        : _showSuccessAnimation
+                                        ? ScaleTransition(
+                                      key: const ValueKey('loginSuccess'), // Key for AnimatedSwitcher
+                                      scale: _loginSuccessScaleAnimation, // Use dedicated success animation
+                                      child: const Icon(
+                                        Icons.check_circle,
+                                        color: Colors.white,
+                                        size: 30, // Size of the checkmark
+                                      ),
+                                    )
+                                        : Text(
+                                      key: const ValueKey('loginText'), // Key for AnimatedSwitcher
+                                      'Login',
+                                      style: GoogleFonts.montserrat(
+                                        fontSize: 18,
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -764,6 +958,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
   }
 }
 
+// Keep the background animation classes as they are
 class AnimatedIconBackground extends StatefulWidget {
   const AnimatedIconBackground({super.key});
 
@@ -771,8 +966,7 @@ class AnimatedIconBackground extends StatefulWidget {
   _AnimatedIconBackgroundState createState() => _AnimatedIconBackgroundState();
 }
 
-class _AnimatedIconBackgroundState extends State<AnimatedIconBackground>
-    with TickerProviderStateMixin {
+class _AnimatedIconBackgroundState extends State<AnimatedIconBackground> with TickerProviderStateMixin {
   final List<Map<String, dynamic>> icons = [];
   final List<AnimationController> _controllers = [];
   final List<Animation<double>> _fadeAnimations = [];
@@ -790,11 +984,10 @@ class _AnimatedIconBackgroundState extends State<AnimatedIconBackground>
   @override
   void initState() {
     super.initState();
-    // Initialize animation controllers
     for (int i = 0; i < 12; i++) {
       final controller = AnimationController(
         vsync: this,
-        duration: Duration(milliseconds: 1000 + random.nextInt(1000)), // 1-2s
+        duration: Duration(milliseconds: 1000 + random.nextInt(1000)),
       );
       final fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
         CurvedAnimation(parent: controller, curve: Curves.easeInOut),
@@ -808,42 +1001,38 @@ class _AnimatedIconBackgroundState extends State<AnimatedIconBackground>
       _scaleAnimations.add(scaleAnimation);
     }
 
-    // Generate icons after first frame to access MediaQuery
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final size = MediaQuery.of(context).size;
       icons.clear();
       for (int i = 0; i < 12; i++) {
         double x, y;
+        // Adjust bounds to prevent icons from overlapping the main login form roughly
+        // This is a heuristic, adjust as needed based on your layout
+        final contentLeft = size.width * 0.25;
+        final contentRight = size.width * 0.75;
+        final contentTop = size.height * 0.25;
+        final contentBottom = size.height * 0.75;
+
         do {
           x = random.nextDouble() * size.width;
           y = random.nextDouble() * size.height;
-        } while (_isInContentArea(x, y, size));
+        } while (x > contentLeft && x < contentRight && y > contentTop && y < contentBottom); // Avoid content area
 
         icons.add({
           'x': x,
           'y': y,
           'icon': materialIcons[random.nextInt(materialIcons.length)],
-          'size': 30 + random.nextDouble() * 20, // 30-50px
-          'opacity': 0.2 + random.nextDouble() * 0.1, // 0.2-0.3
+          'size': 30 + random.nextDouble() * 20,
+          'opacity': 0.2 + random.nextDouble() * 0.1,
         });
 
-        // Start animation with random delay
         Future.delayed(Duration(milliseconds: random.nextInt(500)), () {
           if (mounted) _controllers[i].repeat(reverse: true);
         });
       }
       setState(() {});
     });
-  }
-
-  bool _isInContentArea(double x, double y, Size size) {
-    // Define content area (roughly the middle 50% of the screen)
-    final contentLeft = size.width * 0.25;
-    final contentRight = size.width * 0.75;
-    final contentTop = size.height * 0.25;
-    final contentBottom = size.height * 0.75;
-    return x > contentLeft && x < contentRight && y > contentTop && y < contentBottom;
   }
 
   @override
@@ -883,38 +1072,186 @@ class _AnimatedIconBackgroundState extends State<AnimatedIconBackground>
   }
 }
 
-class WaveformBackgroundPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = _LoginPageState._accentColor.withOpacity(0.15)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5;
+class AnimatedWaveformBackground extends StatefulWidget {
+  const AnimatedWaveformBackground({super.key});
 
-    final path = Path();
-    const waveHeight = 12.0;
-    const waveLength = 50.0;
-    for (double y = 0; y < size.height; y += 80) {
-      path.moveTo(0, y);
-      for (double x = 0; x <= size.width; x += waveLength) {
-        path.quadraticBezierTo(
-          x + waveLength / 4,
-          y - waveHeight,
-          x + waveLength / 2,
-          y,
-        );
-        path.quadraticBezierTo(
-          x + 3 * waveLength / 4,
-          y + waveHeight,
-          x + waveLength,
-          y,
-        );
-      }
-    }
-    canvas.drawPath(path, paint);
-    path.close();
+  @override
+  _AnimatedWaveformBackgroundState createState() => _AnimatedWaveformBackgroundState();
+}
+
+class _AnimatedWaveformBackgroundState extends State<AnimatedWaveformBackground> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 5),
+    )..repeat();
+    _animation = Tween<double>(begin: 0.0, end: 2 * pi).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.linear),
+    );
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        return CustomPaint(
+          painter: WaveformBackgroundPainter(phase: _animation.value),
+          child: Container(),
+        );
+      },
+    );
+  }
+}
+
+class WaveformBackgroundPainter extends CustomPainter {
+  final double phase;
+  static const Color _accentColor = Color(0xFF455A64);
+
+  WaveformBackgroundPainter({required this.phase});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final waves = [
+      {'amplitude': 20.0, 'frequency': 0.002, 'offset': 0.2, 'opacity': 0.15},
+      {'amplitude': 15.0, 'frequency': 0.003, 'offset': 0.4, 'opacity': 0.1},
+      {'amplitude': 25.0, 'frequency': 0.0015, 'offset': 0.6, 'opacity': 0.2},
+    ];
+
+    for (var wave in waves) {
+      final amplitude = wave['amplitude'] as double;
+      final frequency = wave['frequency'] as double;
+      final offset = wave['offset'] as double;
+      final opacity = wave['opacity'] as double;
+
+      final paint = Paint()
+        ..shader = LinearGradient(
+          colors: [
+            _accentColor.withOpacity(opacity),
+            _accentColor.withOpacity(opacity * 0.5),
+          ],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ).createShader(Rect.fromLTWH(0, 0, size.width, size.height))
+        ..style = PaintingStyle.fill;
+
+      final path = Path();
+      path.moveTo(0, size.height * offset);
+
+      for (double x = 0; x <= size.width; x += 1) {
+        final y = size.height * offset + sin((x * frequency + phase) * 2 * pi) * amplitude;
+        path.lineTo(x, y);
+      }
+
+      path.lineTo(size.width, size.height);
+      path.lineTo(0, size.height);
+      path.close();
+
+      canvas.drawPath(path, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant WaveformBackgroundPainter oldDelegate) {
+    return oldDelegate.phase != phase;
+  }
+}
+
+class LoggerPulseBackground extends StatefulWidget {
+  const LoggerPulseBackground({super.key});
+
+  @override
+  _LoggerPulseBackgroundState createState() => _LoggerPulseBackgroundState();
+}
+
+class _LoggerPulseBackgroundState extends State<LoggerPulseBackground> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 3),
+    )..repeat();
+    _animation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.linear),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        return CustomPaint(
+          painter: LoggerPulsePainter(progress: _animation.value),
+          child: Container(),
+        );
+      },
+    );
+  }
+}
+
+class LoggerPulsePainter extends CustomPainter {
+  final double progress;
+  static const Color _accentColor = Color(0xFF455A64);
+
+  LoggerPulsePainter({required this.progress});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = _accentColor.withOpacity(0.3)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.round;
+
+    const pulseCount = 4;
+    const dashLength = 20.0;
+    const gapLength = 10.0;
+    const verticalSpacing = 80.0;
+
+    for (int i = 0; i < pulseCount; i++) {
+      final y = size.height * (0.1 + i * verticalSpacing / size.height);
+      final path = Path();
+      final offset = progress * (dashLength + gapLength);
+
+      for (double x = -offset; x < size.width; x += dashLength + gapLength) {
+        if (x + dashLength >= 0) {
+          path.moveTo(x, y);
+          path.lineTo(x + dashLength, y);
+        }
+      }
+
+      // Apply pulsating effect
+      final opacity = 0.3 + 0.2 * sin(progress * 2 + i * pi / 2);
+      paint.color = _accentColor.withOpacity(opacity);
+
+      canvas.drawPath(path, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant LoggerPulsePainter oldDelegate) {
+    return oldDelegate.progress != progress;
+  }
 }

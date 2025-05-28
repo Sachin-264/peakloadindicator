@@ -2,12 +2,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:libserialport/libserialport.dart';
-// import 'package:shared_preferences/shared_preferences.dart'; // REMOVED: No longer needed for port settings
-import 'package:sqflite_common_ffi/sqflite_ffi.dart'; // Keep for general database usage
-import '../../constants/colors.dart'; // Ensure this path is correct
-import '../../constants/database_manager.dart'; // Ensure this path is correct
-import '../../constants/global.dart'; // Ensure this path is correct
-import '../../constants/theme.dart'; // Ensure this path is correct
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import '../../constants/colors.dart';
+import '../../constants/database_manager.dart';
+import '../../constants/global.dart';
+import '../../constants/theme.dart';
 import 'AuthSettingScreen.dart';
 import 'edit_channel_screen.dart';
 
@@ -21,7 +20,6 @@ class ChannelSetupScreen extends StatefulWidget {
 class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTickerProviderStateMixin {
   List<Map<String, dynamic>> channels = [];
   List<String> ports = [];
-  bool isLoading = true;
   String? errorMessage;
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
@@ -46,7 +44,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     _scaleAnimation = Tween<double>(begin: 0.9, end: 1.0).animate(
       CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
     );
-    _loadSavedPortDetails(); // This now uses DatabaseManager
+    _loadSavedPortDetails();
     _fetchPorts();
     fetchChannels();
     _animationController.forward();
@@ -59,7 +57,6 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     super.dispose();
   }
 
-  // MODIFIED: Load port details from DatabaseManager
   Future<void> _loadSavedPortDetails() async {
     final savedSettings = await DatabaseManager().getComPortSettings();
     setState(() {
@@ -71,7 +68,6 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     });
   }
 
-  // MODIFIED: Save port details to DatabaseManager
   Future<void> _savePortDetails(String port, int baudRate, int dataBits, String parity, int stopBits) async {
     await DatabaseManager().saveComPortSettings(port, baudRate, dataBits, parity, stopBits);
   }
@@ -108,8 +104,6 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
 
             portDetails.add('$portName → Baud: $baudRate, Data Bits: $dataBits, Parity: $parityString, Stop Bits: $stopBits');
 
-            // If the previously selected port is found, update Global values
-            // Or if no port was previously selected, and this is the first available port
             if (Global.selectedPort.value.startsWith(portName) || Global.selectedPort.value == 'No Ports Detected' || Global.selectedPort.value == 'Error Fetching Ports') {
               Global.selectedPort.value = '$portName → Baud: $baudRate, Data Bits: $dataBits, Parity: $parityString, Stop Bits: $stopBits';
               Global.baudRate.value = baudRate;
@@ -127,7 +121,6 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
 
         setState(() {
           ports = portDetails;
-          // If no port was selected or an error occurred, and ports are now detected, default to the first one
           if ((Global.selectedPort.value == 'No Ports Detected' || Global.selectedPort.value == 'Error Fetching Ports') && portDetails.isNotEmpty) {
             final firstPortInfo = portDetails[0];
             Global.selectedPort.value = firstPortInfo;
@@ -143,7 +136,6 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
             Global.stopBits.value = stopBits;
             _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
           }
-          // Ensure Global.selectedPort is still one of the actual ports, or null if none
           if (!ports.contains(Global.selectedPort.value) && ports.isNotEmpty) {
             Global.selectedPort.value = ports[0];
           } else if (ports.isEmpty) {
@@ -154,23 +146,21 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
         setState(() {
           ports = ['No Ports Detected'];
           Global.selectedPort.value = 'No Ports Detected';
-          _savePortDetails('No Ports Detected', 9600, 8, 'None', 1); // Save default if no ports found
+          _savePortDetails('No Ports Detected', 9600, 8, 'None', 1);
         });
       }
     } catch (e) {
       setState(() {
         ports = ['Error Fetching Ports'];
         Global.selectedPort.value = 'Error Fetching Ports';
-        _savePortDetails('Error Fetching Ports', 9600, 8, 'None', 1); // Save error state default
+        _savePortDetails('Error Fetching Ports', 9600, 8, 'None', 1);
       });
-      print('Error fetching ports: $e'); // Log the actual error
+      print('Error fetching ports: $e');
     }
   }
 
-
   Future<void> fetchChannels() async {
     setState(() {
-      isLoading = true;
       errorMessage = null;
     });
     try {
@@ -183,12 +173,10 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
         channels = data;
         _selectedRecNos.clear();
         _selectedRecNos.addAll(selectedRecNos);
-        isLoading = false;
       });
     } catch (error) {
       setState(() {
         errorMessage = 'Error fetching channels: $error';
-        isLoading = false;
       });
       print('Error fetching channels: $error');
     }
@@ -795,6 +783,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     required LinearGradient gradient,
     required VoidCallback onTap,
     bool isProminent = false,
+    bool isSmall = false,
   }) {
     bool isHovered = false;
     return StatefulBuilder(
@@ -807,8 +796,8 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             padding: EdgeInsets.symmetric(
-              horizontal: isProminent ? 28 : 20,
-              vertical: isProminent ? 16 : 12,
+              horizontal: isSmall ? 12 : (isProminent ? 28 : 20),
+              vertical: isSmall ? 8 : (isProminent ? 16 : 12),
             ),
             decoration: BoxDecoration(
               gradient: isHovered
@@ -832,17 +821,18 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (icon != null) ...[
-                  Icon(icon, color: Colors.white, size: 24),
-                  const SizedBox(width: 10),
+                  Icon(icon, color: Colors.white, size: isSmall ? 18 : 24),
+                  if (text.isNotEmpty) const SizedBox(width: 10),
                 ],
-                Text(
-                  text,
-                  style: GoogleFonts.montserrat(
-                    fontSize: isProminent ? 16 : 14,
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
+                if (text.isNotEmpty)
+                  Text(
+                    text,
+                    style: GoogleFonts.montserrat(
+                      fontSize: isProminent ? 16 : 14,
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
               ],
             ),
           ),
@@ -946,7 +936,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                             fontSize: 14,
                                             color: ThemeColors.getColor('dialogText', isDarkMode),
                                           ),
-                                          dropdownColor: isDarkMode ? ThemeColors.getColor('dropdownBackground', isDarkMode) : Colors.white, // Adjusted dropdown color for dark mode
+                                          dropdownColor: isDarkMode ? ThemeColors.getColor('dropdownBackground', isDarkMode) : Colors.white,
                                           items: ports.map((port) {
                                             return DropdownMenuItem<String>(
                                               value: port,
@@ -962,28 +952,19 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                           onChanged: (value) {
                                             if (value != null) {
                                               Global.selectedPort.value = value;
-                                              // Extract port name and details from the string
                                               final parts = value.split(' → ');
                                               String portName = parts[0];
-                                              if (parts.length > 1) { // Ensure details part exists
+                                              if (parts.length > 1) {
                                                 final details = parts[1];
-                                                final baudRate = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
-                                                final dataBits = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
-                                                final parity = details.split(', ')[2].split(': ')[1];
-                                                final stopBits = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
-
-                                                Global.baudRate.value = baudRate;
-                                                Global.dataBits.value = dataBits;
-                                                Global.parity.value = parity;
-                                                Global.stopBits.value = stopBits;
-                                                _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
+                                                Global.baudRate.value = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
+                                                Global.dataBits.value = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
+                                                Global.parity.value = details.split(', ')[2].split(': ')[1];
+                                                Global.stopBits.value = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
                                               } else {
-                                                // Handle "No Ports Detected" or "Error Fetching Ports" case
                                                 Global.baudRate.value = 9600;
                                                 Global.dataBits.value = 8;
                                                 Global.parity.value = 'None';
                                                 Global.stopBits.value = 1;
-                                                _savePortDetails(portName, 9600, 8, 'None', 1);
                                               }
                                             }
                                           },
@@ -991,12 +972,36 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                       },
                                     ),
                                   ),
-                                  const SizedBox(width: 16),
+                                  const SizedBox(width: 12),
                                   _buildButton(
-                                    text: '',
-                                    icon: Icons.refresh,
+                                    text: 'Save',
+                                    icon: Icons.save,
                                     gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'backup'),
-                                    onTap: _fetchPorts,
+                                    onTap: () {
+                                      final value = Global.selectedPort.value;
+                                      final parts = value.split(' → ');
+                                      String portName = parts[0];
+                                      if (parts.length > 1) {
+                                        final details = parts[1];
+                                        final baudRate = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
+                                        final dataBits = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
+                                        final parity = details.split(', ')[2].split(': ')[1];
+                                        final stopBits = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
+                                        _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
+                                      } else {
+                                        _savePortDetails(portName, 9600, 8, 'None', 1);
+                                      }
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                          content: Text('Port settings saved successfully', style: GoogleFonts.montserrat(fontSize: 14)),
+                                          backgroundColor: ThemeColors.getColor('submitButton', isDarkMode),
+                                          behavior: SnackBarBehavior.floating,
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                          margin: const EdgeInsets.all(16),
+                                        ),
+                                      );
+                                    },
+                                    isSmall: true,
                                   ),
                                 ],
                               ),
@@ -1117,14 +1122,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                               borderRadius: BorderRadius.circular(16),
                             ),
                             height: 400,
-                            child: isLoading
-                                ? Center(
-                              child: CircularProgressIndicator(
-                                color: ThemeColors.getColor('submitButton', isDarkMode),
-                                strokeWidth: 3,
-                              ),
-                            )
-                                : errorMessage != null
+                            child: errorMessage != null
                                 ? Center(
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,

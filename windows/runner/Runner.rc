@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "peakloadindicator" "\0"
+            VALUE "FileDescription", "Countron Smart logger" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "peakloadindicator" "\0"
+            VALUE "InternalName", "Countron Smart logger" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2025 com.example. All rights reserved." "\0"
-            VALUE "OriginalFilename", "peakloadindicator.exe" "\0"
-            VALUE "ProductName", "peakloadindicator" "\0"
+            VALUE "OriginalFilename", "Countron Smart logger.exe" "\0"
+            VALUE "ProductName", "Countron Smart logger" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

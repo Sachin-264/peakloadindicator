@@ -2,11 +2,12 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+// import 'package:sqflite_common_ffi/sqflite_ffi.dart'; // No direct sqflite usage here, can remove if not used for type hints
 import 'package:archive/archive_io.dart';
-import 'package:peakloadindicator/constants/database_manager.dart';
+import 'package:peakloadindicator/constants/database_manager.dart'; // Ensure this path is correct
+import 'package:sqflite/sqflite.dart';
 
-import '../../constants/sessionmanager.dart';
+import '../../constants/sessionmanager.dart'; // Ensure this path is correct
 
 
 class BackupRestoreService {
@@ -176,7 +177,7 @@ class BackupRestoreService {
         return "Restore failed: Could not create parent directory for $activeDataFolderPathOnDisk. Please check permissions or run as administrator. Error: $e";
       }
 
-      // Check write permissions for data folder
+      // Check write permissions for data folder (optional but good for early error detection)
       print("[RESTORE] Checking write permissions for data folder: $activeDataFolderPathOnDisk");
       try {
         final Directory tempDataDir = Directory(activeDataFolderPathOnDisk);
@@ -194,29 +195,43 @@ class BackupRestoreService {
         return "Restore failed: Application lacks permission to modify $activeDataFolderPathOnDisk. Please run as administrator or check folder permissions. Error: $e";
       }
 
-      // Close all database connections
-      print("[RESTORE] Closing current main database connection (Countronics.db)...");
+      // --- CRITICAL: Close all database connections before attempting to delete files ---
+      print("[RESTORE] Initiating database closure sequence...");
+      // 1. Close the main database instance managed by DatabaseManager first
       await DatabaseManager().close();
-      print("[RESTORE] Main database connection (Countronics.db) reported closed.");
+      print("[RESTORE] DatabaseManager's main database connection reported closed and unregistered.");
 
-      print("[RESTORE] Closing ALL session databases (from CountronicsData folder)...");
+      // 2. Close all other session databases tracked by SessionDatabaseManager
+      // This will also attempt to close the main DB again if it was somehow still tracked,
+      // but it should be safe as `db.close()` handles already closed databases.
       await SessionDatabaseManager().closeAllSessionDatabases();
-      print("[RESTORE] Session databases closed. Any open databases left: ${SessionDatabaseManager().hasOpenDatabases}");
+      print("[RESTORE] All SessionDatabaseManager databases reported closed. Remaining open: ${SessionDatabaseManager().hasOpenDatabases}");
 
-      // Extended delay to ensure file locks are released
-      print("[RESTORE] Waiting 2 seconds to ensure file locks are released...");
-      await Future.delayed(Duration(seconds: 2));
+      // Extended delay to ensure file locks are released by the OS
+      print("[RESTORE] Waiting 3 seconds to ensure file locks are released (increased from 2)...");
+      await Future.delayed(Duration(seconds: 3));
 
       // Deletion Logic with Retry and Fallback Rename
       final File activeMainDbFileOnDisk = File(activeMainDbPathOnDisk);
       if (await activeMainDbFileOnDisk.exists()) {
-        print("[RESTORE] Existing main DB file found. Deleting: $activeMainDbPathOnDisk");
-        try {
-          await activeMainDbFileOnDisk.delete();
-          print("[RESTORE] Successfully deleted existing main DB file.");
-        } catch (e) {
-          print("[RESTORE] FAILED to delete existing main DB file: $e. Aborting restore.");
-          return "Restore failed: Could not delete existing main database file. Error: $e";
+        print("[RESTORE] Existing main DB file found. Attempting to delete: $activeMainDbPathOnDisk");
+        bool mainDbDeletedSuccessfully = false;
+        for (int i = 0; i < 5; i++) { // Retry for main DB deletion
+          try {
+            await activeMainDbFileOnDisk.delete();
+            mainDbDeletedSuccessfully = true;
+            print("[RESTORE] Successfully deleted existing main DB file on attempt ${i + 1}.");
+            break;
+          } catch (e) {
+            print("[RESTORE] FAILED to delete existing main DB file on attempt ${i + 1}: $e.");
+            if (i < 4) {
+              print("[RESTORE] Waiting for 2 seconds before retrying main DB deletion...");
+              await Future.delayed(Duration(seconds: 2));
+            }
+          }
+        }
+        if (!mainDbDeletedSuccessfully) {
+          return "Restore failed: Could not delete existing main database file after multiple attempts. It might still be in use by another process or application. Please restart the application and try again.";
         }
       } else {
         print("[RESTORE] No existing main DB file found at $activeMainDbPathOnDisk. No deletion needed.");
@@ -225,45 +240,45 @@ class BackupRestoreService {
       final Directory activeDataDirOnDisk = Directory(activeDataFolderPathOnDisk);
       if (await activeDataDirOnDisk.exists()) {
         print("[RESTORE] Existing data folder found. Attempting to delete: $activeDataFolderPathOnDisk");
-        bool deletedSuccessfully = false;
-        for (int i = 0; i < 5; i++) {
+        bool dataDirDeletedSuccessfully = false;
+        for (int i = 0; i < 5; i++) { // Retry for data folder deletion
           try {
             await activeDataDirOnDisk.delete(recursive: true);
-            deletedSuccessfully = true;
+            dataDirDeletedSuccessfully = true;
             print("[RESTORE] Successfully deleted existing data folder on attempt ${i + 1}.");
             break;
           } catch (e) {
             print("[RESTORE] FAILED to delete existing data folder on attempt ${i + 1}: $e.");
             if (i < 4) {
-              print("[RESTORE] Waiting for 2 seconds before retrying deletion...");
+              print("[RESTORE] Waiting for 2 seconds before retrying data folder deletion...");
               await Future.delayed(Duration(seconds: 2));
             }
           }
         }
 
         // Fallback: Rename the folder if deletion fails
-        if (!deletedSuccessfully) {
-          print("[RESTORE] Deletion failed after 5 attempts. Attempting to rename folder...");
+        if (!dataDirDeletedSuccessfully) {
+          print("[RESTORE] Data folder deletion failed after 5 attempts. Attempting to rename folder...");
           final String timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
           final String renamedPath = "${activeDataFolderPathOnDisk}_backup_$timestamp";
           try {
             await activeDataDirOnDisk.rename(renamedPath);
             print("[RESTORE] Successfully renamed folder to: $renamedPath");
-            deletedSuccessfully = true;
+            dataDirDeletedSuccessfully = true;
           } catch (e) {
             print("[RESTORE] FAILED to rename folder to $renamedPath: $e.");
             return "Restore failed: Could not delete or rename existing data folder. Files may be in use (e.g., by another application). Please close all applications and try again. Error: $e";
           }
         }
 
-        if (!deletedSuccessfully) {
+        if (!dataDirDeletedSuccessfully) {
           return "Restore failed: Could not delete or rename existing data folder after multiple attempts.";
         }
       } else {
         print("[RESTORE] No existing data folder found at $activeDataFolderPathOnDisk. No deletion needed.");
       }
 
-      // Re-create data folder structure
+      // Re-create data folder structure (important if it was deleted)
       print("[RESTORE] Re-creating data folder structure: $activeDataFolderPathOnDisk");
       try {
         await activeDataDirOnDisk.create(recursive: true);
@@ -279,12 +294,12 @@ class BackupRestoreService {
       inputStream = InputFileStream(backupZipPath);
       try {
         archive = ZipDecoder().decodeBuffer(inputStream);
-        await inputStream.close();
-        inputStream = null;
+        await inputStream.close(); // Close immediately after decoding
+        inputStream = null; // Clear reference
         print("[RESTORE] Backup ZIP archive decoded. Found ${archive.files.length} total entries (files and directories).");
       } catch (e) {
         print("[RESTORE] FAILED to read or decode ZIP archive: $e. Aborting restore.");
-        if (inputStream != null) {
+        if (inputStream != null) { // Ensure stream is closed if it was opened
           try {
             await inputStream.close();
           } catch (_) {}
@@ -317,12 +332,9 @@ class BackupRestoreService {
           final String relativePath = fileInArchive.name.substring(_zipEntryDataFolderInternalPrefix.length);
           print("[RESTORE] ------ Calculated relativePath: '$relativePath'");
 
-          if (relativePath.isEmpty) {
-            print("[RESTORE] ------ Relative path is empty. Skipping '${fileInArchive.name}'.");
-            continue;
-          }
-          if (relativePath.contains('..') || path.isAbsolute(relativePath)) {
-            print("[RESTORE] ------ Potentially problematic relativePath '$relativePath'. Skipping '${fileInArchive.name}'.");
+          // Basic security check for path traversal
+          if (relativePath.isEmpty || relativePath.contains('..') || path.isAbsolute(relativePath)) {
+            print("[RESTORE] ------ Potentially problematic or empty relativePath '$relativePath'. Skipping '${fileInArchive.name}'.");
             continue;
           }
           outputPathOnDisk = path.join(activeDataFolderPathOnDisk, relativePath);
@@ -346,6 +358,8 @@ class BackupRestoreService {
         }
 
         final List<int> fileBytes;
+        // The content property of an ArchiveFile might be lazy loaded or already decoded.
+        // Direct casting to List<int> is common after ZipDecoder().decodeBuffer.
         if (fileInArchive.content is List<int>) {
           fileBytes = fileInArchive.content as List<int>;
         } else {
@@ -406,6 +420,3 @@ class BackupRestoreService {
     }
   }
 }
-
-
-
