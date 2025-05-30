@@ -1,15 +1,20 @@
+// peakloadindicator/constants/database_manager.dart
+
 import 'package:peakloadindicator/constants/sessionmanager.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
-// import 'package:flutter/material.dart'; // Only include if actually used
-import '../Pages/NavPages/channel.dart'; // Only include if actually used
+import '../Pages/NavPages/channel.dart';
 import '../Pages/logScreen/log.dart';
+import 'Security.dart'; // Security.dart is still imported for other potential uses, but its encryption logic will be removed/simplified.
+
 
 class DatabaseManager {
   static final DatabaseManager _instance = DatabaseManager._internal();
   Database? _database;
+
+  // _dbVersion indicates schema version. Encryption is not tied to this version in this approach.
   static const int _dbVersion = 7;
 
   factory DatabaseManager() => _instance;
@@ -21,151 +26,161 @@ class DatabaseManager {
     final dbPath = path.join(databasesPath, 'Countronics.db');
 
     if (_database != null && _database!.isOpen) {
-      // If database is already open, ensure it's registered with SessionDatabaseManager
       SessionDatabaseManager().addManagedDatabase(dbPath, _database!);
       return _database!;
     }
 
-    // Ensure the directory exists before attempting to open the database
     await Directory(path.dirname(dbPath)).create(recursive: true);
 
-    _database = await databaseFactoryFfi.openDatabase(
-      dbPath,
-      options: OpenDatabaseOptions(
-        version: _dbVersion,
-        onCreate: (db, version) async {
-          print('[DatabaseManager] Creating database version $version');
-          LogPage.addLog('[${_currentTime}] Creating database version $version');
-          await _initializeDatabase(db);
-          // Register the newly created database with SessionDatabaseManager
-          SessionDatabaseManager().addManagedDatabase(dbPath, db);
-        },
-        onUpgrade: (db, oldVersion, newVersion) async {
-          print('[DatabaseManager] Upgrading database from $oldVersion to $newVersion');
-          LogPage.addLog('[${_currentTime}] Upgrading database from $oldVersion to $newVersion');
-          // --- Your existing upgrade logic ---
-          if (oldVersion < 2) {
-            await db.execute('''
-              CREATE TABLE IF NOT EXISTS AuthSettings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                isAuthEnabled INTEGER,
-                username TEXT,
-                password TEXT
-              )
-            ''');
-            await db.execute('''
-              CREATE TABLE IF NOT EXISTS ChannelSetup (
-                RecNo INTEGER PRIMARY KEY,
-                ChannelName TEXT,
-                StartingCharacter TEXT,
-                DataLength INTEGER,
-                Unit TEXT,
-                DecimalPlaces INTEGER
-              )
-            ''');
-            LogPage.addLog('[${_currentTime}] Added AuthSettings and ChannelSetup tables');
-          }
-          if (oldVersion < 3) {
-            await addColumnIfNotExists(db, 'AuthSettings', 'companyName', 'TEXT');
-            await addColumnIfNotExists(db, 'AuthSettings', 'companyAddress', 'TEXT');
-            await addColumnIfNotExists(db, 'AuthSettings', 'logoPath', 'TEXT');
-          }
-          if (oldVersion < 4) {
-            await db.execute('''
-              CREATE TABLE IF NOT EXISTS ChannelSetup_New (
-                RecNo INTEGER PRIMARY KEY,
-                ChannelName TEXT,
-                Unit TEXT,
-                TargetAlarmMax INTEGER,
-                TargetAlarmMin INTEGER,
-                TargetAlarmColour TEXT
-              )
-            ''');
-            await db.execute('''
-              INSERT INTO ChannelSetup_New (RecNo, ChannelName, Unit)
-              SELECT RecNo, ChannelName, Unit
-              FROM ChannelSetup
-            ''');
-            await db.execute('DROP TABLE ChannelSetup');
-            await db.execute('ALTER TABLE ChannelSetup_New RENAME TO ChannelSetup');
-            LogPage.addLog('[${_currentTime}] Updated ChannelSetup table schema (v4)');
-          }
-          if (oldVersion < 5) {
-            await db.execute('''
-              CREATE TABLE IF NOT EXISTS ChannelSetup_New (
-                RecNo INTEGER PRIMARY KEY,
-                ChannelName TEXT,
-                StartingCharacter TEXT,
-                DataLength INTEGER,
-                DecimalPlaces INTEGER,
-                Unit TEXT,
-                TargetAlarmMax INTEGER,
-                TargetAlarmMin INTEGER,
-                TargetAlarmColour TEXT,
-                graphLineColour TEXT,
-                ChartMaximumValue REAL,
-                ChartMinimumValue REAL
-              )
-            ''');
-            await db.execute('''
-              INSERT INTO ChannelSetup_New (
-                RecNo, ChannelName, Unit, TargetAlarmMax, TargetAlarmMin, TargetAlarmColour
-              )
-              SELECT
-                RecNo, ChannelName, Unit, TargetAlarmMax, TargetAlarmMin, TargetAlarmColour
-              FROM ChannelSetup
-            ''');
-            await db.execute('''
-              UPDATE ChannelSetup_New
-              SET StartingCharacter = COALESCE(StartingCharacter, CASE
-                WHEN ChannelName = 'Load' THEN 'L'
-                WHEN ChannelName = 'Channel A' THEN 'A'
-                WHEN ChannelName = 'Channel B' THEN 'B'
-                WHEN ChannelName = 'Channel C' THEN 'C'
-                WHEN ChannelName = 'Channel D' THEN 'D'
-                WHEN ChannelName = 'Channel E' THEN 'E'
-                ELSE SUBSTR(ChannelName, 1, 1)
-              END),
-              DataLength = COALESCE(DataLength, 7),
-              DecimalPlaces = COALESCE(DecimalPlaces, 1),
-              graphLineColour = COALESCE(graphLineColour, 'FF0000'),
-              ChartMaximumValue = COALESCE(ChartMaximumValue, 100.0),
-              ChartMinimumValue = COALESCE(ChartMinimumValue, 0.0)
-            ''');
-            await db.execute('DROP TABLE ChannelSetup');
-            await db.execute('ALTER TABLE ChannelSetup_New RENAME TO ChannelSetup');
-            LogPage.addLog('[${_currentTime}] Updated ChannelSetup table schema (v5)');
-          }
-          if (oldVersion < 6) {
-            await db.execute('''
-              CREATE TABLE IF NOT EXISTS ComPort (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                selectedPort TEXT,
-                baudRate INTEGER,
-                dataBits INTEGER,
-                parity TEXT,
-                stopBits INTEGER
-              )
-            ''');
-            LogPage.addLog('[${_currentTime}] Added ComPort table');
-          }
-          if (oldVersion < 7) {
-            await addColumnIfNotExists(db, 'Test', 'TestDurationSS', 'REAL');
-            LogPage.addLog('[${_currentTime}] Added TestDurationSS column to Test table');
-          }
-          // Register the upgraded database with SessionDatabaseManager
-          SessionDatabaseManager().addManagedDatabase(dbPath, db);
-        },
-        onOpen: (db) async {
-          print('[DatabaseManager] Opening database');
-          LogPage.addLog('[${_currentTime}] Opening database');
-          await db.execute('PRAGMA key = "Countronics2025"');
-          // Register the opened database with SessionDatabaseManager
-          SessionDatabaseManager().addManagedDatabase(dbPath, db);
-        },
-      ),
-    );
-    return _database!;
+    try {
+      _database = await databaseFactory.openDatabase( // Use the globally set databaseFactory (which is databaseFactoryFfi)
+        dbPath,
+        options: OpenDatabaseOptions(
+          version: _dbVersion,
+          // REMOVED: password: Security.encryptionKey, // No password parameter here
+          onCreate: (db, version) async {
+            print('[DatabaseManager] Creating database version $version');
+            LogPage.addLog('[${_currentTime}] Creating database version $version');
+            await _initializeDatabase(db);
+            SessionDatabaseManager().addManagedDatabase(dbPath, db);
+          },
+          onUpgrade: (db, oldVersion, newVersion) async {
+            print('[DatabaseManager] Upgrading database from $oldVersion to $newVersion');
+            LogPage.addLog('[${_currentTime}] Upgrading database from $oldVersion to $newVersion');
+
+            // REMOVED: All PRAGMA rekey logic for SQLCipher
+            // If oldVersion < _dbVersion && newVersion == _dbVersion,
+            // this is just a schema upgrade. No encryption rekeying.
+
+            // --- Your existing schema upgrade logic ---
+            // Ensure these run for relevant version changes.
+            if (oldVersion < 2) {
+              await db.execute('''
+                CREATE TABLE IF NOT EXISTS AuthSettings (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  isAuthEnabled INTEGER,
+                  username TEXT,
+                  password TEXT
+                )
+              ''');
+              await db.execute('''
+                CREATE TABLE IF NOT EXISTS ChannelSetup (
+                  RecNo INTEGER PRIMARY KEY,
+                  ChannelName TEXT,
+                  StartingCharacter TEXT,
+                  DataLength INTEGER,
+                  Unit TEXT,
+                  DecimalPlaces INTEGER
+                )
+              ''');
+              LogPage.addLog('[${_currentTime}] Added AuthSettings and ChannelSetup tables');
+            }
+            if (oldVersion < 3) {
+              await addColumnIfNotExists(db, 'AuthSettings', 'companyName', 'TEXT');
+              await addColumnIfNotExists(db, 'AuthSettings', 'companyAddress', 'TEXT');
+              await addColumnIfNotExists(db, 'AuthSettings', 'logoPath', 'TEXT');
+            }
+            if (oldVersion < 4) {
+              await db.execute('''
+                CREATE TABLE IF NOT EXISTS ChannelSetup_New (
+                  RecNo INTEGER PRIMARY KEY,
+                  ChannelName TEXT,
+                  Unit TEXT,
+                  TargetAlarmMax INTEGER,
+                  TargetAlarmMin INTEGER,
+                  TargetAlarmColour TEXT
+                )
+              ''');
+              await db.execute('''
+                INSERT INTO ChannelSetup_New (RecNo, ChannelName, Unit)
+                SELECT RecNo, ChannelName, Unit
+                FROM ChannelSetup
+              ''');
+              await db.execute('DROP TABLE ChannelSetup');
+              await db.execute('ALTER TABLE ChannelSetup_New RENAME TO ChannelSetup');
+              LogPage.addLog('[${_currentTime}] Updated ChannelSetup table schema (v4)');
+            }
+            if (oldVersion < 5) {
+              await db.execute('''
+                CREATE TABLE IF NOT EXISTS ChannelSetup_New (
+                  RecNo INTEGER PRIMARY KEY,
+                  ChannelName TEXT,
+                  StartingCharacter TEXT,
+                  DataLength INTEGER,
+                  DecimalPlaces INTEGER,
+                  Unit TEXT,
+                  TargetAlarmMax INTEGER,
+                  TargetAlarmMin INTEGER,
+                  TargetAlarmColour TEXT,
+                  graphLineColour TEXT,
+                  ChartMaximumValue REAL,
+                  ChartMinimumValue REAL
+                )
+              ''');
+              await db.execute('''
+                INSERT INTO ChannelSetup_New (
+                  RecNo, ChannelName, Unit, TargetAlarmMax, TargetAlarmMin, TargetAlarmColour
+                )
+                SELECT
+                  RecNo, ChannelName, Unit, TargetAlarmMax, TargetAlarmMin, TargetAlarmColour
+                FROM ChannelSetup
+              ''');
+              await db.execute('''
+                UPDATE ChannelSetup_New
+                SET StartingCharacter = COALESCE(StartingCharacter, CASE
+                  WHEN ChannelName = 'Load' THEN 'L'
+                  WHEN ChannelName = 'Channel A' THEN 'A'
+                  WHEN ChannelName = 'Channel B' THEN 'B'
+                  WHEN ChannelName = 'Channel C' THEN 'C'
+                  WHEN ChannelName = 'Channel D' THEN 'D'
+                  WHEN ChannelName = 'Channel E' THEN 'E'
+                  ELSE SUBSTR(ChannelName, 1, 1)
+                END),
+                DataLength = COALESCE(DataLength, 7),
+                DecimalPlaces = COALESCE(DecimalPlaces, 1),
+                graphLineColour = COALESCE(graphLineColour, 'FF0000'),
+                ChartMaximumValue = COALESCE(ChartMaximumValue, 100.0),
+                ChartMinimumValue = COALESCE(ChartMinimumValue, 0.0)
+              ''');
+              await db.execute('DROP TABLE ChannelSetup');
+              await db.execute('ALTER TABLE ChannelSetup_New RENAME TO ChannelSetup');
+              LogPage.addLog('[${_currentTime}] Updated ChannelSetup table schema (v5)');
+            }
+            if (oldVersion < 6) {
+              await db.execute('''
+                CREATE TABLE IF NOT EXISTS ComPort (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  selectedPort TEXT,
+                  baudRate INTEGER,
+                  dataBits INTEGER,
+                  parity TEXT,
+                  stopBits INTEGER
+                )
+              ''');
+              LogPage.addLog('[${_currentTime}] Added ComPort table');
+            }
+            // This is the last schema change before v7, so it's good place to put it
+            if (oldVersion < 7) {
+              await addColumnIfNotExists(db, 'Test', 'TestDurationSS', 'REAL');
+              LogPage.addLog('[${_currentTime}] Added TestDurationSS column to Test table');
+            }
+            SessionDatabaseManager().addManagedDatabase(dbPath, db);
+          },
+          onOpen: (db) async {
+            print('[DatabaseManager] Opening database');
+            LogPage.addLog('[${_currentTime}] Opening database');
+            SessionDatabaseManager().addManagedDatabase(dbPath, db);
+          },
+        ),
+      );
+      return _database!;
+    } catch (e) {
+      // Critical error: Database failed to open (e.g., corruption).
+      print('[DatabaseManager] CRITICAL ERROR opening database $dbPath: $e');
+      LogPage.addLog('[${_currentTime}] CRITICAL ERROR opening database $dbPath: $e');
+      _database = null; // Clear the reference on failure
+      rethrow; // Re-throw to inform the calling code
+    }
   }
 
   Future<void> addColumnIfNotExists(Database db, String table, String column, String type) async {
@@ -182,50 +197,21 @@ class DatabaseManager {
   Future<void> _initializeDatabase(Database db) async {
     print('[DatabaseManager] Initializing database schema');
     LogPage.addLog('[${_currentTime}] Initializing database schema');
-    // --- Your existing _initializeDatabase logic ---
+    // Schema creation for a brand new database.
     await db.execute('''
       CREATE TABLE IF NOT EXISTS Test (
-        RecNo REAL PRIMARY KEY,
-        FName TEXT,
-        OperatorName TEXT,
-        TDate TEXT,
-        TTime TEXT,
-        ScanningRate REAL,
-        ScanningRateHH REAL,
-        ScanningRateMM REAL,
-        ScanningRateSS REAL,
-        TestDurationDD REAL,
-        TestDurationHH REAL,
-        TestDurationMM REAL,
-        TestDurationSS REAL,
-        GraphVisibleArea REAL,
-        BaseLine REAL,
-        FullScale REAL,
-        Descrip TEXT,
-        AbsorptionPer REAL,
-        NOR REAL,
-        FLName TEXT,
-        XAxis TEXT,
-        XAxisRecNo REAL,
-        XAxisUnit TEXT,
-        XAxisCode REAL,
-        TotalChannel INTEGER,
-        MaxYAxis REAL,
-        MinYAxis REAL,
-        DBName TEXT
+        RecNo REAL PRIMARY KEY, FName TEXT, OperatorName TEXT, TDate TEXT, TTime TEXT,
+        ScanningRate REAL, ScanningRateHH REAL, ScanningRateMM REAL, ScanningRateSS REAL,
+        TestDurationDD REAL, TestDurationHH REAL, TestDurationMM REAL, TestDurationSS REAL,
+        GraphVisibleArea REAL, BaseLine REAL, FullScale REAL, Descrip TEXT,
+        AbsorptionPer REAL, NOR REAL, FLName TEXT, XAxis TEXT, XAxisRecNo REAL,
+        XAxisUnit TEXT, XAxisCode REAL, TotalChannel INTEGER, MaxYAxis REAL, MinYAxis REAL, DBName TEXT
       )
     ''');
     await db.execute('''
       CREATE TABLE IF NOT EXISTS Test1 (
-        RecNo REAL,
-        SNo REAL,
-        SlNo REAL,
-        ChangeTime TEXT,
-        AbsDate TEXT,
-        AbsTime TEXT,
-        AbsDateTime TEXT,
-        Shown TEXT,
-        AbsAvg REAL,
+        RecNo REAL, SNo REAL, SlNo REAL, ChangeTime TEXT, AbsDate TEXT, AbsTime TEXT,
+        AbsDateTime TEXT, Shown TEXT, AbsAvg REAL,
         ${List.generate(50, (i) => 'AbsPer${i + 1} REAL').join(', ')}
       )
     ''');
@@ -237,59 +223,34 @@ class DatabaseManager {
     ''');
     await db.execute('''
       CREATE TABLE IF NOT EXISTS AutoStart (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        StartTimeHr REAL,
-        StartTimeMin REAL,
-        EndTimeHr REAL,
-        EndTimeMin REAL,
-        ScanTimeSec REAL
+        id INTEGER PRIMARY KEY AUTOINCREMENT, StartTimeHr REAL, StartTimeMin REAL,
+        EndTimeHr REAL, EndTimeMin REAL, ScanTimeSec REAL
       )
     ''');
     await db.execute('''
       CREATE TABLE IF NOT EXISTS SelectChannel (
-        RecNo REAL,
-        ChannelName TEXT,
-        StartingCharacter TEXT,
-        DataLength INTEGER,
-        Unit TEXT,
-        DecimalPlaces INTEGER
+        RecNo REAL, ChannelName TEXT, StartingCharacter TEXT, DataLength INTEGER,
+        Unit TEXT, DecimalPlaces INTEGER
       )
     ''');
     await db.execute('''
       CREATE TABLE IF NOT EXISTS ChannelSetup (
-        RecNo INTEGER PRIMARY KEY,
-        ChannelName TEXT,
-        StartingCharacter TEXT,
-        DataLength INTEGER,
-        DecimalPlaces INTEGER,
-        Unit TEXT,
-        TargetAlarmMax INTEGER,
-        TargetAlarmMin INTEGER,
-        TargetAlarmColour TEXT,
-        graphLineColour TEXT,
-        ChartMaximumValue REAL,
-        ChartMinimumValue REAL
+        RecNo INTEGER PRIMARY KEY, ChannelName TEXT, StartingCharacter TEXT,
+        DataLength INTEGER, DecimalPlaces INTEGER, Unit TEXT, TargetAlarmMax INTEGER,
+        TargetAlarmMin INTEGER, TargetAlarmColour TEXT, graphLineColour TEXT,
+        ChartMaximumValue REAL, ChartMinimumValue REAL
       )
     ''');
     await db.execute('''
       CREATE TABLE IF NOT EXISTS AuthSettings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        isAuthEnabled INTEGER,
-        username TEXT,
-        password TEXT,
-        companyName TEXT,
-        companyAddress TEXT,
-        logoPath TEXT
+        id INTEGER PRIMARY KEY AUTOINCREMENT, isAuthEnabled INTEGER, username TEXT,
+        password TEXT, companyName TEXT, companyAddress TEXT, logoPath TEXT
       )
     ''');
     await db.execute('''
       CREATE TABLE IF NOT EXISTS ComPort (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        selectedPort TEXT,
-        baudRate INTEGER,
-        dataBits INTEGER,
-        parity TEXT,
-        stopBits INTEGER
+        id INTEGER PRIMARY KEY AUTOINCREMENT, selectedPort TEXT, baudRate INTEGER,
+        dataBits INTEGER, parity TEXT, stopBits INTEGER
       )
     ''');
     print('[DatabaseManager] Database schema initialized');
@@ -301,11 +262,7 @@ class DatabaseManager {
   Future<Map<String, dynamic>?> getAutoStartData() async {
     final db = await database;
     try {
-      final result = await db.query(
-        'AutoStart',
-        limit: 1,
-        orderBy: 'ROWID DESC',
-      );
+      final result = await db.query('AutoStart', limit: 1, orderBy: 'ROWID DESC');
       if (result.isNotEmpty) {
         LogPage.addLog('[${_currentTime}] Fetched AutoStart data');
         return result.first;
@@ -341,14 +298,8 @@ class DatabaseManager {
       final authData = await db.query('AuthSettings', limit: 1);
       if (authData.isNotEmpty) {
         final isAuthEnabled = authData.first['isAuthEnabled'];
-        print('[DatabaseManager] isAuthEnabled type: ${isAuthEnabled.runtimeType}, value: $isAuthEnabled');
         LogPage.addLog('[${_currentTime}] Checked isAuthRequired: $isAuthEnabled');
-        if (isAuthEnabled is int) {
-          return isAuthEnabled == 1;
-        } else if (isAuthEnabled is String) {
-          return int.parse(isAuthEnabled) == 1;
-        }
-        return false;
+        return isAuthEnabled == 1; // Assuming it's stored as INTEGER 0 or 1
       }
       LogPage.addLog('[${_currentTime}] No auth settings found');
       return false;
@@ -365,11 +316,8 @@ class DatabaseManager {
       final authData = await db.query('AuthSettings', limit: 1);
       if (authData.isNotEmpty) {
         final result = Map<String, dynamic>.from(authData.first);
-        if (result['isAuthEnabled'] is String) {
-          result['isAuthEnabled'] = int.parse(result['isAuthEnabled']);
-        }
-        print('[DatabaseManager] getAuthSettings: $result');
-        LogPage.addLog('[${_currentTime}] Fetched auth settings');
+        // REMOVED: Decryption logic
+        print('[DatabaseManager] Fetched auth settings');
         return result;
       }
       print('[DatabaseManager] No auth settings found');
@@ -392,11 +340,12 @@ class DatabaseManager {
       }) async {
     final db = await database;
     try {
+      // REMOVED: Encryption logic
       await db.delete('AuthSettings');
       await db.insert('AuthSettings', {
         'isAuthEnabled': isAuthEnabled ? 1 : 0,
         'username': username,
-        'password': password,
+        'password': password, // Store password directly (unencrypted)
         'companyName': companyName ?? '',
         'companyAddress': companyAddress ?? '',
         'logoPath': logoPath,
@@ -449,21 +398,19 @@ class DatabaseManager {
     }
   }
 
-  // Modified close method to explicitly unregister from SessionDatabaseManager
   Future<void> close() async {
     final String mainDbPath = path.join(await getDatabasesPath(), 'Countronics.db');
     if (_database != null && _database!.isOpen) {
       await _database!.close();
-      _database = null; // Set to null after closing to release the reference
+      _database = null;
       print('[DatabaseManager] Main database connection (Countronics.db) closed.');
       LogPage.addLog('[${_currentTime}] Main database closed');
     } else {
       print('[DatabaseManager] Main database connection was already closed or null.');
     }
-    // Explicitly unregister from SessionDatabaseManager's tracking map
     SessionDatabaseManager().removeManagedDatabase(mainDbPath);
     print('[DatabaseManager] Main DB unregistered from SessionDatabaseManager tracking.');
   }
 
-  String get _currentTime => DateTime.now().toString().substring(0, 19);
+  static String get _currentTime => DateTime.now().toIso8601String().substring(0, 19);
 }

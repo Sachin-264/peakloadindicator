@@ -822,7 +822,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                         headingRowColor: MaterialStateProperty.resolveWith((states) => ThemeColors.getColor('tableHeaderBackground', isDarkMode)),
                         headingTextStyle: GoogleFonts.roboto(fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13),
                         dataRowMinHeight: 38, dataRowMaxHeight: 44,
-                        columnSpacing: 22, // MODIFIED from 18
+                        columnSpacing: 35, // MODIFIED from 18
                         border: TableBorder.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5), width: 0.5),
                         columns: [
                           DataColumn(label: Text('No'), numeric: true),

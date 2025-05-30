@@ -77,6 +77,10 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
       final availablePorts = SerialPort.availablePorts;
       List<String> portDetails = [];
 
+      // Get the currently saved port name (without details) for comparison
+      final String currentlySavedPortName = Global.selectedPort.value.split(' → ')[0];
+      bool savedPortFound = false; // To track if the previously saved port is among detected ports
+
       if (availablePorts.isNotEmpty) {
         for (final portName in availablePorts) {
           final port = SerialPort(portName);
@@ -102,15 +106,19 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                 parityString = "Unknown";
             }
 
-            portDetails.add('$portName → Baud: $baudRate, Data Bits: $dataBits, Parity: $parityString, Stop Bits: $stopBits');
+            final fullPortInfo = '$portName → Baud: $baudRate, Data Bits: $dataBits, Parity: $parityString, Stop Bits: $stopBits';
+            portDetails.add(fullPortInfo);
 
-            if (Global.selectedPort.value.startsWith(portName) || Global.selectedPort.value == 'No Ports Detected' || Global.selectedPort.value == 'Error Fetching Ports') {
-              Global.selectedPort.value = '$portName → Baud: $baudRate, Data Bits: $dataBits, Parity: $parityString, Stop Bits: $stopBits';
+            // If the currently detected port matches the previously saved one,
+            // update the global state with its live config.
+            if (portName == currentlySavedPortName) {
+              Global.selectedPort.value = fullPortInfo;
               Global.baudRate.value = baudRate;
               Global.dataBits.value = dataBits;
               Global.parity.value = parityString;
               Global.stopBits.value = stopBits;
-              _savePortDetails(portName, baudRate, dataBits, parityString, stopBits);
+              savedPortFound = true; // Mark as found
+              // Removed: _savePortDetails(...) -- This is the first removal
             }
 
             port.close();
@@ -121,39 +129,61 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
 
         setState(() {
           ports = portDetails;
-          if ((Global.selectedPort.value == 'No Ports Detected' || Global.selectedPort.value == 'Error Fetching Ports') && portDetails.isNotEmpty) {
+
+          // If the previously saved port was not found among the available ones,
+          // or if it was "No Ports Detected"/"Error Fetching Ports",
+          // and there are now available ports, then select the first one.
+          // IMPORTANT: This only updates the UI/in-memory Global values, not saves to DB.
+          if (!savedPortFound && portDetails.isNotEmpty) {
             final firstPortInfo = portDetails[0];
             Global.selectedPort.value = firstPortInfo;
-            final portName = firstPortInfo.split(' → ')[0];
-            final details = firstPortInfo.split(' → ')[1];
-            final baudRate = int.parse(details.split(', ')[0].split(': ')[1]);
-            final dataBits = int.parse(details.split(', ')[1].split(': ')[1]);
-            final parity = details.split(', ')[2].split(': ')[1];
-            final stopBits = int.parse(details.split(', ')[3].split(': ')[1]);
-            Global.baudRate.value = baudRate;
-            Global.dataBits.value = dataBits;
-            Global.parity.value = parity;
-            Global.stopBits.value = stopBits;
-            _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
-          }
-          if (!ports.contains(Global.selectedPort.value) && ports.isNotEmpty) {
-            Global.selectedPort.value = ports[0];
+            // Parse details for Global variables from the first port.
+            final portNameForGlobals = firstPortInfo.split(' → ')[0];
+            if (firstPortInfo.contains(' → ')) { // Ensure it's a valid info string
+              final details = firstPortInfo.split(' → ')[1];
+              Global.baudRate.value = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
+              Global.dataBits.value = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
+              Global.parity.value = details.split(', ')[2].split(': ')[1];
+              Global.stopBits.value = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
+            } else { // Fallback if no details are present (e.g., 'COM1 → (Could not open port)')
+              Global.baudRate.value = 9600;
+              Global.dataBits.value = 8;
+              Global.parity.value = 'None';
+              Global.stopBits.value = 1;
+            }
+            // Removed: _savePortDetails(...) -- This is the second removal
           } else if (ports.isEmpty) {
             Global.selectedPort.value = 'No Ports Detected';
+            // Also reset Global values to defaults if no ports are detected
+            Global.baudRate.value = 9600;
+            Global.dataBits.value = 8;
+            Global.parity.value = 'None';
+            Global.stopBits.value = 1;
+            // Removed: _savePortDetails('No Ports Detected', 9600, 8, 'None', 1);
           }
         });
       } else {
         setState(() {
           ports = ['No Ports Detected'];
           Global.selectedPort.value = 'No Ports Detected';
-          _savePortDetails('No Ports Detected', 9600, 8, 'None', 1);
+          // Reset Global values to defaults if no ports are detected
+          Global.baudRate.value = 9600;
+          Global.dataBits.value = 8;
+          Global.parity.value = 'None';
+          Global.stopBits.value = 1;
+          // Removed: _savePortDetails('No Ports Detected', 9600, 8, 'None', 1);
         });
       }
     } catch (e) {
       setState(() {
         ports = ['Error Fetching Ports'];
         Global.selectedPort.value = 'Error Fetching Ports';
-        _savePortDetails('Error Fetching Ports', 9600, 8, 'None', 1);
+        // Reset Global values to defaults on error
+        Global.baudRate.value = 9600;
+        Global.dataBits.value = 8;
+        Global.parity.value = 'None';
+        Global.stopBits.value = 1;
+        // Removed: _savePortDetails('Error Fetching Ports', 9600, 8, 'None', 1);
       });
       print('Error fetching ports: $e');
     }

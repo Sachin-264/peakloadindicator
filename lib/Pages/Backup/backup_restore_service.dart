@@ -1,13 +1,13 @@
+// peakloadindicator/Backup/backup_restore_service.dart
+
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
-// import 'package:sqflite_common_ffi/sqflite_ffi.dart'; // No direct sqflite usage here, can remove if not used for type hints
 import 'package:archive/archive_io.dart';
-import 'package:peakloadindicator/constants/database_manager.dart'; // Ensure this path is correct
+import 'package:peakloadindicator/constants/database_manager.dart';
 import 'package:sqflite/sqflite.dart';
-
-import '../../constants/sessionmanager.dart'; // Ensure this path is correct
+import '../../constants/sessionmanager.dart';
 
 
 class BackupRestoreService {
@@ -24,8 +24,9 @@ class BackupRestoreService {
   }
 
   Future<String> _getDataFolderPathOnDisk() async {
-    final appSupportDir = await getApplicationSupportDirectory();
-    return path.join(appSupportDir.path, _diskDataFolderName);
+    // MODIFIED: Changed to getApplicationDocumentsDirectory() for consistency
+    final appDocumentsDir = await getApplicationDocumentsDirectory();
+    return path.join(appDocumentsDir.path, _diskDataFolderName);
   }
 
   Future<String> backupDatabase() async {
