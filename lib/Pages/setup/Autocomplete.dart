@@ -2,7 +2,7 @@ import 'dart:io';
 import 'package:intl/intl.dart';
 import 'dart:typed_data';
 import 'dart:async';
-import 'dart:math';
+import 'dart:math'; // Ensure math library is imported for Random
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_libserialport/flutter_libserialport.dart';
@@ -10,17 +10,13 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart'; // Keep for ConflictAlgorithm
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
-// Replaced AppColors with ThemeColors
-// import '../../constants/colors.dart';
 import '../../constants/global.dart';
-import '../../constants/database_manager.dart'; // ADDED: Import DatabaseManager
-import 'package:flutter/foundation.dart'; // For debugPrint
-
+import '../../constants/database_manager.dart';
 import '../../constants/sessionmanager.dart';
-import '../../constants/theme.dart'; // ADDED: Import ThemeColors
-import '../NavPages/channel.dart'; // Assuming this path is correct, might need adjustment
+import '../../constants/theme.dart';
+import '../NavPages/channel.dart'; // Assuming this path is correct
 import '../Secondary_window/secondary_window.dart';
 import '../homepage.dart';
 import '../logScreen/log.dart'; // Assuming log screen is available for logging
@@ -45,6 +41,14 @@ required this.scanTimeSec,
 State<AutoStartScreen> createState() => _AutoStartScreenState();
 }
 
+// New enum for message types
+enum _SerialPortMessageType {
+info,
+success,
+warning,
+error,
+}
+
 class _AutoStartScreenState extends State<AutoStartScreen> {
 // --- Serial Port Variables (now loaded from DB) ---
 String? _portName; // Will be loaded from DB
@@ -57,19 +61,22 @@ SerialPort? port;
 Map<String, List<Map<String, dynamic>>> dataByChannel = {};
 Map<double, Map<String, dynamic>> _bufferedData = {};
 String buffer = "";
-late Widget portMessage;
-List<String> errors = [];
+// Replaced `late Widget portStatusMessage` with new state variables
+String _currentMessage = "Loading port settings...";
+_SerialPortMessageType _currentMessageType = _SerialPortMessageType.info;
+
+List<String> errors = []; // This list still holds historical errors
 Map<String, Color> channelColors = {};
 bool isScanning = false;
-bool isCancelled = false;
-bool isManuallyStopped = false;
+bool isCancelled = false; // Indicates user cancelled, should not auto-reconnect
+bool isManuallyStopped = false; // Indicates user stopped, should not auto-reconnect
 SerialPortReader? reader;
 StreamSubscription<Uint8List>? _readerSubscription;
 DateTime? lastDataTime;
 int scanIntervalSeconds = 1;
 int currentGraphIndex = 0;
 Map<String, List<List<Map<String, dynamic>>>> segmentedDataByChannel = {};
-final ScrollController _scrollController = ScrollController();
+// Removed unused ScrollController: // final ScrollController _scrollController = ScrollController();
 final ScrollController _tableScrollController = ScrollController();
 String yAxisType = 'Load'; // Not actively used
 Timer? _reconnectTimer;
@@ -87,7 +94,7 @@ String? _selectedGraphChannel;
 bool _showGraphDots = false; // New state variable for showing graph dots
 
 final _fileNameController = TextEditingController();
-final _operatorController = TextEditingController();
+final _operatorController = TextEditingController(); // No default here, set on save if empty
 final _scanRateHrController = TextEditingController(text: '0');
 final _scanRateMinController = TextEditingController(text: '0');
 final _scanRateSecController = TextEditingController(text: '1');
@@ -101,59 +108,80 @@ final _graphVisibleMinController = TextEditingController(text: '60');
 Map<String, Channel> channelConfigs = {};
 final List<OverlayEntry> _windowEntries = [];
 
+// GlobalKey for ScaffoldMessengerState to show SnackBars from async methods
+final GlobalKey<ScaffoldMessengerState> _scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
+
 // Helper for consistent log timestamp
 String get _currentTime => DateFormat('HH:mm:ss').format(DateTime.now());
+
+// Random instance for generating colors
+final Random _random = Random();
 
 @override
 void initState() {
 super.initState();
-portMessage = Text(
-"Loading port settings...", style: GoogleFonts.roboto(fontSize: 16));
-_loadComPortSettings(); // Load settings first
-_initializeChannelConfigs(); // Initialize channel configs based on selected channels
-_startReconnectTimer(); // Start periodic check for port status
+// Initialize _currentMessage and _currentMessageType here
+_updateMessage("Loading port settings...", _SerialPortMessageType.info);
 
-// Set initial scan rate from widget
-_scanRateSecController.text = widget.scanTimeSec.toInt().toString();
-scanIntervalSeconds = widget.scanTimeSec.toInt();
-_lastScanIntervalSeconds = scanIntervalSeconds;
+_initializeChannelConfigs();
 
-// Calculate and set initial test duration based on end time
-final now = DateTime.now();
-final endTimeToday = DateTime(
-now.year, now.month, now.day, widget.endTimeHr.toInt(), widget.endTimeMin.toInt());
-final endTime = now.isAfter(endTimeToday)
-? endTimeToday.add(const Duration(days: 1)) // Next day if end time passed
-    : endTimeToday;
-final duration = endTime.difference(now);
-final durationHours = duration.inHours;
-final durationMinutes = duration.inMinutes % 60;
-_testDurationHrController.text = durationHours.toString();
-_testDurationMinController.text = durationMinutes.toString();
+// Load settings and start scan sequentially
+WidgetsBinding.instance.addPostFrameCallback((_) async {
+await _loadComPortSettings(); // Wait for COM port settings
+if (!mounted) return; // Crucial check after async operation
 
-_startEndTimeCheck(); // Start end time check
+if (_portName != null && _portName!.isNotEmpty) {
+_startScan(); // Start scan only if port is configured
+} else {
+// If port isn't configured, ensure scanning flags are off
+if (mounted) {
+setState(() {
+isScanning = false;
+Global.isScanningNotifier.value = false;
+});
+}
+}
+_startReconnectTimer();
+_startEndTimeCheck();
+});
+}
+
+// New helper method to update the message state
+void _updateMessage(String message, _SerialPortMessageType type) {
+if (mounted) {
+setState(() {
+_currentMessage = message;
+_currentMessageType = type;
+});
+}
 }
 
 Future<void> _loadComPortSettings() async {
+if (!mounted) return; // Crucial check at the start of async method
+
 try {
 final settings = await DatabaseManager().getComPortSettings();
 if (settings != null) {
+if (!mounted) return; // Crucial check before setState
 setState(() {
 _portName = settings['selectedPort'] as String?;
 _baudRate = settings['baudRate'] as int?;
 _dataBits = settings['dataBits'] as int?;
 _parity = settings['parity'] as String?;
 _stopBits = settings['stopBits'] as int?;
-portMessage = Text(
+_updateMessage(
 _portName != null ? "Ready to start scanning on $_portName" : "Port not configured",
-style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('serialPortMessageText', Global.isDarkMode.value)));
+_portName != null ? _SerialPortMessageType.info : _SerialPortMessageType.warning,
+);
 LogPage.addLog('[$_currentTime] COM Port settings loaded: $_portName, $_baudRate. Ready to scan.');
 });
 } else {
+if (!mounted) return; // Crucial check before setState
 setState(() {
-portMessage = Text(
+_updateMessage(
 "No COM port settings found in database. Using default fallback settings.",
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_SerialPortMessageType.warning,
+);
 _portName = 'COM6'; // Default fallback
 _baudRate = 2400; // Default fallback
 _dataBits = 8;    // Default fallback
@@ -163,58 +191,80 @@ LogPage.addLog('[$_currentTime] No COM Port settings found, using defaults: COM6
 });
 }
 } catch (e) {
+if (mounted) {
 setState(() {
-portMessage = Text("Error loading port settings: $e",
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_updateMessage(
+"Error loading port settings: $e",
+_SerialPortMessageType.error,
+);
+errors.add('Error loading port settings: $e');
 _portName = 'COM6'; // Default fallback on error
 _baudRate = 2400; // Default fallback
 _dataBits = 8;    // Default fallback
 _parity = 'None'; // Default fallback
 _stopBits = 1;    // Default fallback
-errors.add('Error loading port settings: $e');
 LogPage.addLog('[$_currentTime] Error loading COM Port settings: $e');
 });
+}
 }
 _initPort(); // Initialize port after settings are loaded
 }
 
 void _startEndTimeCheck() {
 _endTimeTimer?.cancel();
-_endTimeTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
-if (!mounted) {
+_endTimeTimer = Timer.periodic(const Duration(seconds: 30), (timer) async { // Added async
+if (!mounted) { // Crucial check at the start of timer callback
 timer.cancel();
 return;
 }
 final now = DateTime.now();
 final endHour = widget.endTimeHr.toInt();
 final endMinute = widget.endTimeMin.toInt();
-// Compare only hour and minute for the current day
-if (now.hour == endHour && now.minute == endMinute && isScanning) {
+
+// Create a DateTime object for the end time on the current day
+DateTime endDateTime = DateTime(now.year, now.month, now.day, endHour, endMinute);
+
+// If the current time is past the end time for today, consider the end time for tomorrow
+if (now.isAfter(endDateTime)) {
+endDateTime = endDateTime.add(const Duration(days: 1));
+}
+
+// Check if current time is at or past the calculated end time
+if (now.isAtSameMomentAs(endDateTime) || now.isAfter(endDateTime)) {
+if (isScanning) { // Only stop if scanning is active
 debugPrint('End time reached: $endHour:$endMinute, stopping scan and saving data');
-timer.cancel();
-_stopScan();
-_saveData();
+timer.cancel(); // Cancel the timer as end time is reached
+_stopScan(); // Call _stopScan, which also sets isManuallyStopped and updates global notifier
+await _saveData(Global.isDarkMode.value); // Await saving data
+if (!mounted) return; // Crucial check after async operation
 setState(() {
-portMessage = Text('End time reached, scan stopped and data saved',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('successText', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('End time reached, scan stopped and data saved', _SerialPortMessageType.success);
 errors.add('End time reached, scan stopped and data saved');
 });
 // Navigate back to HomePage after a short delay to allow UI to update
 Future.delayed(const Duration(seconds: 2), () {
+if (!mounted) return; // Crucial check before navigation
 Navigator.pushReplacement(
 context,
 MaterialPageRoute(builder: (context) => const HomePage()),
 );
 });
+} else {
+// If not scanning but end time is reached, cancel timer and log
+debugPrint('End time reached, but scan was not active. Cancelling EndTime timer.');
+timer.cancel();
+}
 }
 });
 }
 
 void _initPort() {
+if (!mounted) return; // Crucial check at the start of method
+
 if (_portName == null || _portName!.isEmpty) {
+if (!mounted) return; // Crucial check before setState
 setState(() {
-portMessage = Text("COM Port name is not configured.",
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_updateMessage("COM Port name is not configured.", _SerialPortMessageType.error);
 errors.add("COM Port name is not configured.");
 });
 LogPage.addLog('[$_currentTime] COM Port name not configured. Cannot initialize.');
@@ -227,8 +277,12 @@ if (port!.isOpen) {
 port!.close();
 }
 port!.dispose(); // Dispose previous port instance
+debugPrint('Previous port disposed successfully.');
 } catch (e) {
 debugPrint('Error cleaning up previous port: $e');
+LogPage.addLog('[$_currentTime] Error cleaning up previous port: $e');
+} finally {
+port = null; // Ensure port is null after disposal attempt
 }
 }
 
@@ -236,42 +290,28 @@ try {
 port = SerialPort(_portName!);
 } on SerialPortError catch (e) {
 debugPrint('SerialPortError initializing SerialPort object: ${e.message}');
-setState(() {
-portMessage = Text('Error initializing port $_portName: ${e.message}',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+if (!mounted) return; // Crucial check before setState
+setState(() => _updateMessage('Error initializing port $_portName: ${e.message}', _SerialPortMessageType.error));
 errors.add('Error initializing port $_portName: ${e.message}');
-});
-port = null;
+port = null; // Set to null on error
 LogPage.addLog('[$_currentTime] Failed to initialize serial port $_portName: ${e.message}');
 } catch (e) {
 debugPrint('Generic error initializing SerialPort object: $e');
+if (mounted) {
 setState(() {
-portMessage = Text('Error initializing port $_portName: $e',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('Error initializing port $_portName: $e', _SerialPortMessageType.error);
 errors.add('Error initializing port $_portName: $e');
 });
-port = null;
+}
+port = null; // Set to null on error
 LogPage.addLog('[$_currentTime] Failed to initialize serial port $_portName: $e');
 }
 }
 
+// MODIFIED: _initializeChannelConfigs to use random colors
 void _initializeChannelConfigs() {
 channelConfigs.clear();
 channelColors.clear();
-
-// Define fallback colors in case graphLineColour is invalid or transparent
-const List<Color> fallbackColors = [
-Colors.blue,
-Colors.red,
-Colors.green,
-Colors.purple,
-Colors.orange,
-Colors.teal,
-Colors.pink,
-Colors.cyan,
-Colors.brown,
-Colors.indigo,
-];
 
 for (int i = 0; i < widget.selectedChannels.length; i++) {
 final channelData = widget.selectedChannels[i];
@@ -288,18 +328,31 @@ throw Exception('Invalid channel data type at index $i');
 final channelId = channel.startingCharacter;
 channelConfigs[channelId] = channel;
 
-// Set initial color from graphLineColour (AARRGGBB format)
-Color channelColor = Color(channel.graphLineColour);
-// Validate if color is reasonable; if not, use fallback
-if (channel.graphLineColour == 0 || channelColor.alpha == 0) {
-debugPrint('Channel Color Tracking: Invalid/empty graphLineColour for channel ${channel.channelName}, using fallback color ${fallbackColors[i % fallbackColors.length]}');
-channelColor = fallbackColors[i % fallbackColors.length];
+// Generate a random color for the graph line
+// Ensure color is distinguishable and not too dark/light depending on theme
+Color randomColor;
+if (Global.isDarkMode.value) { // For dark mode, generate brighter colors
+randomColor = Color.fromARGB(
+255, // Full opacity
+_random.nextInt(156) + 100, // R (100-255)
+_random.nextInt(156) + 100, // G (100-255)
+_random.nextInt(156) + 100, // B (100-255)
+);
+} else { // For light mode, generate darker colors
+randomColor = Color.fromARGB(
+255, // Full opacity
+_random.nextInt(156), // R (0-155)
+_random.nextInt(156), // G (0-155)
+_random.nextInt(156), // B (0-155)
+);
 }
-channelColors[channelId] = channelColor;
 
-debugPrint('Channel Color Tracking: Configured channel ${channel.channelName} (${channelId}) with color ${channelColor.toHexString()}');
+channelColors[channelId] = randomColor;
+
+debugPrint('Channel Color Tracking: Configured channel ${channel.channelName} (${channelId}) with RANDOM color ${randomColor.toHexString()}');
 } catch (e) {
 debugPrint('Error configuring channel at index $i: $e');
+if (!mounted) return; // Crucial check before setState
 setState(() {
 errors.add('Invalid channel configuration at index $i: $e');
 });
@@ -308,22 +361,56 @@ LogPage.addLog('[$_currentTime] Invalid channel configuration: $e');
 }
 
 if (channelConfigs.isEmpty) {
+if (mounted) {
 setState(() {
-portMessage = Text('No valid channels configured',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('No valid channels configured', _SerialPortMessageType.warning);
 errors.add('No valid channels configured');
 });
+}
 LogPage.addLog('[$_currentTime] No valid channels configured.');
 }
 }
 
+// The _updateChannelColorInDatabase function is still needed if you want
+// to save the *randomly assigned* color as the new default in the database
+// when the 'Set as default color' checkbox is checked in the color picker.
+Future<void> _updateChannelColorInDatabase(String channelId, Color color) async {
+try {
+final database = await DatabaseManager().database;
+
+final channel = channelConfigs[channelId]!;
+// Store AARRGGBB value
+int colorValue = color.value; // Color.value directly gives AARRGGBB integer
+debugPrint('Channel Color Tracking: Updating graphLineColour to ${colorValue.toRadixString(16)} for channel ${channel.channelName} (RecNo: ${channel.recNo})');
+
+await database.update(
+'ChannelSetup', // Assuming your channel configuration table is named 'ChannelSetup'
+    {'graphLineColour': colorValue}, // Correct column name
+where: 'StartingCharacter = ? AND RecNo = ?', // Using StartingCharacter and RecNo for unique identification
+whereArgs: [channelId, channel.recNo],
+);
+
+LogPage.addLog('[$_currentTime] Channel ${channel.channelName} graph color updated as default in DB.');
+} catch (e) {
+debugPrint('Error updating channel color in database: $e');
+_scaffoldMessengerKey.currentState?.showSnackBar( // Use _scaffoldMessengerKey to show SnackBar from an async method
+SnackBar(
+content: Text('Error saving default color: $e'),
+backgroundColor: Colors.red,
+duration: const Duration(seconds: 3),
+),
+);
+LogPage.addLog('[$_currentTime] Error saving default channel color: $e');
+}
+}
+
+// Re-added color picker functionality
 void _showColorPicker(String channelId, bool isDarkMode) {
 Color tempSelectedColor = channelColors[channelId]!; // Temporary variable to hold the color chosen in picker
 
 showDialog(
 context: context,
 builder: (context) {
-// StatefulBuilder allows managing the internal state of the dialog (like checkbox and picker color)
 return StatefulBuilder(
 builder: (BuildContext context, StateSetter setStateInDialog) {
 bool isDefault = false; // Checkbox state, managed by setStateInDialog
@@ -360,8 +447,10 @@ setStateInDialog(() { // Update dialog's internal state
 isDefault = value ?? false;
 });
 },
-checkColor: ThemeColors.getColor('submitButton', isDarkMode),
-activeColor: ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.3),
+// Use checkColor for the checkmark, activeColor for the active state of the track
+checkColor: Colors.white, // Ensure checkmark is visible
+activeColor: ThemeColors.getColor('submitButton', isDarkMode),
+side: BorderSide(color: ThemeColors.getColor('dialogSubText', isDarkMode)), // Border color
 ),
 Text('Set as default color',
 style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode))),
@@ -373,7 +462,8 @@ style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMod
 actions: [
 TextButton(
 onPressed: () {
-setState(() { // This setState rebuilds the main SerialPortScreen widget
+if (!mounted) return; // Crucial check before setState
+setState(() { // This setState rebuilds the main AutoStartScreen widget
 channelColors[channelId] = tempSelectedColor; // Update the runtime color from temp
 });
 
@@ -394,38 +484,12 @@ style: GoogleFonts.roboto(color: ThemeColors.getColor('submitButton', isDarkMode
 );
 }
 
-Future<void> _updateChannelColorInDatabase(String channelId, Color color) async {
-try {
-final database = await DatabaseManager().database;
-
-final channel = channelConfigs[channelId]!;
-// Store AARRGGBB value
-int colorValue = color.value; // Color.value directly gives AARRGGBB integer
-debugPrint('Channel Color Tracking: Updating ChannelColour to ${colorValue.toRadixString(16)} for channel ${channel.channelName} (RecNo: ${channel.recNo})');
-
-await database.update(
-'ChannelSetup', // Assuming your channel configuration table is named 'ChannelSetup'
-    {'ChannelColour': colorValue}, // Assuming 'ChannelColour' is the column for graphLineColour
-where: 'StartingCharacter = ? AND RecNo = ?', // Using StartingCharacter and RecNo for unique identification
-whereArgs: [channelId, channel.recNo],
-);
-
-LogPage.addLog('[$_currentTime] Channel ${channel.channelName} graph color updated as default in DB.');
-} catch (e) {
-debugPrint('Error updating channel color in database: $e');
-ScaffoldMessenger.of(context).showSnackBar(
-SnackBar(
-content: Text('Error saving default color: $e'),
-backgroundColor: Colors.red,
-duration: const Duration(seconds: 3),
-),
-);
-LogPage.addLog('[$_currentTime] Error saving default channel color: $e');
-}
-}
 
 void _configurePort() {
-if (port == null || !port!.isOpen) return;
+if (port == null || !port!.isOpen) {
+_updateMessage("Port is not open, cannot configure.", _SerialPortMessageType.error);
+return;
+}
 final config = SerialPortConfig()
 ..baudRate = _baudRate ?? 2400
 ..bits = _dataBits ?? 8
@@ -437,21 +501,21 @@ port!.config = config;
 debugPrint('Port configured: baudRate=${config.baudRate}, bits=${config.bits}');
 } catch (e) {
 debugPrint('Error configuring port: $e');
+if (!mounted) return; // Crucial check before setState
 setState(() {
-portMessage = Text('Port config error: $e',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('Port config error: $e', _SerialPortMessageType.error);
 errors.add('Port config error: $e');
 });
 LogPage.addLog('[$_currentTime] Serial port configuration error: $e');
 } finally {
-config.dispose();
+config.dispose(); // Ensure config is disposed
 }
 }
 
 int _getInactivityTimeout() {
 int timeout = scanIntervalSeconds + 10;
 return timeout.clamp(
-_minInactivityTimeoutSeconds, _maxInactivityTimeoutSeconds);
+_minInactivityTimeoutSeconds, _maxInactivityTimeoutSeconds).toInt(); // Ensure int return
 }
 
 void _updateGraphData(Map<String, dynamic> newData) {
@@ -483,7 +547,8 @@ channelConfigs: channelConfigs,
 entry: entry,
 onPositionUpdate: (newPosition) {
 position = newPosition;
-entry.markNeedsBuild();
+// ignore: invalid_use_of_protected_member
+entry.markNeedsBuild(); // Mark needs build after position update
 },
 onClose: (closedEntry) {
 _windowEntries.remove(closedEntry);
@@ -501,8 +566,14 @@ void _startReconnectTimer() {
 _reconnectTimer?.cancel();
 _reconnectTimer =
 Timer.periodic(Duration(seconds: _reconnectPeriodSeconds), (timer) {
+if (!mounted) { // Crucial check at start of timer callback
+timer.cancel();
+debugPrint('Autoreconnect timer cancelled: widget unmounted.');
+return;
+}
 if (isCancelled || isManuallyStopped) {
-debugPrint('Autoreconnect: Stopped by user');
+debugPrint('Autoreconnect: Stopped by user action (cancelled/manually stopped).');
+timer.cancel();
 return;
 }
 if (isScanning && lastDataTime != null && DateTime
@@ -513,7 +584,7 @@ debugPrint(
 'No data received for ${_getInactivityTimeout()} seconds, reconnecting...');
 LogPage.addLog('[$_currentTime] No data received. Attempting to reconnect serial port.');
 _autoStopAndReconnect();
-} else if (!isScanning) {
+} else if (!isScanning) { // Only try to start if not scanning currently
 debugPrint('Autoreconnect: Attempting to restart scan...');
 _autoStartScan();
 }
@@ -524,17 +595,19 @@ void _autoStopAndReconnect() {
 debugPrint(
 'Autoreconnect triggered: No data for ${_getInactivityTimeout()} seconds');
 if (isScanning) {
-_stopScanInternal();
+_stopScanInternal(); // Internal stop, does not set isManuallyStopped
+if (!mounted) return; // Crucial check before setState
 setState(() {
-portMessage = Text('Port disconnected - Reconnecting...',
-style: GoogleFonts.roboto(color: Colors.orange, fontSize: 16));
+_updateMessage('Port disconnected - Reconnecting...', _SerialPortMessageType.warning);
 errors.add('Port disconnected - Reconnecting...');
 });
-_reconnectAttempts = 0;
+_reconnectAttempts = 0; // Reset attempts for new auto-reconnect cycle
 }
 }
 
 void _autoStartScan() {
+if (!mounted) return; // Crucial check at start of method
+
 if (!isScanning && !isCancelled && !isManuallyStopped &&
 _reconnectAttempts < _maxReconnectAttempts) {
 try {
@@ -545,63 +618,72 @@ throw Exception('Port name not set. Cannot auto-reconnect.');
 }
 
 if (port == null || !port!.isOpen) {
-_initPort();
-if (port == null) {
+_initPort(); // Re-initialize port object if null or not open
+if (port == null) { // Check if _initPort failed to create port
 throw Exception('Failed to initialize port $_portName.');
 }
 if (!port!.openReadWrite()) {
 final lastError = SerialPort.lastError;
+// Clean up port object if opening fails
+try { port!.close(); port!.dispose(); } catch (_) {}
+port = null; // Ensure port is null after failed open
 throw Exception('Failed to open port for read/write: ${lastError?.message ?? "Unknown error"}');
 }
 }
 _configurePort();
-port!.flush();
+port!.flush(); // Clear any existing data in the port's buffer
 _setupReader();
+if (!mounted) return; // Crucial check before setState
 setState(() {
 isScanning = true;
-portMessage = Text('Reconnected to $_portName - Scanning resumed',
-style: GoogleFonts.roboto(color: Colors.green,
-fontSize: 16,
-fontWeight: FontWeight.w600));
+Global.isScanningNotifier.value = true; // Set global notifier
+isCancelled = false; // Reset these flags on successful auto-restart
+isManuallyStopped = false;
+_updateMessage('Reconnected to $_portName - Scanning resumed', _SerialPortMessageType.success);
 errors.add('Reconnected to $_portName - Scanning resumed');
 });
 _reconnectAttempts = 0;
 _startTableUpdateTimer();
-_addTableRow();
+// No need to call _addTableRow directly here, timer will handle it
 LogPage.addLog('[$_currentTime] Auto-reconnected to $_portName. Scanning resumed.');
 } catch (e) {
 debugPrint('Autoreconnect: Error: $e');
+if (!mounted) return; // Crucial check before setState
 setState(() {
-portMessage = Text('Reconnect error: $e',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('Reconnect error: $e', _SerialPortMessageType.error);
 errors.add('Reconnect error: $e');
 });
 _reconnectAttempts++;
 LogPage.addLog('[$_currentTime] Failed to auto-restart scan: $e');
 }
 } else if (_reconnectAttempts >= _maxReconnectAttempts) {
+if (mounted) {
 setState(() {
-portMessage =
-Text('Reconnect failed after $_maxReconnectAttempts attempts',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('Reconnect failed after $_maxReconnectAttempts attempts', _SerialPortMessageType.error);
 errors.add('Reconnect failed after $_maxReconnectAttempts attempts');
 });
+}
 LogPage.addLog('[$_currentTime] Auto-reconnect failed after $_maxReconnectAttempts attempts. Stopping auto-reconnect.');
+_reconnectTimer?.cancel(); // Stop the reconnect timer
 }
 }
 
 void _setupReader() {
 if (port == null || !port!.isOpen) return;
-_readerSubscription?.cancel();
-reader?.close();
+_readerSubscription?.cancel(); // Cancel any existing subscription
+reader?.close(); // Close any existing reader
 reader = SerialPortReader(port!, timeout: 500);
 _readerSubscription = reader!.stream.listen(
 (Uint8List data) {
+if (!mounted) { // Crucial check at start of stream listener
+_readerSubscription?.cancel(); // Cancel the subscription if widget is unmounted
+return;
+}
 final decoded = String.fromCharCodes(data);
 buffer += decoded;
 
 String regexPattern = channelConfigs.entries.map((e) => '\\${e.value
-    .startingCharacter}[0-9]+\\.[0-9]+').join('|'); // Adjusted regex for flexibility
+    .startingCharacter}[0-9]+\\.[0-9]+').join('|');
 final regex = RegExp(regexPattern);
 final matches = regex.allMatches(buffer).toList();
 
@@ -616,6 +698,7 @@ if (matches.isNotEmpty) {
 buffer = buffer.replaceAll(regex, '');
 }
 
+// If buffer grows too large without matches, it implies unrecognized data or a bad pattern
 if (buffer.length > 1000 && matches.isEmpty) {
 debugPrint('Buffer length > 1000 and no matches. Clearing buffer to prevent overflow.');
 buffer = '';
@@ -625,28 +708,41 @@ lastDataTime = DateTime.now();
 },
 onError: (error) {
 debugPrint('Stream error: $error');
+if (!mounted) { // Crucial check at start of stream listener
+_readerSubscription?.cancel();
+return;
+}
 setState(() {
-portMessage = Text('Error reading data: $error',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('Error reading data: $error', _SerialPortMessageType.error);
 errors.add('Error reading data: $error');
 });
 LogPage.addLog('[$_currentTime] Error reading data from serial port: $error');
+// If stream errors, consider triggering an auto-reconnect attempt
+_autoStopAndReconnect();
 },
 onDone: () {
 debugPrint('Stream done');
-if (isScanning) {
+if (!mounted) { // Crucial check at start of stream listener
+_readerSubscription?.cancel();
+return;
+}
+if (isScanning && !isCancelled && !isManuallyStopped) { // Only if scanning was active and not manually stopped/cancelled
 setState(() {
-portMessage = Text('Port disconnected - Reconnecting...',
-style: GoogleFonts.roboto(color: Colors.orange, fontSize: 16));
+_updateMessage('Port disconnected - Reconnecting...', _SerialPortMessageType.warning);
 errors.add('Port disconnected - Reconnecting...');
 });
 LogPage.addLog('[$_currentTime] Serial port disconnected. Attempting to reconnect.');
+_autoStopAndReconnect();
+} else {
+LogPage.addLog('[$_currentTime] Serial port stream done, but not auto-reconnecting (stopped/cancelled).');
 }
 },
 );
 }
 
 void _startScan() {
+if (!mounted) return; // Crucial check at start of method
+
 if (!isScanning) {
 try {
 debugPrint('Starting scan...');
@@ -659,32 +755,36 @@ throw Exception('COM Port not configured.');
 }
 
 if (port == null || !port!.isOpen) {
-_initPort();
-if (port == null) {
+_initPort(); // Re-initialize port object if null or not open
+if (port == null) { // Check if _initPort failed to create port
 throw Exception('Failed to initialize port $_portName.');
 }
 if (!port!.openReadWrite()) {
 final lastError = SerialPort.lastError;
+// Clean up port object if opening fails
+try { port!.close(); port!.dispose(); } catch (_) {}
+port = null; // Ensure port is null after failed open
 throw Exception('Failed to open port for read/write: ${lastError?.message ?? "Unknown error"}');
 }
 }
 _configurePort();
-port!.flush();
+port!.flush(); // Clear any existing data in the port's buffer
 _setupReader();
+if (!mounted) return; // Crucial check before setState
 setState(() {
 isScanning = true;
-isCancelled = false;
+Global.isScanningNotifier.value = true; // Set global notifier
+isCancelled = false; // Reset these flags on user start
 isManuallyStopped = false;
-portMessage = Text('Scanning active on $_portName',
-style: GoogleFonts.roboto(color: Colors.green,
-fontWeight: FontWeight.w600,
-fontSize: 16));
+_updateMessage('Scanning active on $_portName', _SerialPortMessageType.success);
 errors.add('Scanning active on $_portName');
-if (segmentedDataByChannel.isNotEmpty) {
-currentGraphIndex = segmentedDataByChannel.values.first.length - 1;
-}
+// Reset data and segments for a new scan
+dataByChannel.clear();
+_bufferedData.clear();
+segmentedDataByChannel.clear();
+currentGraphIndex = 0;
 });
-_reconnectAttempts = 0;
+_reconnectAttempts = 0; // Reset reconnect attempts on successful start
 
 _startTableUpdateTimer();
 
@@ -695,14 +795,17 @@ _testDurationHrController.text,
 _testDurationMinController.text,
 _testDurationSecController.text,
 );
+// If a test duration is explicitly set in the UI, use it
+// Otherwise, the _endTimeTimer handles stopping by time of day
 if (testDurationSeconds > 0) {
 _testDurationTimer =
-Timer(Duration(seconds: testDurationSeconds), () {
-_stopScan();
+Timer(Duration(seconds: testDurationSeconds), () async { // Added async
+if (!mounted) return; // Crucial check at start of timer callback
+_stopScan(); // Call _stopScan, which sets isManuallyStopped and updates global notifier
+await _saveData(Global.isDarkMode.value); // Pass isDarkMode here
+if (!mounted) return; // Crucial check after async operation
 setState(() {
-portMessage = Text('Test duration reached, scanning stopped',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('successText', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('Test duration reached, scanning stopped', _SerialPortMessageType.info);
 errors.add('Test duration reached, scanning stopped');
 });
 debugPrint('[SERIAL_PORT] Test duration of $testDurationSeconds seconds reached, stopped scanning');
@@ -711,27 +814,27 @@ LogPage.addLog('[$_currentTime] Test duration of ${Duration(seconds: testDuratio
 }
 } catch (e) {
 debugPrint('Error starting scan: $e');
+if (!mounted) return; // Crucial check before setState
 setState(() {
-portMessage = Text('Error starting scan: $e',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('Error starting scan: $e', _SerialPortMessageType.error);
 errors.add('Error starting scan: $e');
 });
 LogPage.addLog('[$_currentTime] Error starting scan: $e');
 if (e.toString().contains('busy') ||
 e.toString().contains('Access denied')) {
-_cancelScan();
-// _startScan(); // Removed this, as _cancelScan already calls _initPort for next scan
+_cancelScan(); // Attempt a full cleanup if port is busy/denied
 }
 }
 }
 }
 
+// User-initiated stop, sets isManuallyStopped
 void _stopScan() {
 _stopScanInternal();
+if (!mounted) return; // Crucial check before setState
 setState(() {
 isManuallyStopped = true;
-portMessage = Text(
-'Scanning stopped manually', style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortMessageText', Global.isDarkMode.value), fontSize: 16));
+_updateMessage('Scanning stopped manually', _SerialPortMessageType.info);
 errors.add('Scanning stopped manually');
 });
 _testDurationTimer?.cancel();
@@ -739,34 +842,38 @@ _tableUpdateTimer?.cancel();
 LogPage.addLog('[$_currentTime] Scanning stopped manually.');
 }
 
+// Internal stop logic, doesn't set isManuallyStopped
 void _stopScanInternal() {
+if (!mounted) return; // Crucial check at start of method
+
 if (isScanning) {
 try {
-debugPrint('Stopping scan...');
+debugPrint('Stopping scan internally...');
 _readerSubscription?.cancel();
 reader?.close();
 if (port != null && port!.isOpen) {
 port!.close();
 }
+if (!mounted) return; // Crucial check before setState
 setState(() {
 isScanning = false;
+Global.isScanningNotifier.value = false; // Set global notifier
 reader = null;
 _readerSubscription = null;
-portMessage =
-Text('Scanning stopped', style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortMessageText', Global.isDarkMode.value), fontSize: 16));
-errors.add('Scanning stopped');
+// _currentMessage and _currentMessageType updated by _stopScan or _autoStopAndReconnect
 });
 } catch (e) {
-debugPrint('Error stopping scan: $e');
+debugPrint('Error stopping scan internally: $e');
+if (!mounted) return; // Crucial check before setState
 setState(() {
-portMessage = Text('Error stopping scan: $e',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
-errors.add('Error stopping scan: $e');
+_updateMessage('Error stopping scan internally: $e', _SerialPortMessageType.error);
+errors.add('Error stopping scan internally: $e');
 });
-LogPage.addLog('[$_currentTime] Error stopping scan: $e');
+LogPage.addLog('[$_currentTime] Error stopping scan internally: $e');
 }
 }
 }
+
 
 void _cancelScan() {
 try {
@@ -776,22 +883,21 @@ reader?.close();
 if (port != null && port!.isOpen) {
 port!.close();
 }
+if (!mounted) return; // Crucial check before setState
 setState(() {
 isScanning = false;
-isCancelled = true;
+isCancelled = true; // Scan has been explicitly cancelled -> this triggers Exit button
 isManuallyStopped = true; // Ensure manual stop flag is also set to prevent auto-reconnect
 dataByChannel.clear();
 _bufferedData.clear();
 buffer = "";
 segmentedDataByChannel.clear();
-errors.clear();
+errors.clear(); // Clear all errors on cancel for a clean slate
 currentGraphIndex = 0;
 reader = null;
 _readerSubscription = null;
 port = null; // Ensure port object is nulled to be re-initialized if needed
-portMessage =
-Text('Scan cancelled', style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortMessageText', Global.isDarkMode.value), fontSize: 16));
-errors.add('Scan cancelled');
+_updateMessage('Scan cancelled', _SerialPortMessageType.info);
 });
 _initPort(); // Re-initialize port for potential next scan
 _testDurationTimer?.cancel();
@@ -800,10 +906,10 @@ _debounceTimer?.cancel(); // Cancel any active debounce timers
 LogPage.addLog('[$_currentTime] Data scan cancelled. All data cleared.');
 } catch (e) {
 debugPrint('Error cancelling scan: $e');
+if (!mounted) return; // Crucial check before setState
 setState(() {
-portMessage = Text('Error cancelling scan: $e',
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortErrorTextSmall', Global.isDarkMode.value), fontSize: 16));
-errors.add('Error cancelling scan: $e');
+_updateMessage('Error cancelling scan: $e', _SerialPortMessageType.error);
+errors.add('Error cancelling scan: $e'); // Keep in errors list for debugging
 });
 LogPage.addLog('[$_currentTime] Error cancelling scan: $e');
 }
@@ -814,12 +920,18 @@ _tableUpdateTimer?.cancel();
 if (scanIntervalSeconds < 1) {
 scanIntervalSeconds = 1;
 }
+// Only log if interval actually changes, to reduce debug noise
 if (scanIntervalSeconds != _lastScanIntervalSeconds) {
 _lastScanIntervalSeconds = scanIntervalSeconds;
 debugPrint('Table update timer interval changed to $scanIntervalSeconds seconds');
 }
 _tableUpdateTimer =
 Timer.periodic(Duration(seconds: scanIntervalSeconds), (_) {
+if (!mounted) { // Crucial check at start of timer callback
+_tableUpdateTimer?.cancel();
+debugPrint('Table update timer cancelled: widget unmounted.');
+return;
+}
 if (!isScanning || isCancelled || isManuallyStopped) {
 _tableUpdateTimer?.cancel();
 debugPrint('Table update timer cancelled due to scan state');
@@ -831,6 +943,8 @@ debugPrint('Started table update timer with interval $scanIntervalSeconds second
 }
 
 void _addTableRow() {
+if (!mounted) return; // Crucial check at start of method
+
 DateTime now = DateTime.now();
 double timestamp = now.millisecondsSinceEpoch.toDouble();
 String time = "${now.hour}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
@@ -858,6 +972,7 @@ latestChannelData[channel] = latestData ?? {'Value': 0.0, 'Data': ''};
 // Clear buffered data older than the scan interval
 _bufferedData.removeWhere((t, _) => t < intervalStart);
 
+if (!mounted) return; // Crucial check before setState after async operations
 setState(() {
 Map<String, dynamic> newData = {
 'Serial No': '${(dataByChannel.isNotEmpty ? dataByChannel.values.first.length : 0) + 1}',
@@ -869,32 +984,29 @@ Map<String, dynamic> newData = {
 channelConfigs.keys.forEach((channel) {
 double value = (latestChannelData[channel]!['Value'] as num?)?.toDouble() ?? 0.0;
 newData['Value_$channel'] = value.isFinite ? value : 0.0;
-newData['Channel_$channel'] = channel;
+newData['Channel_$channel'] = channel; // This might be redundant if 'Channel' is added per entry
 
 var channelData = {
-...newData,
+...newData, // Include common fields like 'Serial No', 'Time', 'Date'
 'Value': newData['Value_$channel'],
 'Channel': channel,
 'Data': latestChannelData[channel]!['Data'] ?? '',
 };
 
+// Add to dataByChannel for the main table and saving
 dataByChannel.putIfAbsent(channel, () => []).add(channelData);
 
 // Call _updateGraphData for each channel's new data
 _updateGraphData(channelData);
 });
 
-_segmentData(newData);
-lastDataTime = now;
+_segmentData(newData); // Segment data for graph
+lastDataTime = now; // Update last data time for inactivity check
 
+// Schedule post-frame callback for scrolling
 WidgetsBinding.instance.addPostFrameCallback((_) {
-if (_scrollController.hasClients) {
-_scrollController.animateTo(
-_scrollController.position.maxScrollExtent,
-duration: const Duration(milliseconds: 300),
-curve: Curves.easeOut,
-);
-}
+if (!mounted) return; // Crucial check inside post-frame callback
+// Scroll to the end of the table
 if (_tableScrollController.hasClients) {
 _tableScrollController.animateTo(
 _tableScrollController.position.maxScrollExtent,
@@ -904,8 +1016,8 @@ curve: Curves.easeOut,
 }
 });
 
-if (segmentedDataByChannel.isNotEmpty && segmentedDataByChannel.values.first.isNotEmpty) {
-currentGraphIndex = segmentedDataByChannel.values.first.length - 1;
+if (segmentedDataByChannel.isNotEmpty && segmentedDataByChannel.values.any((list) => list.isNotEmpty)) {
+currentGraphIndex = segmentedDataByChannel.values.first.length - 1; // Always show the latest segment
 }
 });
 }
@@ -918,20 +1030,14 @@ debugPrint('Unknown channel: $channelId');
 return;
 }
 
-final config = channelConfigs[channelId]!;
-// Note: The previous logic had a fixed dataLength check `if (data.length != config.dataLength)`.
-// Given the regex is now `[0-9]+\.[0-9]+` (flexible length after character),
-// this check might be problematic if dataLength isn't exact.
-// I've left it commented out in SerialPortScreen's version, keeping it commented here too for consistency.
-// if (data.length != config.dataLength) {
-//   debugPrint('Invalid data length for channel $channelId: $data (expected ${config.dataLength})');
-//   return;
-// }
+// No need to access config if not using its properties here
+// final config = channelConfigs[channelId]!;
 
 final valueStr = data.substring(1);
 double value = double.tryParse(valueStr) ?? 0.0;
 double timestamp = now.millisecondsSinceEpoch.toDouble();
 
+// Ensure _bufferedData for this timestamp is initialized before adding channel data
 _bufferedData.putIfAbsent(timestamp, () => {});
 _bufferedData[timestamp]![channelId] = {
 'Value': value,
@@ -945,18 +1051,21 @@ _bufferedData[timestamp]![channelId] = {
 }
 
 void _segmentData(Map<String, dynamic> newData) {
+if (!mounted) return; // Crucial check at start of method
+
 int graphVisibleSeconds = _calculateDurationInSeconds(
 '0', _graphVisibleHrController.text, _graphVisibleMinController.text,
 '0');
 if (graphVisibleSeconds <= 0) {
-debugPrint('[SEGMENT_DATA] Invalid graph visible duration: $graphVisibleSeconds seconds');
-return;
+debugPrint('[SEGMENT_DATA] Invalid graph visible duration: $graphVisibleSeconds seconds. Defaulting to 60 minutes.');
+graphVisibleSeconds = 3600; // Default to 60 minutes if invalid
 }
 
 double newTimestamp = newData['Timestamp'] as double;
 channelConfigs.keys.forEach((channelId) {
 segmentedDataByChannel.putIfAbsent(channelId, () => []);
 
+// If no segments exist or the last segment is too old, start a new one
 if (segmentedDataByChannel[channelId]!.isEmpty) {
 segmentedDataByChannel[channelId]!.add([
 {
@@ -982,6 +1091,7 @@ segmentedDataByChannel[channelId]!.add([
 ]);
 debugPrint('[SERIAL_PORT] Added new segment for channel $channelId at timestamp $newTimestamp');
 } else {
+// Otherwise, add to the current last segment
 segmentedDataByChannel[channelId]!.last.add({
 ...newData,
 'Value': newData['Value_$channelId'] ?? 0.0,
@@ -990,10 +1100,12 @@ segmentedDataByChannel[channelId]!.last.add({
 }
 });
 
-if (segmentedDataByChannel.isNotEmpty && segmentedDataByChannel.values.first.isNotEmpty) {
+if (segmentedDataByChannel.isNotEmpty && segmentedDataByChannel.values.any((list) => list.isNotEmpty)) {
+if (mounted) { // Crucial check before setState
 setState(() {
-currentGraphIndex = segmentedDataByChannel.values.first.length - 1;
+currentGraphIndex = segmentedDataByChannel.values.first.length - 1; // Always show the latest segment
 });
+}
 }
 }
 
@@ -1013,23 +1125,46 @@ _scanRateMinController.text,
 _scanRateSecController.text,
 );
 if (newInterval != scanIntervalSeconds) {
+if (mounted) { // Crucial check before setState
 setState(() {
 scanIntervalSeconds = newInterval < 1 ? 1 : newInterval;
 debugPrint('Scan interval updated: $scanIntervalSeconds seconds');
 });
+}
 if (isScanning) {
-_startTableUpdateTimer();
+_startTableUpdateTimer(); // Restart timer with new interval
 }
 LogPage.addLog('[$_currentTime] Scan interval updated to $scanIntervalSeconds seconds.');
 }
 }
 
-Future<void> _saveData() async {
-bool isDarkMode = Global.isDarkMode.value; // Get current dark mode status
+Future<void> _saveData(bool isDarkMode) async { // Passed `isDarkMode` to the function
+Database? newSessionDatabase; // Declare here to ensure it's in scope for finally
 try {
-debugPrint('Saving data to databases started...');
-LogPage.addLog('[$_currentTime] Saving data to databases...');
+// Auto-populate File Name and Operator if empty
+String fileName = _fileNameController.text.trim();
+String operatorName = _operatorController.text.trim();
 
+if (fileName.isEmpty) {
+fileName = 'Data_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}';
+if (mounted) _fileNameController.text = fileName; // Update controller to reflect change
+LogPage.addLog('[$_currentTime] File Name was empty, auto-generated: $fileName');
+}
+if (operatorName.isEmpty) {
+operatorName = 'Operator';
+if (mounted) _operatorController.text = operatorName; // Update controller to reflect change
+LogPage.addLog('[$_currentTime] Operator Name was empty, auto-filled with: $operatorName');
+}
+
+debugPrint('Saving data to databases started...');
+LogPage.addLog('[$_currentTime] Saving data to databases.');
+
+if (!mounted) { // Check before showing dialog
+LogPage.addLog('[$_currentTime] Widget unmounted, cannot show save dialog.');
+return;
+}
+
+// Show loading dialog
 showDialog(
 context: context,
 barrierDismissible: false,
@@ -1057,7 +1192,7 @@ final mainDatabase = await DatabaseManager().database;
 debugPrint('Main database accessed via DatabaseManager.');
 
 debugPrint('Opening new session database ($newDbFileName) via SessionDatabaseManager.');
-final newSessionDatabase = await SessionDatabaseManager().openSessionDatabase(newDbFileName);
+newSessionDatabase = await SessionDatabaseManager().openSessionDatabase(newDbFileName);
 debugPrint('New session database opened and managed.');
 
 SharedPreferences prefs = await SharedPreferences.getInstance();
@@ -1103,37 +1238,46 @@ debugPrint('Inserted into new database Test2 table: $test2Payload');
 await prefs.setInt('recNo', recNo + 1);
 debugPrint('Record number updated to: ${recNo + 1}');
 
-Navigator.of(context).pop();
+if (!mounted) return; // Crucial check before popping dialog or showing SnackBar
+Navigator.of(context).pop(); // Dismiss progress dialog
 
-ScaffoldMessenger.of(context).showSnackBar(
+_scaffoldMessengerKey.currentState?.showSnackBar( // Use GlobalKey for ScaffoldMessenger
 SnackBar(
-content: Text('Data saved successfully to databases'),
+content: Text('Data saved successfully to "$fileName.db"'), // Informative message
 backgroundColor: Colors.green,
 duration: const Duration(seconds: 3),
 ),
 );
-LogPage.addLog('[$_currentTime] Data saved successfully to $newDbFileName.');
+LogPage.addLog('[$_currentTime] Data saved successfully to "$fileName.db".');
 } catch (e, s) {
-if (Navigator.of(context).canPop()) {
-Navigator.of(context).pop();
+if (mounted && Navigator.of(context).canPop()) { // Check mounted before popping dialog
+Navigator.of(context).pop(); // Dismiss progress dialog if still showing
 }
 debugPrint('Error saving data to databases: $e\nStackTrace: $s');
-ScaffoldMessenger.of(context).showSnackBar(
+if (mounted) { // Check mounted before showing SnackBar
+_scaffoldMessengerKey.currentState?.showSnackBar( // Use GlobalKey for ScaffoldMessenger
 SnackBar(
 content: Text('Error saving data: $e'),
 backgroundColor: ThemeColors.getColor('errorText', isDarkMode),
 duration: const Duration(seconds: 3),
 ),
 );
+}
 LogPage.addLog('[$_currentTime] Error saving data: $e');
+} finally {
+// Ensure the session database is closed in all cases
+if (newSessionDatabase != null && newSessionDatabase.isOpen) {
+await newSessionDatabase.close();
+debugPrint('Session database connection closed in finally block.');
+}
 }
 }
 
 Map<String, dynamic> _prepareTestPayload(int recNo, String newDbFileName) {
 return {
 "RecNo": recNo.toDouble(),
-"FName": _fileNameController.text,
-"OperatorName": _operatorController.text,
+"FName": _fileNameController.text, // Use the (possibly updated) controller text
+"OperatorName": _operatorController.text, // Use the (possibly updated) controller text
 "TDate": DateFormat('yyyy-MM-dd').format(DateTime.now()),
 "TTime": DateFormat('HH:mm:ss').format(DateTime.now()),
 "ScanningRate": scanIntervalSeconds.toDouble(),
@@ -1143,7 +1287,7 @@ return {
 "TestDurationDD": double.tryParse(_testDurationDayController.text) ?? 0.0,
 "TestDurationHH": double.tryParse(_testDurationHrController.text) ?? 0.0,
 "TestDurationMM": double.tryParse(_testDurationMinController.text) ?? 0.0,
-"TestDurationSS": double.tryParse(_testDurationSecController.text) ?? 0.0, // Added TestDurationSS
+"TestDurationSS": double.tryParse(_testDurationSecController.text) ?? 0.0,
 "GraphVisibleArea": _calculateDurationInSeconds('0', _graphVisibleHrController.text, _graphVisibleMinController.text, '0').toDouble(),
 "BaseLine": 0.0,
 "FullScale": 0.0,
@@ -1186,7 +1330,7 @@ Map<String, dynamic> payloadEntry = {
 "RecNo": recNo.toDouble(),
 "SNo": (i + 1).toDouble(),
 "SlNo": (i + 1).toDouble(),
-"ChangeTime": _formatTime(scanIntervalSeconds * (i + 1)),
+"ChangeTime": _formatTime(scanIntervalSeconds * (i + 1)), // This might need adjustment if timestamps are not strictly multiples of scanInterval
 "AbsDate": DateFormat('yyyy-MM-dd').format(dateTime),
 "AbsTime": DateFormat('HH:mm:ss').format(dateTime),
 "AbsDateTime": DateFormat('yyyy-MM-dd HH:mm:ss').format(dateTime),
@@ -1194,12 +1338,14 @@ Map<String, dynamic> payloadEntry = {
 "AbsAvg": 0.0,
 };
 
-for (int j = 1; j <= 50; j++) {
-payloadEntry["AbsPer$j"] = null;
+// Initialize all AbsPer fields to null or 0.0 as per DB schema
+for (int j = 1; j <= 100; j++) {
+payloadEntry["AbsPer$j"] = null; // Use null for unset values, or 0.0 if numerical default is preferred
 }
 
-for (int j = 0; j < sortedChannels.length && j < 50; j++) {
+for (int j = 0; j < sortedChannels.length && j < 100; j++) {
 final channelId = sortedChannels[j];
+// Find the data entry for this specific timestamp and channel
 final channelDataList = dataByChannel[channelId];
 final Map<String, dynamic> dataEntryForTimestamp = channelDataList?.firstWhere(
 (d) => (d['Timestamp'] as double?) == timestamp,
@@ -1223,11 +1369,11 @@ Map<String, dynamic> payload = {
 "RecNo": recNo.toDouble(),
 };
 
-for (int i = 1; i <= 50; i++) {
+for (int i = 1; i <= 100; i++) {
 String channelName = '';
 if (i <= sortedChannels.length) {
-final channelId = sortedChannels[i - 1];
-channelName = channelConfigs[channelId]?.channelName ?? '';
+final channelKey = sortedChannels[i - 1];
+channelName = channelConfigs[channelKey]?.channelName ?? '';
 }
 payload["ChannelName$i"] = channelName;
 }
@@ -1236,16 +1382,17 @@ debugPrint('[SERIAL_PORT] Prepared Test2 payload with ${sortedChannels.length} c
 return payload;
 }
 
+// Corrected _formatTime function - removed stray Japanese characters
 String _formatTime(int seconds) {
 final hours = seconds ~/ 3600;
 final minutes = (seconds % 3600) ~/ 60;
 final secs = seconds % 60;
-return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(
-2, '0')}:${secs.toString().padLeft(2, '0')}';
+return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${secs.toString().padLeft(2, '0')}';
 }
 
 void _showPreviousGraph() {
-if (segmentedDataByChannel.isNotEmpty && segmentedDataByChannel.values.first.isNotEmpty && currentGraphIndex > 0) {
+if (!mounted) return; // Crucial check
+if (segmentedDataByChannel.isNotEmpty && segmentedDataByChannel.values.any((list) => list.isNotEmpty) && currentGraphIndex > 0) {
 setState(() => currentGraphIndex--);
 debugPrint('[SERIAL_PORT] Navigated to previous graph segment: $currentGraphIndex');
 LogPage.addLog('[$_currentTime] Navigated to previous graph segment.');
@@ -1253,8 +1400,9 @@ LogPage.addLog('[$_currentTime] Navigated to previous graph segment.');
 }
 
 void _showNextGraph() {
+if (!mounted) return; // Crucial check
 int maxIndex = (segmentedDataByChannel.values.firstOrNull?.length ?? 1) - 1;
-if (segmentedDataByChannel.isNotEmpty && segmentedDataByChannel.values.first.isNotEmpty && currentGraphIndex < maxIndex) {
+if (segmentedDataByChannel.isNotEmpty && segmentedDataByChannel.values.any((list) => list.isNotEmpty) && currentGraphIndex < maxIndex) {
 setState(() => currentGraphIndex++);
 debugPrint('[SERIAL_PORT] Navigated to next graph segment: $currentGraphIndex');
 LogPage.addLog('[$_currentTime] Navigated to next graph segment.');
@@ -1282,7 +1430,7 @@ Widget _buildGraphNavigation(bool isDarkMode) {
 if (segmentedDataByChannel.isEmpty ||
 segmentedDataByChannel.values.every((list) => list.isEmpty) ||
 segmentedDataByChannel.values.first.length <= 1) {
-return const SizedBox(height: 24);
+return const SizedBox(height: 24); // Keep some space for consistent layout
 }
 return Padding(
 padding: const EdgeInsets.symmetric(vertical: 8.0),
@@ -1291,14 +1439,14 @@ mainAxisAlignment: MainAxisAlignment.center,
 children: [
 IconButton(
 icon: Icon(Icons.chevron_left, color: ThemeColors.getColor('sidebarIcon', isDarkMode)),
-onPressed: _showPreviousGraph),
+onPressed: currentGraphIndex > 0 ? _showPreviousGraph : null), // Disable if no previous
 Text('Segment ${currentGraphIndex + 1}/${segmentedDataByChannel.values
     .first.length}',
 style: GoogleFonts.roboto(
 color: ThemeColors.getColor('serialPortGraphAxisLabel', isDarkMode), fontWeight: FontWeight.w500)),
 IconButton(
 icon: Icon(Icons.chevron_right, color: ThemeColors.getColor('sidebarIcon', isDarkMode)),
-onPressed: _showNextGraph),
+onPressed: currentGraphIndex < (segmentedDataByChannel.values.first.length - 1) ? _showNextGraph : null), // Disable if no next
 ],
 ),
 );
@@ -1329,7 +1477,7 @@ channelsToPlot.sort(); // Sort to ensure consistent barIndex assignments
 double segmentStartTimeMs;
 if (segmentedDataByChannel.isNotEmpty && segmentedDataByChannel.values.any((list) => list.isNotEmpty)) {
 double tempMinTimestamp = double.infinity;
-for (var channelId in channelConfigs.keys) {
+for (var channelId in channelConfigs.keys) { // Iterate over actually selected/all channels
 if (segmentedDataByChannel.containsKey(channelId) &&
 currentGraphIndex < segmentedDataByChannel[channelId]!.length &&
 segmentedDataByChannel[channelId]![currentGraphIndex].isNotEmpty) {
@@ -1460,14 +1608,13 @@ minY = 0;
 }
 }
 
-List<double> sortedTimestamps = uniqueTimestamps.toList()..sort();
-
 double intervalY = (maxY - minY) / 5;
 if (intervalY <= 0 || !intervalY.isFinite) {
 intervalY = (maxY > 0) ? maxY / 5 : 1;
 if (intervalY <= 0) intervalY = 1.0;
 }
 
+// MODIFIED: Legend to be on one row with horizontal scrolling + with color picker
 Widget legend = SingleChildScrollView(
 scrollDirection: Axis.horizontal,
 child: Row(
@@ -1477,11 +1624,11 @@ children: channelsToPlot
     .map((channelId) {
 final color = channelColors[channelId];
 final channelName = channelConfigs[channelId]?.channelName ?? 'Unknown';
-return Material(
-color: Colors.transparent,
+return Material( // Wrap in Material for InkWell splash effect
+color: Colors.transparent, // Make Material transparent
 child: InkWell(
 onTap: () {
-_showColorPicker(channelId, isDarkMode);
+_showColorPicker(channelId, isDarkMode); // Re-added color picker
 },
 borderRadius: BorderRadius.circular(8),
 child: Padding(
@@ -1499,10 +1646,10 @@ border: Border.all(color: Colors.grey.withOpacity(0.5)),
 ),
 ),
 const SizedBox(width: 6),
-Text('$channelName', style: GoogleFonts.roboto(
+Text('Channel $channelName', style: GoogleFonts.roboto(
 color: ThemeColors.getColor('serialPortGraphAxisLabel', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500)),
 const SizedBox(width: 4),
-Icon(Icons.palette, size: 16, color: ThemeColors.getColor('serialPortDropdownIcon', isDarkMode)),
+Icon(Icons.palette, size: 16, color: ThemeColors.getColor('serialPortDropdownIcon', isDarkMode)), // Palette icon
 ],
 ),
 ),
@@ -1535,13 +1682,16 @@ return null;
 
 final channelName = channelConfigs[channelId]?.channelName ?? 'Unknown';
 final unit = channelConfigs[channelId]?.unit ?? '';
+final decimalPlaces = channelConfigs[channelId]!.decimalPlaces; // Correctly get decimal places
+
 return LineTooltipItem(
-'$channelName\n${spot.y.toStringAsFixed(2)} $unit\n${DateFormat('HH:mm:ss').format(DateTime.fromMillisecondsSinceEpoch(spot.x.toInt()))}',
+'Channel $channelName\n${spot.y.toStringAsFixed(decimalPlaces)} $unit\n${DateFormat('HH:mm:ss').format(DateTime.fromMillisecondsSinceEpoch(spot.x.toInt()))}',
 GoogleFonts.roboto(color: Colors.black, fontWeight: FontWeight.w600, fontSize: 12),
 );
 }).where((item) => item != null).toList().cast<LineTooltipItem>();
 },
 tooltipBorder: BorderSide(color: ThemeColors.getColor('tooltipBorder', isDarkMode)),
+tooltipPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6), // Added
 ),
 ),
 gridData: FlGridData(
@@ -1582,17 +1732,23 @@ style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortGraphAxisLabel'
 ),
 sideTitles: SideTitles(
 showTitles: true,
-reservedSize: 40,
+reservedSize: 70, // Increased reservedSize for rotated text
 getTitlesWidget: (value, meta) {
 if (meta.appliedInterval > 0 && uniqueTimestamps.isNotEmpty) {
 final dateTime = DateTime.fromMillisecondsSinceEpoch(value.toInt());
 return Padding(
 padding: const EdgeInsets.only(top: 8.0),
+child: Transform.rotate( // Rotate the text
+angle: pi / 2, // Rotate 90 degrees clockwise
+alignment: Alignment.center,
+child: Align( // Align the rotated text within its space
+alignment: Alignment.centerRight, // Adjust alignment after rotation
 child: Text(
 '${dateTime.hour.toString().padLeft(2, '0')}:${dateTime.minute.toString().padLeft(2, '0')}:${dateTime.second.toString().padLeft(2, '0')}',
 style: GoogleFonts.roboto(
 color: ThemeColors.getColor('serialPortGraphAxisLabel', isDarkMode), fontSize: 12, fontWeight: FontWeight.w600),
-textAlign: TextAlign.center,
+),
+),
 ),
 );
 }
@@ -1654,7 +1810,8 @@ if (dataEntry['Timestamp'] is double) {
 allTimestampsSet.add(dataEntry['Timestamp'] as double);
 }
 }
-}});
+}
+});
 final timestamps = allTimestampsSet.toList()..sort();
 final startIndex = timestamps.length > maxRows
 ? timestamps.length - maxRows
@@ -1784,18 +1941,23 @@ mainAxisAlignment: MainAxisAlignment.end,
 children: [
 IconButton(
 icon: Icon(Icons.arrow_upward, color: ThemeColors.getColor('sidebarIcon', isDarkMode)),
-onPressed: () => _tableScrollController.animateTo(
+onPressed: () {
+if (!mounted) return;
+_tableScrollController.animateTo(
 0, duration: const Duration(milliseconds: 300),
-curve: Curves.easeInOut),
+curve: Curves.easeInOut);
+}
 ),
 IconButton(
 icon: Icon(
 Icons.arrow_downward, color: ThemeColors.getColor('sidebarIcon', isDarkMode)),
 onPressed: () {
+if (!mounted) return;
 _tableScrollController.animateTo(
 _tableScrollController.position.maxScrollExtent,
 duration: const Duration(milliseconds: 300),
-curve: Curves.easeInOut);
+curve: Curves.easeOut,
+);
 debugPrint('[SERIAL_PORT] Scrolled table to latest data');
 },
 ),
@@ -1807,6 +1969,7 @@ debugPrint('[SERIAL_PORT] Scrolled table to latest data');
 );
 }
 
+// Changed to a more compact width and content padding
 Widget _buildTimeInputField(TextEditingController controller, String label, bool isDarkMode,
 {bool compact = false, double width = 60}) {
 return SizedBox(
@@ -1819,7 +1982,7 @@ decoration: InputDecoration(
 labelText: label,
 labelStyle: GoogleFonts.roboto(
 color: ThemeColors.getColor('serialPortInputLabel', isDarkMode),
-fontSize: 12,
+fontSize: compact ? 11 : 13, // Smaller font for compact fields
 fontWeight: FontWeight.w300,
 ),
 filled: true,
@@ -1828,21 +1991,23 @@ border: OutlineInputBorder(
 borderRadius: BorderRadius.circular(8),
 borderSide: BorderSide.none,
 ),
-contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-isDense: true,
+contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8), // More compact padding
+isDense: true, // Reduce overall height
 ),
 style: GoogleFonts.roboto(
 color: ThemeColors.getColor('serialPortInputText', isDarkMode),
-fontSize: 14,
+fontSize: compact ? 12 : 14, // Smaller font for compact fields
 fontWeight: FontWeight.w400,
 ),
 onChanged: (value) {
 _debounceTimer?.cancel();
 _debounceTimer = Timer(const Duration(milliseconds: 500), () {
+if (!mounted) return; // Crucial check inside debounce callback
 if (controller == _scanRateHrController || controller == _scanRateMinController || controller == _scanRateSecController) {
 _updateScanInterval();
 } else if (controller == _graphVisibleHrController || controller == _graphVisibleMinController) {
-if (mounted) setState(() {});
+// This setState only rebuilds the widget to update graph parameters
+setState(() {});
 }
 });
 },
@@ -1883,21 +2048,21 @@ onPressed: _openFloatingGraphWindow,
 style: ElevatedButton.styleFrom(
 backgroundColor: Colors.transparent,
 shadowColor: Colors.transparent,
-padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8), // More compact
 shape: RoundedRectangleBorder(
 borderRadius: BorderRadius.circular(10)),
 ),
 child: Row(
 mainAxisSize: MainAxisSize.min,
 children: [
-const Icon(Icons.add, color: Colors.white, size: 20),
-const SizedBox(width: 8),
+const Icon(Icons.add, color: Colors.white, size: 16), // Slightly smaller icon
+const SizedBox(width: 6), // Reduced spacing
 Text(
 'Add Window',
 style: GoogleFonts.roboto(
 color: Colors.white,
 fontWeight: FontWeight.w600,
-fontSize: 16,
+fontSize: 12, // Smaller font
 ),
 ),
 ],
@@ -1906,48 +2071,71 @@ fontSize: 16,
 );
 }
 
-Widget _buildLatestDataDisplay(bool isDarkMode) {
-if (dataByChannel.isEmpty || dataByChannel.values.every((list) => list == null || list.isEmpty)) {
-return const SizedBox.shrink();
+void _showModeSelectionDialog(bool isDarkMode) {
+showDialog(
+context: context,
+builder: (BuildContext dialogContext) { // Use dialogContext here
+return AlertDialog(
+backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+title: Text('Select Display Mode',
+style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))),
+content: Column(
+mainAxisSize: MainAxisSize.min,
+children: [
+RadioListTile<String>(
+title: Text('Combined (Table & Graph)', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode))),
+value: 'Combined',
+groupValue: Global.selectedMode.value,
+onChanged: (String? value) {
+if (value != null) {
+Global.selectedMode.value = value;
+Navigator.of(dialogContext).pop(); // Use dialogContext to pop
+LogPage.addLog('[$_currentTime] Display mode changed to Combined.');
 }
-
-Map<String, dynamic>? latestDataEntry;
-double latestTimestamp = -double.infinity;
-
-for (String channelId in channelConfigs.keys) {
-if (dataByChannel.containsKey(channelId) && dataByChannel[channelId] != null && dataByChannel[channelId]!.isNotEmpty) {
-final currentChannelLastEntry = dataByChannel[channelId]!.last;
-final currentTimestamp = (currentChannelLastEntry['Timestamp'] as num?)?.toDouble() ?? -double.infinity;
-
-if (currentTimestamp > latestTimestamp) {
-latestTimestamp = currentTimestamp;
-latestDataEntry = currentChannelLastEntry;
-} else if (currentTimestamp == latestTimestamp && latestDataEntry != null && channelConfigs.containsKey(channelId)) {
-latestDataEntry = currentChannelLastEntry;
-}
-}
-}
-
-if (latestDataEntry == null || latestDataEntry!['Channel'] == null || !channelConfigs.containsKey(latestDataEntry!['Channel'])) {
-return const SizedBox.shrink();
-}
-final config = channelConfigs[latestDataEntry!['Channel']]!;
-return Container(
-width: double.infinity,
-padding: const EdgeInsets.all(8),
-margin: const EdgeInsets.symmetric(vertical: 4),
-decoration: BoxDecoration(color: ThemeColors.getColor('serialPortLiveValueBackground', isDarkMode),
-borderRadius: BorderRadius.circular(8)),
-child: Text(
-'Latest: Channel ${config
-    .channelName} - ${latestDataEntry!['Time']} ${latestDataEntry!['Date']} - ${ (latestDataEntry!['Value'] as num).isFinite ? (latestDataEntry!['Value'] as num)
-    .toStringAsFixed(config.decimalPlaces) : "N/A"}${config.unit}',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('serialPortLiveValueText', isDarkMode), fontWeight: FontWeight.bold),
-textAlign: TextAlign.center,
+},
+activeColor: ThemeColors.getColor('submitButton', isDarkMode),
 ),
+RadioListTile<String>(
+title: Text('Table Only', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode))),
+value: 'Table',
+groupValue: Global.selectedMode.value,
+onChanged: (String? value) {
+if (value != null) {
+Global.selectedMode.value = value;
+Navigator.of(dialogContext).pop(); // Use dialogContext to pop
+LogPage.addLog('[$_currentTime] Display mode changed to Table Only.');
+}
+},
+activeColor: ThemeColors.getColor('submitButton', isDarkMode),
+),
+RadioListTile<String>(
+title: Text('Graph Only', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode))),
+value: 'Graph',
+groupValue: Global.selectedMode.value,
+onChanged: (String? value) {
+if (value != null) {
+Global.selectedMode.value = value;
+Navigator.of(dialogContext).pop(); // Use dialogContext to pop
+LogPage.addLog('[$_currentTime] Display mode changed to Graph Only.');
+}
+},
+activeColor: ThemeColors.getColor('submitButton', isDarkMode),
+),
+],
+),
+actions: [
+TextButton(
+onPressed: () {
+Navigator.of(dialogContext).pop(); // Use dialogContext to pop
+},
+child: Text('Close', style: GoogleFonts.roboto(color: ThemeColors.getColor('submitButton', isDarkMode))),
+),
+],
+);
+},
 );
 }
+
 
 Widget _buildFullInputSectionContent(bool isDarkMode) {
 return Column(
@@ -2011,6 +2199,7 @@ onChanged: (val) {},
 const SizedBox(height: 16),
 Row(
 children: [
+// Scan Rate
 Expanded(
 child: Row(
 crossAxisAlignment: CrossAxisAlignment.center,
@@ -2034,7 +2223,8 @@ _buildTimeInputField(_scanRateSecController, 'Sec', isDarkMode, compact: true, w
 ],
 ),
 ),
-const SizedBox(width: 12),
+const SizedBox(width: 12), // small gap between sections
+// Test Duration
 Expanded(
 child: Row(
 crossAxisAlignment: CrossAxisAlignment.center,
@@ -2065,6 +2255,7 @@ _buildTimeInputField(_testDurationSecController, 'Sec', isDarkMode, compact: tru
 ],
 );
 }
+// --- End of _buildFullInputSectionContent method ---
 
 Widget _buildBottomSectionContent(bool isDarkMode) {
 return Container(
@@ -2077,9 +2268,9 @@ border: Border.all(
 color: isScanning ? ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.5) : ThemeColors.getColor('serialPortCardBorder', isDarkMode)),
 ),
 child: Column(
-mainAxisSize: MainAxisSize.min,
+mainAxisSize: MainAxisSize.min, // Make column take minimum height
 children: [
-Wrap(
+Wrap( // For buttons
 spacing: 12,
 runSpacing: 12,
 alignment: WrapAlignment.center,
@@ -2092,24 +2283,131 @@ disabled: !isScanning),
 _buildControlButton(
 'Cancel Scan', _cancelScan, isDarkMode, color: ThemeColors.getColor('resetButton', isDarkMode)),
 _buildControlButton(
-'Save Data', () => _saveData(), isDarkMode, color: Colors.green[700]),
+'Save Data', () => _saveData(isDarkMode), isDarkMode, color: Colors.green[700]), // Pass isDarkMode
 _buildControlButton(
 'Multi File', () {LogPage.addLog('[$_currentTime] Multi File button pressed.');}, isDarkMode, color: Colors.purple[700]),
-_buildControlButton('Exit', () {
-LogPage.addLog('[$_currentTime] Exiting Auto Start Screen.');
+// MODIFIED: Exit button visibility and disclaimer
+if (isCancelled) // Only show Exit button if scan has been explicitly cancelled
+_buildControlButton('Exit', () async {
+// IMPORTANT: Call _cancelScan before navigating away
+if (isScanning) {
+// Show a confirmation dialog if scan is still active
+await showDialog(
+context: context,
+barrierDismissible: false,
+builder: (dialogContext) => AlertDialog( // Use a new context for dialog
+title: Text('Confirm Exit', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))),
+content: Text('Scanning is active. Do you want to stop and exit?', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode))),
+actions: [
+TextButton(
+onPressed: () {
+Navigator.of(dialogContext).pop(); // Stay on screen
+},
+child: Text('Cancel', style: GoogleFonts.roboto(color: ThemeColors.getColor('submitButton', isDarkMode))),
+),
+TextButton(
+onPressed: () {
+_cancelScan(); // Perform full cleanup
+Navigator.of(dialogContext).pop(); // Close dialog
+if (mounted) { // Crucial check before navigation
+LogPage.addLog('[$_currentTime] Exiting AutoStart Screen. Scanning stopped.');
+Global.isScanningNotifier.value = false; // Ensure global notifier is reset
 Navigator.pushReplacement(context,
 MaterialPageRoute(builder: (context) => const HomePage()));
+}
+},
+child: Text('Exit', style: GoogleFonts.roboto(color: ThemeColors.getColor('resetButton', isDarkMode))),
+),
+],
+backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+),
+);
+} else {
+// If not scanning, just exit
+LogPage.addLog('[$_currentTime] Exiting AutoStart Screen.');
+Global.isScanningNotifier.value = false; // Ensure global notifier is reset
+Navigator.pushReplacement(context,
+MaterialPageRoute(builder: (context) => const HomePage()));
+}
 }, isDarkMode, color: ThemeColors.getColor('cardText', isDarkMode)),
 ],
 ),
-const SizedBox(height: 16),
-Align(
-alignment: Alignment.bottomCenter,
+const SizedBox(height: 16), // Spacer between buttons and message
+// Directly placing the _buildMessageWidget here
+_buildMessageWidget(isDarkMode),
+// Disclaimer message - conditional based on isCancelled
+if (!isCancelled)
+Padding(
+padding: const EdgeInsets.only(top: 8.0),
+child: Text(
+"The 'Exit' button will appear after cancelling the scan.",
+style: GoogleFonts.roboto(
+color: ThemeColors.getColor('dialogSubText', isDarkMode),
+fontSize: 12,
+fontStyle: FontStyle.italic),
+textAlign: TextAlign.center,
+),
+),
+],
+),
+);
+}
+
+// New widget to display messages with icons and styled backgrounds
+Widget _buildMessageWidget(bool isDarkMode) {
+Color textColor;
+Color iconColor;
+IconData iconData;
+Color backgroundColor;
+Color borderColor;
+
+switch (_currentMessageType) {
+case _SerialPortMessageType.success:
+textColor = ThemeColors.getColor('submitButton', isDarkMode);
+iconColor = ThemeColors.getColor('submitButton', isDarkMode);
+iconData = Icons.check_circle_outline;
+backgroundColor = ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.08);
+borderColor = ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.6);
+break;
+case _SerialPortMessageType.info:
+textColor = ThemeColors.getColor('serialPortMessageText', isDarkMode);
+iconColor = ThemeColors.getColor('serialPortMessageText', isDarkMode);
+iconData = isScanning ? Icons.cached : Icons.info_outline; // Show refresh icon if scanning
+backgroundColor = ThemeColors.getColor('serialPortMessagePanelBackground', isDarkMode);
+borderColor = ThemeColors.getColor('serialPortCardBorder', isDarkMode);
+break;
+case _SerialPortMessageType.warning:
+textColor = Colors.orange[700]!;
+iconColor = Colors.orange[700]!;
+iconData = Icons.warning_amber_outlined;
+backgroundColor = Colors.orange.withOpacity(0.08);
+borderColor = Colors.orange.withOpacity(0.6);
+break;
+case _SerialPortMessageType.error:
+textColor = ThemeColors.getColor('errorText', isDarkMode);
+iconColor = ThemeColors.getColor('errorText', isDarkMode);
+iconData = Icons.error_outline;
+backgroundColor = ThemeColors.getColor('errorText', isDarkMode).withOpacity(0.08);
+borderColor = ThemeColors.getColor('errorText', isDarkMode).withOpacity(0.6);
+break;
+}
+
+return Container(
+width: double.infinity, // Still stretches to full width
+padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+margin: const EdgeInsets.only(top: 8),
+decoration: BoxDecoration(
+color: backgroundColor,
+borderRadius: BorderRadius.circular(8),
+border: Border.all(color: borderColor),
+),
 child: Row(
-mainAxisAlignment: MainAxisAlignment.center,
-crossAxisAlignment: CrossAxisAlignment.center,
+mainAxisSize: MainAxisSize.max, // Let Row fill the width
+mainAxisAlignment: MainAxisAlignment.center, // Center contents of the row
 children: [
-if (isScanning)
+// Only show progress indicator if it's 'info' type and actively scanning
+if (_currentMessageType == _SerialPortMessageType.info && isScanning)
 Padding(
 padding: const EdgeInsets.only(right: 8.0),
 child: SizedBox(
@@ -2117,41 +2415,20 @@ width: 16,
 height: 16,
 child: CircularProgressIndicator(
 strokeWidth: 2,
-valueColor: AlwaysStoppedAnimation<Color>(
-ThemeColors.getColor('submitButton', isDarkMode)))),
-),
-Expanded(
-child: Column(
-mainAxisSize: MainAxisSize.min,
-children: [
-portMessage,
-if (errors.isNotEmpty)
-Builder(
-builder: (context) {
-String messageToDisplay = '';
-List<String> actualErrors = errors.where((e) =>
-!e.contains('Scanning active') && !e.contains('Reconnected')).toList();
-
-if (actualErrors.isNotEmpty) {
-messageToDisplay = actualErrors.last;
-}
-return Text(
-messageToDisplay,
-style: GoogleFonts.roboto(
-color: messageToDisplay.contains('Error') || messageToDisplay.contains('failed') || messageToDisplay.contains('disconnected')
-? ThemeColors.getColor('serialPortErrorTextSmall', isDarkMode)
-    : ThemeColors.getColor('serialPortMessageText', isDarkMode),
-fontSize: 12),
-overflow: TextOverflow.ellipsis,
-maxLines: 1,
-textAlign: TextAlign.center,
-);
-},
-),
-],
+valueColor: AlwaysStoppedAnimation<Color>(iconColor),
 ),
 ),
-],
+)
+else
+Icon(iconData, color: iconColor, size: 20),
+const SizedBox(width: 8),
+Flexible( // Use Flexible to allow text to wrap but constrain its width
+child: Text(
+_currentMessage,
+style: GoogleFonts.roboto(color: textColor, fontSize: 14),
+textAlign: TextAlign.center, // Center the text itself
+overflow: TextOverflow.ellipsis, // Keep ellipsis for long lines
+maxLines: 2, // Allow up to 2 lines
 ),
 ),
 ],
@@ -2159,12 +2436,15 @@ textAlign: TextAlign.center,
 );
 }
 
+// MODIFIED _buildLeftSection to implement 20/60/20 split
 Widget _buildLeftSection(bool isDarkMode) {
+// This section now contains ALL inputs and ALL general controls for Combined mode
 return Column(
-crossAxisAlignment: CrossAxisAlignment.stretch,
+crossAxisAlignment: CrossAxisAlignment.stretch, // Stretch children horizontally
 children: [
-Flexible(
-flex: 2,
+// TOP SECTION: Input fields (approx 20% height)
+Flexible( // Use Flexible so it takes its allocated space, but internal widgets size themselves
+flex: 2, // 2 out of 10 total flex points for vertical distribution
 child: Card(
 elevation: 0,
 color: ThemeColors.getColor('serialPortCardBackground', isDarkMode),
@@ -2176,10 +2456,12 @@ child: _buildFullInputSectionContent(isDarkMode),
 ),
 ),
 ),
-const SizedBox(height: 16),
-Expanded(
-flex: 6,
-child: Card(
+const SizedBox(height: 16), // Spacer between sections
+
+// MIDDLE SECTION: Data table (approx 60% height)
+Expanded( // Use Expanded so the table truly takes all remaining space after flexible widgets
+flex: 6, // 6 out of 10 total flex points
+child: Card( // Wrap the table builder in a Card
 elevation: 0,
 color: ThemeColors.getColor('serialPortCardBackground', isDarkMode),
 shape: RoundedRectangleBorder(
@@ -2191,16 +2473,21 @@ child: _buildDataTable(isDarkMode),
 ),
 ),
 ),
-const SizedBox(height: 16),
-Flexible(
+const SizedBox(height: 16), // Spacer between sections
+
+// BOTTOM SECTION: Control buttons (approx 20% height) - Show only if not 'Graph' mode
+ValueListenableBuilder<String>(
+valueListenable: Global.selectedMode,
+builder: (context, mode, _) {
+// Show bottom section on left for 'Table' and 'Combined' modes
+if (mode == 'Table' || mode == 'Combined') {
+return Flexible(
 flex: 2,
-child: Column(
-mainAxisSize: MainAxisSize.min,
-children: [
-_buildLatestDataDisplay(isDarkMode),
-_buildBottomSectionContent(isDarkMode),
-],
-),
+child: _buildBottomSectionContent(isDarkMode), // Direct use, removed redundant Column
+);
+}
+return const SizedBox.shrink(); // Hide for 'Graph' mode
+},
 ),
 ],
 );
@@ -2211,14 +2498,142 @@ final isCompact = MediaQuery
     .of(context)
     .size
     .width < 600;
+
+// Widget for graph-specific controls, shared by 'Graph' and 'Combined' modes
+Widget graphControlBar = SingleChildScrollView( // Allows horizontal scrolling for the top control bar
+scrollDirection: Axis.horizontal,
+child: Row( // Use Row instead of Wrap to force one row
+mainAxisAlignment: MainAxisAlignment.start,
+crossAxisAlignment: CrossAxisAlignment.center,
+children: [
+Row( // Segment controls
+mainAxisSize: MainAxisSize.min,
+children: [
+Text('Segment:',
+style: GoogleFonts.roboto(
+color: ThemeColors.getColor('dialogText', isDarkMode),
+fontWeight: FontWeight.w500,
+fontSize: 13)),
+const SizedBox(width: 4),
+// Increased width for better readability for graph segment time fields
+_buildTimeInputField(
+_graphVisibleHrController, 'Hr', isDarkMode, compact: true, width: 50),
+const SizedBox(width: 4),
+_buildTimeInputField(
+_graphVisibleMinController, 'Min', isDarkMode,
+compact: true, width: 50),
+],
+),
+const SizedBox(width: 8),
+
+// Channel Selector Dropdown
+Container(
+// Increased padding and added border for visibility
+padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+decoration: BoxDecoration(
+color: ThemeColors.getColor('serialPortDropdownBackground', isDarkMode),
+borderRadius: BorderRadius.circular(8),
+border: Border.all(color: ThemeColors.getColor('serialPortCardBorder', isDarkMode).withOpacity(0.7)), // Added border
+boxShadow: [
+BoxShadow(
+color: ThemeColors.getColor('serialPortCardBorder', isDarkMode).withOpacity(0.3),
+blurRadius: 3)
+],
+),
+child: DropdownButton<String?>(
+value: _selectedGraphChannel,
+hint: Text('All Channels',
+style: GoogleFonts.roboto(
+color: ThemeColors.getColor('serialPortDropdownText', isDarkMode), fontSize: 13)),
+onChanged: (String? newValue) {
+if (!mounted) return; // Crucial check for onChanged
+setState(() {
+_selectedGraphChannel = newValue;
+});
+},
+items: [
+DropdownMenuItem<String?>(
+value: null,
+child: Text('All Channels',
+style: GoogleFonts.roboto(
+color: ThemeColors.getColor('serialPortDropdownText', isDarkMode), fontSize: 13)),
+),
+...channelConfigs.keys.map(
+(channelId) =>
+DropdownMenuItem<String>(
+value: channelId,
+child: Text(
+'Channel ${channelConfigs[channelId]!.channelName}',
+style: GoogleFonts.roboto(
+color: ThemeColors.getColor('serialPortDropdownText', isDarkMode), fontSize: 13),
+),
+)),
+],
+underline: Container(),
+icon: Icon(Icons.arrow_drop_down,
+color: ThemeColors.getColor('serialPortDropdownIcon', isDarkMode)),
+dropdownColor: ThemeColors.getColor('serialPortDropdownBackground', isDarkMode),
+),
+),
+const SizedBox(width: 8),
+
+// Show Dots Switch
+Row(
+mainAxisSize: MainAxisSize.min,
+children: [
+Text('Show Dots:',
+style: GoogleFonts.roboto(
+color: ThemeColors.getColor('dialogText', isDarkMode),
+fontWeight: FontWeight.w500,
+fontSize: 13,
+),
+),
+Switch(
+value: _showGraphDots,
+onChanged: (bool value) {
+if (!mounted) return; // Crucial check for onChanged
+setState(() {
+_showGraphDots = value;
+});
+},
+activeColor: ThemeColors.getColor('submitButton', isDarkMode),
+inactiveThumbColor: ThemeColors.getColor('resetButton', isDarkMode),
+inactiveTrackColor: ThemeColors.getColor('secondaryButton', isDarkMode).withOpacity(0.3),
+),
+],
+),
+const SizedBox(width: 8),
+
+// Add Window button
+_buildStyledAddButton(isDarkMode),
+],
+),
+);
+
+// Common graph view structure
+Widget graphView = Expanded(
+child: Card(
+elevation: 0,
+color: ThemeColors.getColor('serialPortCardBackground', isDarkMode),
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(12),
+side: BorderSide(color: ThemeColors.getColor('serialPortCardBorder', isDarkMode))),
+child: Padding(
+padding: EdgeInsets.all(isCompact ? 8.0 : 16.0),
+child: _buildGraph(isDarkMode)),
+),
+);
+
 return ValueListenableBuilder<String>(
 valueListenable: Global.selectedMode,
 builder: (context, mode, _) {
 final selectedMode = mode ?? 'Graph';
+
 if (selectedMode == 'Graph') {
 return Column(
 crossAxisAlignment: CrossAxisAlignment.stretch,
 children: [
+// Full input section for Graph mode
 Card(
 elevation: 0,
 color: ThemeColors.getColor('serialPortCardBackground', isDarkMode),
@@ -2233,205 +2648,27 @@ child: Row(
 mainAxisAlignment: MainAxisAlignment.start,
 crossAxisAlignment: CrossAxisAlignment.center,
 children: [
-SizedBox(
-width: isCompact ? 100 : 120,
-child: TextField(
-controller: _fileNameController,
-decoration: InputDecoration(
-labelText: 'File Name',
-labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortInputLabel', isDarkMode), fontSize: 13),
-filled: true,
-fillColor: ThemeColors.getColor('serialPortInputFill', isDarkMode),
-border: OutlineInputBorder(
-borderRadius: BorderRadius.circular(8),
-borderSide: BorderSide.none),
-contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: isCompact ? 8 : 10),
-isDense: true,
-),
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortInputText', isDarkMode), fontSize: 14),
-onChanged: (val) {},
-),
-),
+SizedBox(width: isCompact ? 100 : 120, child: TextField(controller: _fileNameController, decoration: InputDecoration(labelText: 'File Name', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortInputLabel', isDarkMode), fontSize: 13), filled: true, fillColor: ThemeColors.getColor('serialPortInputFill', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none), contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: isCompact ? 8 : 10), isDense: true,), style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortInputText', isDarkMode), fontSize: 14), onChanged: (val) {},)),
 const SizedBox(width: 8),
-SizedBox(
-width: isCompact ? 100 : 120,
-child: TextField(
-controller: _operatorController,
-decoration: InputDecoration(
-labelText: 'Operator',
-labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortInputLabel', isDarkMode), fontSize: 13),
-filled: true,
-fillColor: ThemeColors.getColor('serialPortInputFill', isDarkMode),
-border: OutlineInputBorder(
-borderRadius: BorderRadius.circular(8),
-borderSide: BorderSide.none),
-contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: isCompact ? 8 : 10),
-isDense: true,
-),
-style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortInputText', isDarkMode), fontSize: 14),
-onChanged: (val) {},
-),
-),
+SizedBox(width: isCompact ? 100 : 120, child: TextField(controller: _operatorController, decoration: InputDecoration(labelText: 'Operator', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortInputLabel', isDarkMode), fontSize: 13), filled: true, fillColor: ThemeColors.getColor('serialPortInputFill', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none), contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: isCompact ? 8 : 10), isDense: true,), style: GoogleFonts.roboto(color: ThemeColors.getColor('serialPortInputText', isDarkMode), fontSize: 14), onChanged: (val) {},)),
 const SizedBox(width: 8),
-Row(
-mainAxisSize: MainAxisSize.min,
-children: [
-Text('Scan Rate:',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('dialogText', isDarkMode),
-fontWeight: FontWeight.w500,
-fontSize: 13)),
-const SizedBox(width: 4),
-_buildTimeInputField(
-_scanRateHrController, 'Hr', isDarkMode, compact: true, width: 45),
-const SizedBox(width: 4),
-_buildTimeInputField(
-_scanRateMinController, 'Min', isDarkMode, compact: true, width: 45),
-const SizedBox(width: 4),
-_buildTimeInputField(
-_scanRateSecController, 'Sec', isDarkMode, compact: true, width: 45),
-],
-),
+Row(mainAxisSize: MainAxisSize.min, children: [ Text('Scan Rate:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 13)), const SizedBox(width: 4), _buildTimeInputField(_scanRateHrController, 'Hr', isDarkMode, compact: true, width: 45), const SizedBox(width: 4), _buildTimeInputField(_scanRateMinController, 'Min', isDarkMode, compact: true, width: 45), const SizedBox(width: 4), _buildTimeInputField(_scanRateSecController, 'Sec', isDarkMode, compact: true, width: 45), ],),
 const SizedBox(width: 8),
-Row(
-mainAxisSize: MainAxisSize.min,
-children: [
-Text('Test Duration:',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('dialogText', isDarkMode),
-fontWeight: FontWeight.w500,
-fontSize: 13)),
-const SizedBox(width: 4),
-_buildTimeInputField(
-_testDurationDayController, 'Day', isDarkMode,
-compact: true, width: 45),
-const SizedBox(width: 4),
-_buildTimeInputField(
-_testDurationHrController, 'Hr', isDarkMode, compact: true, width: 45),
-const SizedBox(width: 4),
-_buildTimeInputField(
-_testDurationMinController, 'Min', isDarkMode,
-compact: true, width: 45),
-const SizedBox(width: 4),
-_buildTimeInputField(
-_testDurationSecController, 'Sec', isDarkMode,
-compact: true, width: 45),
-],
-),
+Row(mainAxisSize: MainAxisSize.min, children: [ Text('Test Duration:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 13)), const SizedBox(width: 4), _buildTimeInputField(_testDurationDayController, 'Day', isDarkMode, compact: true, width: 45), const SizedBox(width: 4), _buildTimeInputField(_testDurationHrController, 'Hr', isDarkMode, compact: true, width: 45), const SizedBox(width: 4), _buildTimeInputField(_testDurationMinController, 'Min', isDarkMode, compact: true, width: 45), const SizedBox(width: 4), _buildTimeInputField(_testDurationSecController, 'Sec', isDarkMode, compact: true, width: 45), ],),
 const SizedBox(width: 8),
-Row(
-mainAxisSize: MainAxisSize.min,
-children: [
-Text('Segment:',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('dialogText', isDarkMode),
-fontWeight: FontWeight.w500,
-fontSize: 13)),
-const SizedBox(width: 4),
-_buildTimeInputField(
-_graphVisibleHrController, 'Hr', isDarkMode, compact: true, width: 45),
-const SizedBox(width: 4),
-_buildTimeInputField(
-_graphVisibleMinController, 'Min', isDarkMode,
-compact: true, width: 45),
-],
-),
-const SizedBox(width: 8),
-Container(
-padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-decoration: BoxDecoration(
-color: ThemeColors.getColor('serialPortDropdownBackground', isDarkMode),
-borderRadius: BorderRadius.circular(8),
-boxShadow: [
-BoxShadow(
-color: ThemeColors.getColor('serialPortCardBorder', isDarkMode).withOpacity(0.5),
-blurRadius: 5)
-],
-),
-child: DropdownButton<String?>(
-value: _selectedGraphChannel,
-hint: Text('All Channels',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('serialPortDropdownText', isDarkMode))),
-onChanged: (String? newValue) {
-setState(() {
-_selectedGraphChannel = newValue;
-});
-},
-items: [
-DropdownMenuItem<String?>(
-value: null,
-child: Text('All Channels',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('serialPortDropdownText', isDarkMode))),
-),
-...channelConfigs.keys.map(
-(channelId) =>
-DropdownMenuItem<String>(
-value: channelId,
-child: Text(
-'Channel ${channelConfigs[channelId]!
-    .channelName}',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('serialPortDropdownText', isDarkMode)),
-),
-)),
-],
-underline: Container(),
-icon: Icon(Icons.arrow_drop_down,
-color: ThemeColors.getColor('serialPortDropdownIcon', isDarkMode)),
-dropdownColor: ThemeColors.getColor('serialPortDropdownBackground', isDarkMode),
-),
-),
-const SizedBox(width: 8),
-Row(
-mainAxisSize: MainAxisSize.min,
-children: [
-Text('Show Dots:',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('dialogText', isDarkMode),
-fontWeight: FontWeight.w500,
-fontSize: 13,
-),
-),
-Switch(
-value: _showGraphDots,
-onChanged: (bool value) {
-setState(() {
-_showGraphDots = value;
-});
-},
-activeColor: ThemeColors.getColor('submitButton', isDarkMode),
-inactiveThumbColor: ThemeColors.getColor('resetButton', isDarkMode),
-inactiveTrackColor: ThemeColors.getColor('secondaryButton', isDarkMode).withOpacity(0.3),
-),
-],
-),
-const SizedBox(width: 8),
-_buildStyledAddButton(isDarkMode),
+graphControlBar, // Include graph controls here
 ],
 ),
 ),
 ),
 ),
 const SizedBox(height: 16),
-Expanded(
-child: Card(
-elevation: 0,
-color: ThemeColors.getColor('serialPortCardBackground', isDarkMode),
-shape: RoundedRectangleBorder(
-borderRadius: BorderRadius.circular(12),
-side: BorderSide(color: ThemeColors.getColor('serialPortCardBorder', isDarkMode))),
-child: Padding(
-padding: EdgeInsets.all(isCompact ? 8.0 : 16.0),
-child: _buildGraph(isDarkMode)),
-),
-),
+graphView, // The graph itself
 const SizedBox(height: 16),
-_buildBottomSectionContent(isDarkMode),
+_buildBottomSectionContent(isDarkMode), // Buttons for Graph mode
 ],
 );
-} else {
+} else if (selectedMode == 'Combined') {
 return Column(
 crossAxisAlignment: CrossAxisAlignment.stretch,
 children: [
@@ -2443,116 +2680,15 @@ borderRadius: BorderRadius.circular(12),
 side: BorderSide(color: ThemeColors.getColor('serialPortCardBorder', isDarkMode))),
 child: Padding(
 padding: const EdgeInsets.all(8.0),
-child: SingleChildScrollView(
-scrollDirection: Axis.horizontal,
-child: Row(
-mainAxisAlignment: MainAxisAlignment.end,
-crossAxisAlignment: CrossAxisAlignment.center,
-children: [
-Row(
-mainAxisSize: MainAxisSize.min,
-children: [
-Text('Graph Segment:',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('dialogText', isDarkMode),
-fontWeight: FontWeight.w500)),
-const SizedBox(width: 8),
-_buildTimeInputField(_graphVisibleHrController, 'Hr', isDarkMode),
-const SizedBox(width: 8),
-_buildTimeInputField(
-_graphVisibleMinController, 'Min', isDarkMode),
-],
-),
-const SizedBox(width: 8),
-Container(
-padding: const EdgeInsets.symmetric(
-horizontal: 12, vertical: 8),
-decoration: BoxDecoration(
-color: ThemeColors.getColor('serialPortDropdownBackground', isDarkMode),
-borderRadius: BorderRadius.circular(8),
-boxShadow: [
-BoxShadow(
-color: ThemeColors.getColor('serialPortCardBorder', isDarkMode).withOpacity(0.5),
-blurRadius: 5)
-]),
-child: DropdownButton<String?>(
-value: _selectedGraphChannel,
-hint: Text('All Channels',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('serialPortDropdownText', isDarkMode))),
-onChanged: (String? newValue) {
-setState(() {
-_selectedGraphChannel = newValue;
-});
-},
-items: [
-DropdownMenuItem<String?>(
-value: null,
-child: Text('All Channels',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('serialPortDropdownText', isDarkMode)))),
-...channelConfigs.keys.map((channelId) =>
-DropdownMenuItem<String>(
-value: channelId,
-child: Text(
-'Channel ${channelConfigs[channelId]!
-    .channelName}',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('serialPortDropdownText', isDarkMode))),
-)),
-],
-underline: Container(),
-icon: Icon(Icons.arrow_drop_down,
-color: ThemeColors.getColor('serialPortDropdownIcon', isDarkMode)),
-dropdownColor: ThemeColors.getColor('serialPortDropdownBackground', isDarkMode),
-),
-),
-const SizedBox(width: 8),
-Row(
-mainAxisSize: MainAxisSize.min,
-children: [
-Text('Show Dots:',
-style: GoogleFonts.roboto(
-color: ThemeColors.getColor('dialogText', isDarkMode),
-fontWeight: FontWeight.w500,
-fontSize: 13,
-),
-),
-Switch(
-value: _showGraphDots,
-onChanged: (bool value) {
-setState(() {
-_showGraphDots = value;
-});
-},
-activeColor: ThemeColors.getColor('submitButton', isDarkMode),
-inactiveThumbColor: ThemeColors.getColor('resetButton', isDarkMode),
-inactiveTrackColor: ThemeColors.getColor('secondaryButton', isDarkMode).withOpacity(0.3),
-),
-],
-),
-const SizedBox(width: 8),
-_buildStyledAddButton(isDarkMode),
-],
-),
-),
+child: graphControlBar, // ONLY graph controls here for Combined mode
 ),
 ),
 const SizedBox(height: 16),
-Expanded(
-child: Card(
-elevation: 0,
-color: ThemeColors.getColor('serialPortCardBackground', isDarkMode),
-shape: RoundedRectangleBorder(
-borderRadius: BorderRadius.circular(12),
-side: BorderSide(color: ThemeColors.getColor('serialPortCardBorder', isDarkMode))),
-child: Padding(
-padding: EdgeInsets.all(isCompact ? 8.0 : 16.0),
-child: _buildGraph(isDarkMode)),
-),
-),
+graphView, // The graph itself
 ],
 );
+} else {
+return const SizedBox.shrink(); // No content for 'Table' mode in this section
 }
 },
 );
@@ -2560,7 +2696,9 @@ child: _buildGraph(isDarkMode)),
 
 @override
 Widget build(BuildContext context) {
-return ValueListenableBuilder<bool>(
+return ScaffoldMessenger( // Wrap with ScaffoldMessenger to provide context for Snackbars
+key: _scaffoldMessengerKey,
+child: ValueListenableBuilder<bool>(
 valueListenable: Global.isDarkMode,
 builder: (context, isDarkMode, child) {
 return Scaffold(
@@ -2569,40 +2707,49 @@ body: SafeArea(
 child: ValueListenableBuilder<String>(
 valueListenable: Global.selectedMode,
 builder: (context, mode, _) {
-final selectedMode = mode ?? 'Graph';
+final selectedMode = mode ?? 'Graph'; // Default to Graph if somehow null
+if (selectedMode == 'Table') {
 return Padding(
 padding: const EdgeInsets.all(16.0),
-child: selectedMode == 'Table'
-? _buildLeftSection(isDarkMode)
-    : selectedMode == 'Graph'
-? _buildRightSection(isDarkMode)
-    : Row(
-crossAxisAlignment: CrossAxisAlignment.stretch,
+child: _buildLeftSection(isDarkMode), // Only left section for 'Table' mode
+);
+} else if (selectedMode == 'Graph') {
+return Padding(
+padding: const EdgeInsets.all(16.0),
+child: _buildRightSection(isDarkMode), // Only right section for 'Graph' mode
+);
+} else { // 'Combined' mode
+return Padding(
+padding: const EdgeInsets.all(16.0),
+child: Row( // Combined mode (original 2:3 ratio)
+crossAxisAlignment: CrossAxisAlignment.stretch, // Stretch children vertically
 children: [
-Expanded(flex: 1, child: _buildLeftSection(isDarkMode)),
+Expanded(flex: 1, child: _buildLeftSection(isDarkMode)), // Left section with all controls/inputs
 const SizedBox(width: 16),
-Expanded(flex: 1, child: _buildRightSection(isDarkMode)),
+Expanded(flex: 1, child: _buildRightSection(isDarkMode)), // Right section with only graph and its specific controls
 ],
 ),
 );
+}
 },
 ),
 ),
 );
 },
+),
 );
 }
 
 @override
 void dispose() {
-LogPage.addLog('[$_currentTime] Auto Start Screen disposed.');
+LogPage.addLog('[$_currentTime] AutoStart Screen disposed.');
 
 for (var entry in _windowEntries) {
 entry.remove();
 }
 _windowEntries.clear();
 
-_scrollController.dispose();
+// Removed unused _scrollController.dispose();
 _tableScrollController.dispose();
 _fileNameController.dispose();
 _operatorController.dispose();
@@ -2616,25 +2763,37 @@ _testDurationSecController.dispose();
 _graphVisibleHrController.dispose();
 _graphVisibleMinController.dispose();
 
-_readerSubscription?.cancel();
-reader?.close();
-if (port != null && port!.isOpen) {
-try {
-port!.close();
-} catch (e) {
-LogPage.addLog('[$_currentTime] Error closing serial port on exit: $e');
-}
-port!.dispose();
-} else {
-port?.dispose();
-}
-port = null;
-
+// Cancel all timers
 _reconnectTimer?.cancel();
 _testDurationTimer?.cancel();
 _tableUpdateTimer?.cancel();
 _debounceTimer?.cancel();
-_endTimeTimer?.cancel();
+_endTimeTimer?.cancel(); // Cancel the end time timer
+
+// Cancel reader subscription and close reader
+_readerSubscription?.cancel();
+reader?.close();
+
+// Close and dispose serial port
+if (port != null) {
+if (port!.isOpen) {
+try {
+port!.close();
+} catch (e) {
+LogPage.addLog('[$_currentTime] Error closing serial port on dispose: $e');
+}
+}
+try {
+port!.dispose();
+} catch (e) {
+LogPage.addLog('[$_currentTime] Error disposing serial port on dispose: $e');
+}
+}
+port = null; // Ensure port is null after disposal
+
+Global.isScanningNotifier.value = false; // Set global notifier to false
+
 super.dispose();
 }
 }
+

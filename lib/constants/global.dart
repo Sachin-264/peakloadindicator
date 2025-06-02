@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class Global {
+  // Add a GlobalKey for NavigatorState
+  static final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
   static ValueNotifier<String> selectedPort = ValueNotifier('No Ports');
   static ValueNotifier<Set> selectedRecNos = ValueNotifier({});
   static ValueNotifier<String> selectedMode = ValueNotifier('Combined');
@@ -35,6 +38,9 @@ class Global {
   // Dark Mode
   static ValueNotifier<bool> isDarkMode = ValueNotifier<bool>(false);
 
+  // Add isScanningNotifier to Global class
+  static ValueNotifier<bool> isScanningNotifier = ValueNotifier<bool>(false);
+
   // Initialize theme from shared preferences
   static Future<void> initTheme() async {
     final prefs = await SharedPreferences.getInstance();
@@ -52,4 +58,11 @@ class Global {
   StreamController<Map<String, dynamic>>.broadcast();
   static Stream<Map<String, dynamic>> get graphDataStream => _graphDataStreamController.stream;
   static Sink<Map<String, dynamic>> get graphDataSink => _graphDataStreamController.sink;
+
+  // Good practice: a dispose method for global resources, though not automatically called for static classes
+  static void dispose() {
+    _graphDataStreamController.close();
+    // No need to dispose ValueNotifiers as they are static and managed by Flutter.
+    // If you had listeners that needed manual removal, you'd put them here.
+  }
 }

@@ -23,17 +23,22 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
   // State variables for overall app loading (initial splash) and login process
   bool _isLoading = true; // For initial database check / app startup
-  bool _isAuthenticating = false; // NEW: For specific login button loading
+  bool _isAuthenticating = false; // For specific login button loading
   bool _showSuccessAnimation = false; // For login button success checkmark
   String? _errorMessage;
 
+  // State variables for password visibility
+  bool _isPasswordObscured = true; // For login password field
+  bool _isMasterPasswordObscured = true; // For master password field
+  bool _isNewPasswordObscured = true; // For new password field in reset dialog
+
   // Animation controllers for different purposes
-  late AnimationController _appLoadAnimationController; // Renamed for initial app loading/error
+  late AnimationController _appLoadAnimationController;
   late Animation<double> _fadeAnimation;
   late Animation<double> _scaleAnimation;
 
-  late AnimationController _loginSuccessAnimationController; // NEW: For login button success
-  late Animation<double> _loginSuccessScaleAnimation; // NEW: For login button success scale
+  late AnimationController _loginSuccessAnimationController;
+  late Animation<double> _loginSuccessScaleAnimation;
 
   static const String _masterPassword = 'admin@1234';
   static const Color _accentColor = Color(0xFF455A64);
@@ -57,10 +62,10 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     // Login Button Success Animation
     _loginSuccessAnimationController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 500), // A snappier duration for the checkmark
+      duration: const Duration(milliseconds: 500),
     );
-    _loginSuccessScaleAnimation = Tween<double>(begin: 0.5, end: 1.0).animate( // From smaller to full size
-      CurvedAnimation(parent: _loginSuccessAnimationController, curve: Curves.easeOutBack), // Pop-out effect
+    _loginSuccessScaleAnimation = Tween<double>(begin: 0.5, end: 1.0).animate(
+      CurvedAnimation(parent: _loginSuccessAnimationController, curve: Curves.easeOutBack),
     );
 
     _checkDatabase();
@@ -87,8 +92,6 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
         setState(() {
           _isLoading = false;
         });
-        // If successful, no need to forward _appLoadAnimationController,
-        // as the login form will appear immediately.
       }
     } catch (e) {
       print('Database initialization error: $e');
@@ -97,36 +100,35 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
           _isLoading = false;
           _errorMessage = 'Error initializing database. Please try again.';
         });
-        _appLoadAnimationController.forward(from: 0.0); // Animate error screen
+        _appLoadAnimationController.forward(from: 0.0);
       }
     }
   }
 
   Future<void> _login() async {
-    // Prevent multiple taps or login attempts while one is in progress or success animation is playing
     if (_isAuthenticating || _showSuccessAnimation) {
       return;
     }
 
     setState(() {
-      _isAuthenticating = true; // Start login-specific loading
+      _isAuthenticating = true;
       _errorMessage = null;
-      _showSuccessAnimation = false; // Ensure success animation is off initially
+      _showSuccessAnimation = false;
     });
 
     try {
       final authData = await DatabaseManager().getAuthSettings();
-      await Future.delayed(const Duration(milliseconds: 800)); // Simulate network/auth delay
+      await Future.delayed(const Duration(milliseconds: 800));
 
       if (authData != null) {
         final storedUsername = authData['username'] as String? ?? '';
         final storedPassword = authData['password'] as String? ?? '';
         if (_usernameController.text == storedUsername && _passwordController.text == storedPassword) {
           setState(() {
-            _showSuccessAnimation = true; // Trigger success animation
+            _showSuccessAnimation = true;
           });
-          _loginSuccessAnimationController.forward(from: 0.0); // Start the success animation
-          await Future.delayed(const Duration(seconds: 1)); // Wait for success animation to play
+          _loginSuccessAnimationController.forward(from: 0.0);
+          await Future.delayed(const Duration(seconds: 1));
           if (mounted) {
             Navigator.pushReplacement(
               context,
@@ -134,7 +136,6 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
             );
           }
         } else {
-          // Incorrect credentials
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
@@ -164,74 +165,68 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
           }
         }
       } else {
-        // No authentication settings found
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Row(
-                children: [
-                  Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 24),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'No authentication settings found. Please reset credentials.',
-                      style: GoogleFonts.montserrat(
-                        fontSize: 16,
-                        color: AppColors.textPrimary,
+              SnackBar(
+                content: Row(
+                  children: [
+                    Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 24),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'No authentication settings found. Please reset credentials.',
+                        style: GoogleFonts.montserrat(
+                          fontSize: 16,
+                          color: AppColors.textPrimary,
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-              backgroundColor: AppColors.cardBackground,
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              margin: const EdgeInsets.all(16),
-              duration: const Duration(seconds: 5),
-              elevation: 6,
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      print('Login error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                Icon(Icons.error_outline, color: AppColors.errorText, size: 24),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Error during login. Please try again.',
-                    style: GoogleFonts.montserrat(
-                      fontSize: 16,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
+                  ],
                 ),
-              ],
-            ),
-            backgroundColor: AppColors.cardBackground,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            margin: const EdgeInsets.all(16),
-            duration: const Duration(seconds: 4),
-            elevation: 6,
-          ),
-        );
-      }
+                backgroundColor: AppColors.cardBackground,
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                margin: const EdgeInsets.all(16),
+                duration: const Duration(seconds: 5),
+                elevation: 6,
+              ) );
+    }
+    }
+    } catch (e) {
+    print('Login error: $e');
+    if (mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+    content: Row(
+    children: [
+    Icon(Icons.error_outline, color: AppColors.errorText, size: 24),
+    const SizedBox(width: 8),
+    Expanded(
+    child: Text(
+    'Error during login. Please try again.',
+    style: GoogleFonts.montserrat(
+    fontSize: 16,
+    color: AppColors.textPrimary,
+    ),
+    ),
+    ),
+    ],
+    ),
+    backgroundColor: AppColors.cardBackground,
+    behavior: SnackBarBehavior.floating,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    margin: const EdgeInsets.all(16),
+    duration: const Duration(seconds: 4),
+    elevation: 6,
+    ),
+    );
+    }
     } finally {
-      // Always reset the authenticating flag when the process finishes,
-      // regardless of success or failure.
-      if (mounted) {
-        setState(() {
-          _isAuthenticating = false;
-          // _showSuccessAnimation remains true until navigation to allow the checkmark to stay
-          // If navigation doesn't happen (e.g., wrong password), it will be reset on next login attempt.
-        });
-      }
+    if (mounted) {
+    setState(() {
+    _isAuthenticating = false;
+    });
+    }
     }
   }
 
@@ -277,7 +272,12 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                       controller: _masterPasswordController,
                       label: 'Master Password',
                       icon: Icons.vpn_key,
-                      obscureText: true,
+                      obscureText: _isMasterPasswordObscured,
+                      onVisibilityToggle: () {
+                        setDialogState(() {
+                          _isMasterPasswordObscured = !_isMasterPasswordObscured;
+                        });
+                      },
                     ),
                     if (isResetting) ...[
                       const SizedBox(height: 16),
@@ -291,7 +291,12 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                         controller: _newPasswordController,
                         label: 'New Password',
                         icon: Icons.lock,
-                        obscureText: true,
+                        obscureText: _isNewPasswordObscured,
+                        onVisibilityToggle: () {
+                          setDialogState(() {
+                            _isNewPasswordObscured = !_isNewPasswordObscured;
+                          });
+                        },
                       ),
                     ],
                     const SizedBox(height: 24),
@@ -317,8 +322,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                             if (_masterPasswordController.text == _masterPassword) {
                               if (isResetting) {
                                 if (_newUsernameController.text.isEmpty || _newPasswordController.text.isEmpty) {
-                                  // Show a snackbar for empty fields
-                                  Navigator.of(context).pop(); // Close dialog first
+                                  Navigator.of(context).pop();
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     SnackBar(
                                       content: Row(
@@ -336,15 +340,15 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                           ),
                                         ],
                                       ),
-                                      backgroundColor: AppColors.cardBackground, // Corrected parameter placement
+                                      backgroundColor: AppColors.cardBackground,
                                       behavior: SnackBarBehavior.floating,
                                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                       margin: const EdgeInsets.all(16),
                                       duration: const Duration(seconds: 4),
-                                      elevation: 6, // Added elevation for consistency
+                                      elevation: 6,
                                     ),
                                   );
-                                  return; // Stop here
+                                  return;
                                 }
                                 try {
                                   await DatabaseManager().saveAuthSettings(
@@ -370,15 +374,14 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                           ),
                                         ],
                                       ),
-                                      backgroundColor: AppColors.cardBackground, // Corrected parameter placement
+                                      backgroundColor: AppColors.cardBackground,
                                       behavior: SnackBarBehavior.floating,
                                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                       margin: const EdgeInsets.all(16),
                                       duration: const Duration(seconds: 3),
-                                      elevation: 6, // Added elevation for consistency
+                                      elevation: 6,
                                     ),
                                   );
-                                  // Also clear login fields so user can use new credentials
                                   _usernameController.clear();
                                   _passwordController.clear();
                                 } catch (e) {
@@ -401,12 +404,12 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                           ),
                                         ],
                                       ),
-                                      backgroundColor: AppColors.cardBackground, // Corrected parameter placement
+                                      backgroundColor: AppColors.cardBackground,
                                       behavior: SnackBarBehavior.floating,
                                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                       margin: const EdgeInsets.all(16),
                                       duration: const Duration(seconds: 4),
-                                      elevation: 6, // Added elevation for consistency
+                                      elevation: 6,
                                     ),
                                   );
                                 }
@@ -419,7 +422,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                 });
                               }
                             } else {
-                              Navigator.of(context).pop(); // Close dialog first
+                              Navigator.of(context).pop();
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
                                   content: Row(
@@ -437,12 +440,12 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                       ),
                                     ],
                                   ),
-                                  backgroundColor: AppColors.cardBackground, // Corrected parameter placement
+                                  backgroundColor: AppColors.cardBackground,
                                   behavior: SnackBarBehavior.floating,
                                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                   margin: const EdgeInsets.all(16),
                                   duration: const Duration(seconds: 4),
-                                  elevation: 6, // Added elevation for consistency
+                                  elevation: 6,
                                 ),
                               );
                               _masterPasswordController.clear();
@@ -468,8 +471,8 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     _masterPasswordController.dispose();
     _newUsernameController.dispose();
     _newPasswordController.dispose();
-    _appLoadAnimationController.dispose(); // Dispose the renamed controller
-    _loginSuccessAnimationController.dispose(); // Dispose the new controller
+    _appLoadAnimationController.dispose();
+    _loginSuccessAnimationController.dispose();
     super.dispose();
   }
 
@@ -496,11 +499,10 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 500),
               transitionBuilder: (child, animation) {
-                // Apply FadeTransition only for loading and error widgets that take full screen
                 if (child.key == const ValueKey('loadingScreen') || child.key == const ValueKey('errorScreen')) {
                   return FadeTransition(opacity: animation, child: child);
                 }
-                return child; // No animation for login form as it's typically present from start
+                return child;
               },
               child: _isLoading
                   ? _buildLoadingWidget()
@@ -516,7 +518,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
   Widget _buildLoadingWidget() {
     return Center(
-      key: const ValueKey('loadingScreen'), // Unique key for AnimatedSwitcher
+      key: const ValueKey('loadingScreen'),
       child: FadeTransition(
         opacity: _fadeAnimation,
         child: ScaleTransition(
@@ -578,7 +580,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
   Widget _buildErrorWidget() {
     return Center(
-      key: const ValueKey('errorScreen'), // Unique key for AnimatedSwitcher
+      key: const ValueKey('errorScreen'),
       child: ScaleTransition(
         scale: _scaleAnimation,
         child: Container(
@@ -626,9 +628,9 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                 onTap: () {
                   setState(() {
                     _errorMessage = null;
-                    _isLoading = true; // Set isLoading to true to show the loading screen again
+                    _isLoading = true;
                   });
-                  _appLoadAnimationController.reset(); // Reset animation for the retry
+                  _appLoadAnimationController.reset();
                   _checkDatabase();
                 },
               ),
@@ -641,7 +643,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
   Widget _buildLoginForm() {
     return LayoutBuilder(
-      key: const ValueKey('loginForm'), // Unique key for AnimatedSwitcher
+      key: const ValueKey('loginForm'),
       builder: (context, constraints) {
         return SingleChildScrollView(
           child: ConstrainedBox(
@@ -653,12 +655,12 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
               children: [
                 const SizedBox(height: 24),
                 Center(
-                  child: SizedBox( // Use SizedBox instead of Container with dynamic width * 0.9 for simplicity
+                  child: SizedBox(
                     width: constraints.maxWidth * 0.9 > 400 ? 400 : constraints.maxWidth * 0.9,
                     child: Column(
                       children: [
                         Container(
-                          width: 400, // Fixed width based on the original design
+                          width: 400,
                           height: 120,
                           decoration: BoxDecoration(
                             color: AppColors.cardBackground,
@@ -760,7 +762,12 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                 controller: _passwordController,
                                 label: 'Password',
                                 icon: Icons.lock,
-                                obscureText: true,
+                                obscureText: _isPasswordObscured,
+                                onVisibilityToggle: () {
+                                  setState(() {
+                                    _isPasswordObscured = !_isPasswordObscured;
+                                  });
+                                },
                               ),
                               const SizedBox(height: 12),
                               Align(
@@ -778,16 +785,14 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                 ),
                               ),
                               const SizedBox(height: 16),
-                              // Modified Login Button with AnimatedSwitcher for loading/success
                               GestureDetector(
-                                // Disable tap when authenticating or showing success
                                 onTap: _isAuthenticating || _showSuccessAnimation ? null : _login,
                                 child: AnimatedContainer(
                                   duration: const Duration(milliseconds: 200),
                                   padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
                                   decoration: BoxDecoration(
                                     color: (_isAuthenticating || _showSuccessAnimation)
-                                        ? _accentColor.withOpacity(0.7) // Dim button while busy
+                                        ? _accentColor.withOpacity(0.7)
                                         : _accentColor,
                                     borderRadius: BorderRadius.circular(10),
                                     boxShadow: [
@@ -801,7 +806,6 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                   child: AnimatedSwitcher(
                                     duration: const Duration(milliseconds: 300),
                                     transitionBuilder: (Widget child, Animation<double> animation) {
-                                      // Fade and scale transition for the content inside the button
                                       return FadeTransition(
                                         opacity: animation,
                                         child: ScaleTransition(scale: animation, child: child),
@@ -809,8 +813,8 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                     },
                                     child: _isAuthenticating
                                         ? SizedBox(
-                                      key: const ValueKey('loginLoader'), // Key for AnimatedSwitcher
-                                      width: 24, // Size of the loader
+                                      key: const ValueKey('loginLoader'),
+                                      width: 24,
                                       height: 24,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 3,
@@ -819,16 +823,16 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                     )
                                         : _showSuccessAnimation
                                         ? ScaleTransition(
-                                      key: const ValueKey('loginSuccess'), // Key for AnimatedSwitcher
-                                      scale: _loginSuccessScaleAnimation, // Use dedicated success animation
+                                      key: const ValueKey('loginSuccess'),
+                                      scale: _loginSuccessScaleAnimation,
                                       child: const Icon(
                                         Icons.check_circle,
                                         color: Colors.white,
-                                        size: 30, // Size of the checkmark
+                                        size: 30,
                                       ),
                                     )
                                         : Text(
-                                      key: const ValueKey('loginText'), // Key for AnimatedSwitcher
+                                      key: const ValueKey('loginText'),
                                       'Login',
                                       style: GoogleFonts.montserrat(
                                         fontSize: 18,
@@ -860,7 +864,11 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     required String label,
     required IconData icon,
     bool obscureText = false,
+    VoidCallback? onVisibilityToggle,
   }) {
+    // Determine if this is a password field based on the icon
+    final isPasswordField = icon == Icons.lock || icon == Icons.vpn_key;
+
     return TextField(
       controller: controller,
       obscureText: obscureText,
@@ -881,6 +889,17 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
           color: _accentColor,
           size: 24,
         ),
+        suffixIcon: isPasswordField
+            ? IconButton(
+          icon: Icon(
+            obscureText ? Icons.visibility_off : Icons.visibility,
+            color: _accentColor,
+            size: 24,
+          ),
+          tooltip: obscureText ? 'Show password' : 'Hide password',
+          onPressed: onVisibilityToggle,
+        )
+            : null,
         filled: true,
         fillColor: AppColors.cardBackground,
         border: OutlineInputBorder(
@@ -958,7 +977,6 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
   }
 }
 
-// Keep the background animation classes as they are
 class AnimatedIconBackground extends StatefulWidget {
   const AnimatedIconBackground({super.key});
 
@@ -1007,8 +1025,6 @@ class _AnimatedIconBackgroundState extends State<AnimatedIconBackground> with Ti
       icons.clear();
       for (int i = 0; i < 12; i++) {
         double x, y;
-        // Adjust bounds to prevent icons from overlapping the main login form roughly
-        // This is a heuristic, adjust as needed based on your layout
         final contentLeft = size.width * 0.25;
         final contentRight = size.width * 0.75;
         final contentTop = size.height * 0.25;
@@ -1017,7 +1033,7 @@ class _AnimatedIconBackgroundState extends State<AnimatedIconBackground> with Ti
         do {
           x = random.nextDouble() * size.width;
           y = random.nextDouble() * size.height;
-        } while (x > contentLeft && x < contentRight && y > contentTop && y < contentBottom); // Avoid content area
+        } while (x > contentLeft && x < contentRight && y > contentTop && y < contentBottom);
 
         icons.add({
           'x': x,
@@ -1242,8 +1258,7 @@ class LoggerPulsePainter extends CustomPainter {
         }
       }
 
-      // Apply pulsating effect
-      final opacity = 0.3 + 0.2 * sin(progress * 2 + i * pi / 2);
+      final opacity = 0.3 + 0.2 * sin(progress * 2 * pi + i * pi / 2);
       paint.color = _accentColor.withOpacity(opacity);
 
       canvas.drawPath(path, paint);

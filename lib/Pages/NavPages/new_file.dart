@@ -52,14 +52,6 @@ class _NewTestPageState extends State<NewTestPage> with SingleTickerProviderStat
     });
 
     try {
-      // REMOVED: Direct sqfliteFfiInit and databaseFactory setup
-      // sqfliteFfiInit();
-      // databaseFactory = databaseFactoryFfi;
-      // final databasesPath = await getDatabasesPath();
-      // final path = join(databasesPath, 'Countronics.db');
-      // final database = await openDatabase(path);
-
-      // CHANGED: Use DatabaseManager to get the database instance
       final database = await DatabaseManager().database;
 
       final List<Map<String, dynamic>> data = await database.query('ChannelSetup');
@@ -69,9 +61,6 @@ class _NewTestPageState extends State<NewTestPage> with SingleTickerProviderStat
         _channels = data.map((item) => Channel.fromJson(item)).toList();
         _isLoading = false;
       });
-
-      // REMOVED: Explicit database.close() as DatabaseManager manages it
-      // await database.close();
     } catch (e) {
       setState(() {
         _isLoading = false;

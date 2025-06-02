@@ -9,8 +9,7 @@ import 'SplashScreen.dart';
 import 'constants/database_manager.dart';
 import 'constants/global.dart';
 import 'constants/theme.dart'; // Ensure this file defines ThemeColors correctly
-
-ValueNotifier<bool> isScanningNotifier = ValueNotifier<bool>(false);
+import 'constants/sessionmanager.dart'; // Import the SessionDatabaseManager
 
 class CustomTitleBar extends StatefulWidget {
   final String title;
@@ -32,6 +31,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
   late AnimationController _controller;
   late Animation<double> _scaleAnimation;
   late Animation<double> _timeFadeAnimation;
+
 
   @override
   void initState() {
@@ -171,11 +171,11 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
                   isDarkMode: isDarkMode,
                 ),
                 ValueListenableBuilder<bool>(
-                  valueListenable: isScanningNotifier,
+                  valueListenable: Global.isScanningNotifier,
                   builder: (context, isScanning, child) {
                     return WindowButton(
                       icon: Icons.close,
-                      onPressed: () async {
+                      onPressed: () async { // Make the onPressed callback async
                         if (isScanning) {
                           final shouldClose = await showDialog<bool>(
                             context: context,
@@ -219,12 +219,18 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
                             ),
                           );
                           if (shouldClose == true) {
+                            // --- Close all databases before exiting ---
+                            await SessionDatabaseManager().closeAllManagedDatabases();
+                            await DatabaseManager().close();
                             appWindow.close();
                           }
                         } else {
                           if (Navigator.of(context).canPop()) {
                             Navigator.of(context).pop();
                           } else {
+                            // --- Close all databases before exiting ---
+                            await SessionDatabaseManager().closeAllManagedDatabases();
+                            await DatabaseManager().close();
                             appWindow.close();
                           }
                         }
@@ -473,3 +479,4 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
     );
   }
 }
+

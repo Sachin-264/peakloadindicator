@@ -23,7 +23,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
   final _targetAlarmMaxController = TextEditingController();
   final _targetAlarmMinController = TextEditingController();
   final _targetAlarmColourController = TextEditingController();
-  final _channelColourController = TextEditingController();
+  final _graphLineColourController = TextEditingController();
   Color _selectedAlarmColor = Colors.red; // Default alarm color
   Color _selectedChannelColor = Colors.blue; // Default channel color
 
@@ -36,10 +36,10 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
       _targetAlarmMaxController.text = widget.channel!['TargetAlarmMax']?.toString() ?? '';
       _targetAlarmMinController.text = widget.channel!['TargetAlarmMin']?.toString() ?? '';
       _targetAlarmColourController.text = widget.channel!['TargetAlarmColour'] ?? 'FF0000';
-      _channelColourController.text = widget.channel!['ChannelColour'] ?? '0000FF';
+      _graphLineColourController.text = widget.channel!['graphLineColour'] ?? '0000FF';
       try {
         _selectedAlarmColor = Color(int.parse('FF${_targetAlarmColourController.text}', radix: 16));
-        _selectedChannelColor = Color(int.parse('FF${_channelColourController.text}', radix: 16));
+        _selectedChannelColor = Color(int.parse('FF${_graphLineColourController.text}', radix: 16));
       } catch (e) {
         _selectedAlarmColor = Colors.red; // Fallback alarm color
         _selectedChannelColor = Colors.blue; // Fallback channel color
@@ -47,7 +47,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
       LogPage.addLog('[$_currentTime] Loaded channel data: ${widget.channel!['ChannelName']}');
     } else {
       _targetAlarmColourController.text = 'FF0000'; // Default red
-      _channelColourController.text = '0000FF'; // Default blue
+      _graphLineColourController.text = '0000FF'; // Default blue
       LogPage.addLog('[$_currentTime] Initialized new channel form');
     }
   }
@@ -60,7 +60,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
         'TargetAlarmMax': int.parse(_targetAlarmMaxController.text),
         'TargetAlarmMin': int.parse(_targetAlarmMinController.text),
         'TargetAlarmColour': _targetAlarmColourController.text, // Hex code without #
-        'graphLineColour': _channelColourController.text, // Hex code without #
+        'graphLineColour': _graphLineColourController.text, // Hex code without #
       };
 
       try {
@@ -155,7 +155,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
                           color.value.toRadixString(16).substring(2).toUpperCase();
                     } else {
                       _selectedChannelColor = color;
-                      _channelColourController.text =
+                      _graphLineColourController.text =
                           color.value.toRadixString(16).substring(2).toUpperCase();
                     }
                   });
@@ -531,7 +531,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
                             isAlarmColor: true,
                           ),
                           _buildFormField(
-                            controller: _channelColourController,
+                            controller: _graphLineColourController,
                             label: 'Channel Colour',
                             validator: (value) =>
                             value!.isEmpty || RegExp(r'^[0-9A-Fa-f]{6}$').hasMatch(value)
@@ -618,7 +618,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
     _targetAlarmMaxController.dispose();
     _targetAlarmMinController.dispose();
     _targetAlarmColourController.dispose();
-    _channelColourController.dispose();
+    _graphLineColourController.dispose();
     super.dispose();
   }
 

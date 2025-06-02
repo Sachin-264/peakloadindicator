@@ -1,5 +1,3 @@
-// peakloadindicator/constants/database_manager.dart
-
 import 'package:peakloadindicator/constants/sessionmanager.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:path/path.dart' as path;
@@ -15,7 +13,7 @@ class DatabaseManager {
   Database? _database;
 
   // _dbVersion indicates schema version. Encryption is not tied to this version in this approach.
-  static const int _dbVersion = 7;
+  static const int _dbVersion = 7; // No change needed for this version number, as schema changes are internal
 
   factory DatabaseManager() => _instance;
 
@@ -164,6 +162,11 @@ class DatabaseManager {
               await addColumnIfNotExists(db, 'Test', 'TestDurationSS', 'REAL');
               LogPage.addLog('[${_currentTime}] Added TestDurationSS column to Test table');
             }
+            // Add columns for Test1 and Test2 up to 100 channels during upgrade if necessary
+            if (oldVersion < _dbVersion) { // This condition assumes _dbVersion means all schema up to 100 channels is included
+              await _addTest1AndTest2Columns(db);
+            }
+
             SessionDatabaseManager().addManagedDatabase(dbPath, db);
           },
           onOpen: (db) async {
@@ -194,6 +197,36 @@ class DatabaseManager {
     }
   }
 
+  // New helper to add columns for Test1 and Test2 up to 100 channels
+  Future<void> _addTest1AndTest2Columns(Database db) async {
+    print('[DatabaseManager] Ensuring Test1 and Test2 tables have 100 channels...');
+    LogPage.addLog('[${_currentTime}] Ensuring Test1 and Test2 tables have 100 channels...');
+
+    // For Test1 (AbsPer columns)
+    final test1Columns = await db.rawQuery('PRAGMA table_info(Test1)');
+    final test1ColumnNames = test1Columns.map((col) => col['name'] as String).toList();
+    for (int i = 51; i <= 100; i++) { // Start from 51 as it was previously up to 50
+      final columnName = 'AbsPer$i';
+      if (!test1ColumnNames.contains(columnName)) {
+        await db.execute('ALTER TABLE Test1 ADD COLUMN $columnName REAL');
+        LogPage.addLog('[${_currentTime}] Added $columnName to Test1');
+      }
+    }
+
+    // For Test2 (ChannelName columns)
+    final test2Columns = await db.rawQuery('PRAGMA table_info(Test2)');
+    final test2ColumnNames = test2Columns.map((col) => col['name'] as String).toList();
+    for (int i = 51; i <= 100; i++) { // Start from 51 as it was previously up to 50
+      final columnName = 'ChannelName$i';
+      if (!test2ColumnNames.contains(columnName)) {
+        await db.execute('ALTER TABLE Test2 ADD COLUMN $columnName TEXT');
+        LogPage.addLog('[${_currentTime}] Added $columnName to Test2');
+      }
+    }
+    print('[DatabaseManager] Test1 and Test2 tables updated for 100 channels.');
+    LogPage.addLog('[${_currentTime}] Test1 and Test2 tables updated for 100 channels.');
+  }
+
   Future<void> _initializeDatabase(Database db) async {
     print('[DatabaseManager] Initializing database schema');
     LogPage.addLog('[${_currentTime}] Initializing database schema');
@@ -208,17 +241,19 @@ class DatabaseManager {
         XAxisUnit TEXT, XAxisCode REAL, TotalChannel INTEGER, MaxYAxis REAL, MinYAxis REAL, DBName TEXT
       )
     ''');
+    // Modified for 100 channels
     await db.execute('''
       CREATE TABLE IF NOT EXISTS Test1 (
         RecNo REAL, SNo REAL, SlNo REAL, ChangeTime TEXT, AbsDate TEXT, AbsTime TEXT,
         AbsDateTime TEXT, Shown TEXT, AbsAvg REAL,
-        ${List.generate(50, (i) => 'AbsPer${i + 1} REAL').join(', ')}
+        ${List.generate(100, (i) => 'AbsPer${i + 1} REAL').join(', ')}
       )
     ''');
+    // Modified for 100 channels
     await db.execute('''
       CREATE TABLE IF NOT EXISTS Test2 (
         RecNo REAL PRIMARY KEY,
-        ${List.generate(50, (i) => 'ChannelName${i + 1} TEXT').join(', ')}
+        ${List.generate(100, (i) => 'ChannelName${i + 1} TEXT').join(', ')}
       )
     ''');
     await db.execute('''

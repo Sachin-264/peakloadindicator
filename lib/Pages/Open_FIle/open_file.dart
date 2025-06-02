@@ -209,7 +209,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       setState(() {
         tableData = test1Data.map((row) {
           final newRow = Map<String, dynamic>.from(row);
-          for (int i = 1; i <= 50; i++) {
+          for (int i = 1; i <= 100; i++) {
             if (newRow.containsKey('AbsPer$i')) {
               newRow['AbsPer$i'] = (newRow['AbsPer$i'] as num?)?.toDouble();
             }
@@ -222,7 +222,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         graphLineColour.clear();
         maxLoadValues.clear();
 
-        for (int i = 1; i <= 50; i++) {
+        for (int i = 1; i <= 100; i++) {
           String? name = test2Row['ChannelName$i']?.toString().trim();
           if (name != null && name.isNotEmpty && name != 'null') {
             channelNames[i] = name;

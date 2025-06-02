@@ -6,7 +6,7 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:archive/archive_io.dart';
 import 'package:peakloadindicator/constants/database_manager.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart'; // <--- CORRECTED IMPORT HERE
 import '../../constants/sessionmanager.dart';
 
 
@@ -25,6 +25,7 @@ class BackupRestoreService {
 
   Future<String> _getDataFolderPathOnDisk() async {
     // MODIFIED: Changed to getApplicationDocumentsDirectory() for consistency
+    // This is consistent with your updated SessionDatabaseManager now.
     final appDocumentsDir = await getApplicationDocumentsDirectory();
     return path.join(appDocumentsDir.path, _diskDataFolderName);
   }
@@ -135,30 +136,16 @@ class BackupRestoreService {
     }
   }
 
-  Future<String> restoreDatabase() async {
-    print("[RESTORE] Starting restore process...");
+  // Renamed from restoreDatabase to performRestore and accepts backupZipPath
+  Future<String> performRestore(String backupZipPath) async {
+    print("[RESTORE] Starting restore process for: $backupZipPath");
     InputFileStream? inputStream;
 
     try {
-      // File picker logic
-      final result = await FilePicker.platform.pickFiles(
-        dialogTitle: 'Select Application Backup to Restore',
-        allowedExtensions: ['zip'],
-        type: FileType.custom,
-        lockParentWindow: true,
-      );
-
-      if (result == null || result.files.isEmpty) {
-        print("[RESTORE] User cancelled file picker. Aborting.");
-        return 'Restore cancelled by user.';
-      }
-
-      final PlatformFile selectedPlatformFile = result.files.single;
-      final String? backupZipPath = selectedPlatformFile.path;
-
-      if (backupZipPath == null || !backupZipPath.toLowerCase().endsWith('.zip')) {
-        print("[RESTORE] Invalid file selected (not a .zip or path is null): $backupZipPath");
-        return 'Restore failed: Please select a valid .zip archive.';
+      // Validation for the provided path (FilePicker result already handled in HomePage)
+      if (!backupZipPath.toLowerCase().endsWith('.zip')) {
+        print("[RESTORE] Invalid file path provided (not a .zip): $backupZipPath");
+        return 'Restore failed: Provided path is not a valid .zip archive.';
       }
       print("[RESTORE] Selected backup archive: $backupZipPath");
 
@@ -205,7 +192,7 @@ class BackupRestoreService {
       // 2. Close all other session databases tracked by SessionDatabaseManager
       // This will also attempt to close the main DB again if it was somehow still tracked,
       // but it should be safe as `db.close()` handles already closed databases.
-      await SessionDatabaseManager().closeAllSessionDatabases();
+      await SessionDatabaseManager().closeAllManagedDatabases(); // Changed to closeAllManagedDatabases for clarity
       print("[RESTORE] All SessionDatabaseManager databases reported closed. Remaining open: ${SessionDatabaseManager().hasOpenDatabases}");
 
       // Extended delay to ensure file locks are released by the OS
@@ -279,7 +266,7 @@ class BackupRestoreService {
         print("[RESTORE] No existing data folder found at $activeDataFolderPathOnDisk. No deletion needed.");
       }
 
-      // Re-create data folder structure (important if it was deleted)
+      // Re-create data folder structure (important if it was deleted or renamed)
       print("[RESTORE] Re-creating data folder structure: $activeDataFolderPathOnDisk");
       try {
         await activeDataDirOnDisk.create(recursive: true);

@@ -101,7 +101,7 @@ class Channel {
     }
 
     // Default colors (AARRGGBB format)
-    const int defaultGraphColor = 0xFF000000; // Black
+    const int defaultGraphColor = 0xFF00FF00; // Black
     const int defaultAlarmColor = 0xFFFF0000; // Red
 
     return Channel(
@@ -115,7 +115,7 @@ class Channel {
       chartMinimumValue: _parseToDouble(json['ChartMinimumValue'], 0.0),
       targetAlarmMax: _parseToNullableDouble(json['TargetAlarmMax']), // Use new nullable parser
       targetAlarmMin: _parseToNullableDouble(json['TargetAlarmMin']), // Use new nullable parser
-      graphLineColour: _parseColor(json['ChannelColour'], defaultGraphColor), // Assuming 'ChannelColour' is the field for graph line color in JSON
+      graphLineColour: _parseColor(json['graphLineColour'], defaultGraphColor), // Assuming 'graphLineColour' is the field for graph line color in JSON
       targetAlarmColour: _parseColor(json['TargetAlarmColour'], defaultAlarmColor),
     );
   }
@@ -139,7 +139,7 @@ class Channel {
       'ChartMinimumValue': chartMinimumValue,
       'TargetAlarmMax': targetAlarmMax, // Will be null or double
       'TargetAlarmMin': targetAlarmMin, // Will be null or double
-      'ChannelColour': _toColorHexString(graphLineColour), // Matches DB column name
+      'graphLineColour': _toColorHexString(graphLineColour), // Matches DB column name
       'TargetAlarmColour': _toColorHexString(targetAlarmColour),
     };
   }

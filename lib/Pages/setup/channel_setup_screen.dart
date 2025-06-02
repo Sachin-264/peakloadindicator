@@ -7,6 +7,7 @@ import '../../constants/colors.dart';
 import '../../constants/database_manager.dart';
 import '../../constants/global.dart';
 import '../../constants/theme.dart';
+import '../logScreen/log.dart';
 import 'AuthSettingScreen.dart';
 import 'edit_channel_screen.dart';
 
@@ -48,6 +49,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     _fetchPorts();
     fetchChannels();
     _animationController.forward();
+    _logActivity('ChannelSetupScreen initialized');
   }
 
   @override
@@ -55,6 +57,12 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     _animationController.dispose();
     _scanTimeController.dispose();
     super.dispose();
+  }
+
+  String get _currentTime => DateTime.now().toString().substring(0, 19);
+
+  void _logActivity(String message) {
+    LogPage.addLog('[$_currentTime] $message');
   }
 
   Future<void> _loadSavedPortDetails() async {
@@ -66,125 +74,126 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
       Global.parity.value = savedSettings?['parity'] ?? 'None';
       Global.stopBits.value = savedSettings?['stopBits'] ?? 1;
     });
+    _logActivity('Loaded saved COM port settings: ${Global.selectedPort.value}');
   }
 
-  Future<void> _savePortDetails(String port, int baudRate, int dataBits, String parity, int stopBits) async {
-    await DatabaseManager().saveComPortSettings(port, baudRate, dataBits, parity, stopBits);
+  Future<void> _savePortDetails(String portInfo, int baudRate, int dataBits, String parity, int stopBits) async {
+    try {
+      // Extract only the port name (e.g., "COM6") from portInfo
+      final portName = portInfo.split(' → ')[0];
+      await DatabaseManager().saveComPortSettings(portName, baudRate, dataBits, parity, stopBits);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Port settings saved successfully for $portName', style: GoogleFonts.montserrat(fontSize: 14)),
+          backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          margin: const EdgeInsets.all(16),
+        ),
+      );
+      _logActivity('Port settings saved: $portName');
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error saving port settings: $e', style: GoogleFonts.montserrat(fontSize: 14)),
+          backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          margin: const EdgeInsets.all(16),
+        ),
+      );
+      _logActivity('Error saving port settings: $e');
+    }
   }
 
   Future<void> _fetchPorts() async {
+    _logActivity('Attempting to fetch available COM ports...');
     try {
       final availablePorts = SerialPort.availablePorts;
       List<String> portDetails = [];
+      String? defaultPortInfo;
 
-      // Get the currently saved port name (without details) for comparison
-      final String currentlySavedPortName = Global.selectedPort.value.split(' → ')[0];
-      bool savedPortFound = false; // To track if the previously saved port is among detected ports
+      final String currentlySavedPortName = Global.selectedPort.value;
 
       if (availablePorts.isNotEmpty) {
         for (final portName in availablePorts) {
           final port = SerialPort(portName);
+          String fullPortInfo;
+
           if (port.openReadWrite()) {
             final config = port.config;
-            final baudRate = config.baudRate;
-            final dataBits = config.bits;
-            final stopBits = config.stopBits;
-            final parity = config.parity;
-
             String parityString;
-            switch (parity) {
-              case SerialPortParity.none:
-                parityString = "None";
-                break;
-              case SerialPortParity.even:
-                parityString = "Even";
-                break;
-              case SerialPortParity.odd:
-                parityString = "Odd";
-                break;
-              default:
-                parityString = "Unknown";
+            switch (config.parity) {
+              case SerialPortParity.none: parityString = "None"; break;
+              case SerialPortParity.even: parityString = "Even"; break;
+              case SerialPortParity.odd: parityString = "Odd"; break;
+              default: parityString = "Unknown";
             }
+            fullPortInfo = '$portName → Baud: ${config.baudRate}, Data Bits: ${config.bits}, Parity: $parityString, Stop Bits: ${config.stopBits}';
+            port.close();
 
-            final fullPortInfo = '$portName → Baud: $baudRate, Data Bits: $dataBits, Parity: $parityString, Stop Bits: $stopBits';
             portDetails.add(fullPortInfo);
 
-            // If the currently detected port matches the previously saved one,
-            // update the global state with its live config.
             if (portName == currentlySavedPortName) {
-              Global.selectedPort.value = fullPortInfo;
-              Global.baudRate.value = baudRate;
-              Global.dataBits.value = dataBits;
-              Global.parity.value = parityString;
-              Global.stopBits.value = stopBits;
-              savedPortFound = true; // Mark as found
-              // Removed: _savePortDetails(...) -- This is the first removal
+              defaultPortInfo = fullPortInfo;
+              _logActivity('Found saved port $portName with current details: $fullPortInfo');
             }
-
-            port.close();
           } else {
-            portDetails.add('$portName → (Could not open port)');
+            final lastError = SerialPort.lastError;
+            _logActivity('Failed to open port $portName to read config: ${lastError?.message ?? "Unknown error"}');
           }
         }
 
         setState(() {
           ports = portDetails;
 
-          // If the previously saved port was not found among the available ones,
-          // or if it was "No Ports Detected"/"Error Fetching Ports",
-          // and there are now available ports, then select the first one.
-          // IMPORTANT: This only updates the UI/in-memory Global values, not saves to DB.
-          if (!savedPortFound && portDetails.isNotEmpty) {
-            final firstPortInfo = portDetails[0];
-            Global.selectedPort.value = firstPortInfo;
-            // Parse details for Global variables from the first port.
-            final portNameForGlobals = firstPortInfo.split(' → ')[0];
-            if (firstPortInfo.contains(' → ')) { // Ensure it's a valid info string
-              final details = firstPortInfo.split(' → ')[1];
-              Global.baudRate.value = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
-              Global.dataBits.value = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
-              Global.parity.value = details.split(', ')[2].split(': ')[1];
-              Global.stopBits.value = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
-            } else { // Fallback if no details are present (e.g., 'COM1 → (Could not open port)')
-              Global.baudRate.value = 9600;
-              Global.dataBits.value = 8;
-              Global.parity.value = 'None';
-              Global.stopBits.value = 1;
-            }
-            // Removed: _savePortDetails(...) -- This is the second removal
-          } else if (ports.isEmpty) {
+          if (defaultPortInfo != null && ports.contains(defaultPortInfo)) {
+            Global.selectedPort.value = defaultPortInfo;
+          } else if (ports.isNotEmpty) {
+            Global.selectedPort.value = ports[0];
+            _logActivity('Saved port not found or not openable. Defaulting to first available port: ${ports[0]}');
+          } else {
             Global.selectedPort.value = 'No Ports Detected';
-            // Also reset Global values to defaults if no ports are detected
+            _logActivity('No ports detected. Global.selectedPort set to "No Ports Detected".');
+          }
+
+          final selectedPortValue = Global.selectedPort.value;
+          if (selectedPortValue.contains(' → ')) {
+            final parts = selectedPortValue.split(' → ');
+            final details = parts[1];
+            Global.baudRate.value = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
+            Global.dataBits.value = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
+            Global.parity.value = details.split(', ')[2].split(': ')[1];
+            Global.stopBits.value = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
+          } else {
             Global.baudRate.value = 9600;
             Global.dataBits.value = 8;
             Global.parity.value = 'None';
             Global.stopBits.value = 1;
-            // Removed: _savePortDetails('No Ports Detected', 9600, 8, 'None', 1);
           }
         });
       } else {
         setState(() {
           ports = ['No Ports Detected'];
           Global.selectedPort.value = 'No Ports Detected';
-          // Reset Global values to defaults if no ports are detected
           Global.baudRate.value = 9600;
           Global.dataBits.value = 8;
           Global.parity.value = 'None';
           Global.stopBits.value = 1;
-          // Removed: _savePortDetails('No Ports Detected', 9600, 8, 'None', 1);
         });
+        _logActivity('No COM ports found. Global.selectedPort set to "No Ports Detected".');
       }
+      _logActivity('Finished fetching COM ports.');
     } catch (e) {
       setState(() {
         ports = ['Error Fetching Ports'];
         Global.selectedPort.value = 'Error Fetching Ports';
-        // Reset Global values to defaults on error
         Global.baudRate.value = 9600;
         Global.dataBits.value = 8;
         Global.parity.value = 'None';
         Global.stopBits.value = 1;
-        // Removed: _savePortDetails('Error Fetching Ports', 9600, 8, 'None', 1);
       });
+      _logActivity('CRITICAL Error fetching ports: $e');
       print('Error fetching ports: $e');
     }
   }
@@ -204,10 +213,12 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
         _selectedRecNos.clear();
         _selectedRecNos.addAll(selectedRecNos);
       });
+      _logActivity('Fetched ${channels.length} channels from ChannelSetup. ${selectedRecNos.length} selected.');
     } catch (error) {
       setState(() {
         errorMessage = 'Error fetching channels: $error';
       });
+      _logActivity('Error fetching channels: $error');
       print('Error fetching channels: $error');
     }
   }
@@ -226,6 +237,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
           margin: const EdgeInsets.all(16),
         ),
       );
+      _logActivity('Channel $recNo deleted.');
       fetchChannels();
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -237,6 +249,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
           margin: const EdgeInsets.all(16),
         ),
       );
+      _logActivity('Error deleting channel $recNo: $e');
     }
   }
 
@@ -265,6 +278,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
           margin: const EdgeInsets.all(16),
         ),
       );
+      _logActivity('Saved ${_selectedRecNos.length} selected channels.');
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -275,6 +289,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
           margin: const EdgeInsets.all(16),
         ),
       );
+      _logActivity('Error saving selected channels: $e');
     }
   }
 
@@ -294,6 +309,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
           margin: const EdgeInsets.all(16),
         ),
       );
+      _logActivity('Channel selections cleared.');
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -304,6 +320,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
           margin: const EdgeInsets.all(16),
         ),
       );
+      _logActivity('Error clearing channel selections: $e');
     }
   }
 
@@ -327,7 +344,9 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
         );
         dialogScanTimeController.text = (autoStart['ScanTimeSec'] as num?)?.toInt().toString() ?? '';
       }
+      _logActivity('AutoStart dialog opened. Current settings loaded.');
     } catch (e) {
+      _logActivity('Error loading AutoStart settings for dialog: $e');
       print('Error loading AutoStart settings: $e');
     }
 
@@ -336,7 +355,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => Center(
           child: ConstrainedBox(
-            constraints: BoxConstraints(
+            constraints: const BoxConstraints(
               maxWidth: 400,
               minWidth: 300,
             ),
@@ -503,7 +522,10 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                       mainAxisAlignment: MainAxisAlignment.end,
                       children: [
                         TextButton(
-                          onPressed: () => Navigator.of(context).pop(),
+                          onPressed: () {
+                            Navigator.of(context).pop();
+                            _logActivity('AutoStart configuration cancelled.');
+                          },
                           child: Text(
                             'Cancel',
                             style: GoogleFonts.montserrat(
@@ -532,6 +554,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                     margin: const EdgeInsets.all(16),
                                   ),
                                 );
+                                _logActivity('Failed to save AutoStart: Invalid scan time.');
                                 return;
                               }
                               try {
@@ -559,6 +582,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                   ),
                                 );
                                 Navigator.of(context).pop();
+                                _logActivity('AutoStart settings saved successfully.');
                               } catch (e) {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(
@@ -570,6 +594,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                     margin: const EdgeInsets.all(16),
                                   ),
                                 );
+                                _logActivity('Error saving AutoStart settings: $e');
                               }
                             } else {
                               ScaffoldMessenger.of(context).showSnackBar(
@@ -581,6 +606,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                   margin: const EdgeInsets.all(16),
                                 ),
                               );
+                              _logActivity('Failed to save AutoStart: Fields not filled.');
                             }
                           },
                         ),
@@ -618,6 +644,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                       _selectedRecNos.clear();
                     }
                   });
+                  _logActivity('All channels selection toggled: $value');
                 },
                 activeColor: ThemeColors.getColor('submitButton', isDarkMode),
                 checkColor: Colors.white,
@@ -728,6 +755,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                       _selectedRecNos.remove(recNo);
                     }
                   });
+                  _logActivity('Channel $recNo selection toggled: $value');
                 },
                 activeColor: ThemeColors.getColor('submitButton', isDarkMode),
                 checkColor: Colors.white,
@@ -783,12 +811,14 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                   IconButton(
                     icon: Icon(Icons.edit, color: ThemeColors.getColor('submitButton', isDarkMode), size: 22),
                     onPressed: () async {
+                      _logActivity('Editing channel $recNo.');
                       final result = await Navigator.push(
                         context,
                         MaterialPageRoute(builder: (context) => EditChannelScreen(channel: channel)),
                       );
                       if (result == true) {
                         fetchChannels();
+                        _logActivity('Channel $recNo edited and refreshed.');
                       }
                     },
                     tooltip: 'Edit Channel',
@@ -921,13 +951,29 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                   Expanded(
                                     child: ValueListenableBuilder<String>(
                                       valueListenable: Global.selectedPort,
-                                      builder: (context, selectedPort, _) {
+                                      builder: (context, selectedPortValue, _) {
+                                        final String displayValue = selectedPortValue.split(' → ')[0];
+
+                                        String? currentSelectedPortInList;
+                                        if (ports.contains(selectedPortValue)) {
+                                          currentSelectedPortInList = selectedPortValue;
+                                        } else if (ports.isNotEmpty && selectedPortValue == 'No Ports Detected') {
+                                          currentSelectedPortInList = null;
+                                        } else if (ports.isNotEmpty && !ports.contains(selectedPortValue)) {
+                                          currentSelectedPortInList = null;
+                                        } else {
+                                          currentSelectedPortInList = null;
+                                        }
+
                                         return DropdownButtonFormField<String>(
-                                          value: ports.contains(selectedPort)
-                                              ? selectedPort
-                                              : ports.isNotEmpty
-                                              ? ports[0]
-                                              : null,
+                                          value: currentSelectedPortInList,
+                                          hint: Text(
+                                            displayValue,
+                                            style: GoogleFonts.montserrat(
+                                              fontSize: 14,
+                                              color: ThemeColors.getColor('dialogText', isDarkMode),
+                                            ),
+                                          ),
                                           decoration: InputDecoration(
                                             labelText: 'Port',
                                             labelStyle: GoogleFonts.montserrat(
@@ -967,11 +1013,11 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                             color: ThemeColors.getColor('dialogText', isDarkMode),
                                           ),
                                           dropdownColor: isDarkMode ? ThemeColors.getColor('dropdownBackground', isDarkMode) : Colors.white,
-                                          items: ports.map((port) {
+                                          items: ports.map((portInfo) {
                                             return DropdownMenuItem<String>(
-                                              value: port,
+                                              value: portInfo,
                                               child: Text(
-                                                port,
+                                                portInfo.split(' → ')[0],
                                                 style: GoogleFonts.montserrat(
                                                   fontSize: 14,
                                                   color: ThemeColors.getColor('dialogText', isDarkMode),
@@ -983,7 +1029,6 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                             if (value != null) {
                                               Global.selectedPort.value = value;
                                               final parts = value.split(' → ');
-                                              String portName = parts[0];
                                               if (parts.length > 1) {
                                                 final details = parts[1];
                                                 Global.baudRate.value = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
@@ -996,6 +1041,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                                 Global.parity.value = 'None';
                                                 Global.stopBits.value = 1;
                                               }
+                                              _logActivity('Selected port: ${Global.selectedPort.value}');
                                             }
                                           },
                                         );
@@ -1008,28 +1054,29 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                     icon: Icons.save,
                                     gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'backup'),
                                     onTap: () {
-                                      final value = Global.selectedPort.value;
-                                      final parts = value.split(' → ');
-                                      String portName = parts[0];
-                                      if (parts.length > 1) {
-                                        final details = parts[1];
-                                        final baudRate = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
-                                        final dataBits = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
-                                        final parity = details.split(', ')[2].split(': ')[1];
-                                        final stopBits = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
-                                        _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
-                                      } else {
-                                        _savePortDetails(portName, 9600, 8, 'None', 1);
+                                      final selectedPortValue = Global.selectedPort.value;
+                                      if (selectedPortValue == 'No Ports Detected' || selectedPortValue == 'Error Fetching Ports') {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          SnackBar(
+                                            content: Text('Cannot save. No valid port selected.', style: GoogleFonts.montserrat(fontSize: 14)),
+                                            backgroundColor: ThemeColors.getColor('errorText', isDarkMode),
+                                            behavior: SnackBarBehavior.floating,
+                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                            margin: const EdgeInsets.all(16),
+                                          ),
+                                        );
+                                        _logActivity('Attempted to save invalid port: $selectedPortValue');
+                                        return;
                                       }
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(
-                                          content: Text('Port settings saved successfully', style: GoogleFonts.montserrat(fontSize: 14)),
-                                          backgroundColor: ThemeColors.getColor('submitButton', isDarkMode),
-                                          behavior: SnackBarBehavior.floating,
-                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                          margin: const EdgeInsets.all(16),
-                                        ),
-                                      );
+
+                                      final parts = selectedPortValue.split(' → ');
+                                      String portName = parts[0];
+                                      int baudRate = Global.baudRate.value;
+                                      int dataBits = Global.dataBits.value;
+                                      String parity = Global.parity.value;
+                                      int stopBits = Global.stopBits.value;
+
+                                      _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
                                     },
                                     isSmall: true,
                                   ),
@@ -1101,6 +1148,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                 context,
                                 MaterialPageRoute(builder: (context) => const AuthSettingsScreen()),
                               );
+                              _logActivity('Navigated to Authentication Settings.');
                             },
                             borderRadius: BorderRadius.circular(16),
                             child: Container(
