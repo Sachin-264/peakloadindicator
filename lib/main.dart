@@ -373,22 +373,15 @@ void main() async {
   databaseFactory = databaseFactoryFfi;
 
   doWhenWindowReady(() {
-    const initialSize = Size(1280, 720);
-    appWindow.minSize = const Size(800, 600);
-    appWindow.size = initialSize;
-    appWindow.alignment = Alignment.center;
+    appWindow.minSize = const Size(800, 600); // Keep minSize for when it's restored
     appWindow.title = 'Peak Load Indicator';
+    appWindow.maximize(); // <-- This is the key change to maximize
     appWindow.show();
 
-    // **NEW: Add a small delay and then force a re-render**
-    // This is a common workaround for initial blank window issues with bitsdojo_window
-    Future.delayed(const Duration(milliseconds: 100), () {
-      // This will trigger a re-layout and re-paint for the window.
-      // It's a bit of a hack, but often solves the "white screen until resize" problem.
-      appWindow.size = Size(appWindow.size.width + 1, appWindow.size.height + 1);
-      appWindow.size = initialSize; // Restore original size immediately
-    });
-
+    // The delayed re-render hack is typically not needed when maximizing,
+    // as bitsdojo_window usually handles the maximized state correctly.
+    // If you encounter a blank window issue after this change,
+    // you might need to re-evaluate, but for maximization, it's usually fine without it.
   });
 
   runApp(const MyApp());
@@ -479,4 +472,3 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
     );
   }
 }
-

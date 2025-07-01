@@ -452,23 +452,12 @@ class _HomePageState extends State<HomePage>
   void _showOpenFileDialog(BuildContext context) {
     showDialog(
       context: context,
-      builder: (BuildContext context) {
+      builder: (BuildContext dialogContext) { // Use dialogContext for this dialog's Navigator
         // FileSelectionDialog is assumed to be in file_browser_page.dart
         return FileSelectionDialog(
           controller: _fileNameController,
-          onOpenPressed: () {
-            if (_fileNameController.text.isNotEmpty) {
-              Navigator.of(context).pop(); // Close the dialog
-              setState(() {
-                _selectedIndex = 1; // Set index to "Open File"
-                // Replace the placeholder at index 1 with the actual OpenFilePage
-                _pages[1] = OpenFilePage(fileName: _fileNameController.text);
-              });
-              _fileNameController.clear(); // Clear controller after use
-            } else {
-              MessageUtils.showMessage(context, 'Please select or enter a file name!', isError: true);
-            }
-          },
+          // Removed onOpenPressed here, as the open action is now only on main dialog's button
+          // The FileSelectionDialog's internal onTap will just populate the _fileNameController
         );
       },
     );
@@ -485,7 +474,7 @@ class _HomePageState extends State<HomePage>
         // These pages should occupy the full screen without the sidebar.
         final bool shouldHideSidebar = (_selectedIndex == 0 && (
             _pages[0] is SerialPortScreen ||
-                _pages[0] is AutoStartScreen // ADDED: Check for AutoStartScreen
+                _pages[0] is AutoStartScreen
         ));
 
         return Scaffold(
@@ -505,173 +494,182 @@ class _HomePageState extends State<HomePage>
                 // Custom title bar for window controls and branding
                 Container(
                   decoration: BoxDecoration(
-                      color: ThemeColors.getColor('dialogBackground', isDarkMode).withOpacity(0.95),
+                    color: ThemeColors.getColor('dialogBackground', isDarkMode).withOpacity(0.95),
                     boxShadow: [
-                  BoxShadow(
-                  color: Colors.black.withOpacity(0.2),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: CustomTitleBar(title: 'Countronics Smart Logger'), // Assumed from main.dart
-          ),
-          Expanded(
-            // MODIFIED: Use shouldHideSidebar to control sidebar visibility
-            child: shouldHideSidebar
-                ? _pages[_selectedIndex] // If a special fullscreen page is active, show only it
-                : Row( // Otherwise, show sidebar + main content area
-              children: [
-                // Sidebar: Expands on hover
-                MouseRegion(
-                  onEnter: (_) => _isSidebarExpanded.value = true,
-                  onExit: (_) => _isSidebarExpanded.value = false,
-                  child: ValueListenableBuilder<bool>(
-                    valueListenable: _isSidebarExpanded,
-                    builder: (context, isExpanded, child) {
-                      return AnimatedContainer(
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeOutQuart,
-                        width: isExpanded ? 260.0 : 80.0, // Expanded vs. collapsed width
-                        decoration: BoxDecoration(
-                          gradient: ThemeColors.getSidebarGradient(isDarkMode),
-                          borderRadius: const BorderRadius.only(
-                            topRight: Radius.circular(24),
-                            bottomRight: Radius.circular(24),
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.3),
-                              blurRadius: 12,
-                              offset: const Offset(4, 0),
-                            ),
-                          ],
-                        ),
-                        child: child,
-                      );
-                    },
-                    child: SingleChildScrollView( // Allows scrolling if many buttons
-                      child: Column(
-                        children: [
-                          // Sidebar Logo (Home Button)
-                          SidebarLogo(
-                            onTap: () async { // <<--- MODIFIED: Make async and load data
-                              await _loadSystemData(); // Fetch latest data for dashboard before displaying
-                              setState(() {
-                                _selectedIndex = -1; // Navigate to dashboard
-                              });
-                              _animationController.forward(from: 0.0); // Trigger page transition animation
-                              _logActivity('Navigated to Dashboard');
-                            },
-                            isSidebarExpanded: _isSidebarExpanded,
-                            isDarkMode: isDarkMode,
-                          ),
-                          const SizedBox(height: 16),
-                          // Sidebar navigation buttons
-                          _buildSidebarButton(
-                            icon: LucideIcons.activity,
-                            index: 0,
-                            label: 'New Test',
-                            isDarkMode: isDarkMode,
-                            context: context,
-                          ),
-                          _buildSidebarButton(
-                            icon: LucideIcons.folderSearch,
-                            index: 1,
-                            label: 'Open File',
-                            isDarkMode: isDarkMode,
-                            context: context,
-                          ),
-                          _buildSidebarButton(
-                            icon: LucideIcons.monitor,
-                            index: 2,
-                            label: 'Select Mode',
-                            isDarkMode: isDarkMode,
-                            context: context,
-                          ),
-                          _buildSidebarButton(
-                            icon: LucideIcons.settings,
-                            index: 3,
-                            label: 'Setup',
-                            isDarkMode: isDarkMode,
-                            context: context,
-                          ),
-                          _buildSidebarButton(
-                            icon: LucideIcons.databaseBackup,
-                            index: 4,
-                            label: 'Backup',
-                            isDarkMode: isDarkMode,
-                            context: context,
-                          ),
-                          _buildSidebarButton(
-                            icon: LucideIcons.fileText,
-                            index: 5,
-                            label: 'Log',
-                            isDarkMode: isDarkMode,
-                            context: context,
-                          ),
-                          _buildSidebarButton(
-                            icon: LucideIcons.lifeBuoy,
-                            index: 6,
-                            label: 'Help',
-                            isDarkMode: isDarkMode,
-                            context: context,
-                          ),
-                          const Divider(
-                            color: Colors.white54,
-                            indent: 10,
-                            endIndent: 10,
-                          ),
-                          // Theme toggle button
-                          SidebarButton(
-                            icon: isDarkMode ? LucideIcons.sun : LucideIcons.moon,
-                            label: isDarkMode ? 'Light Mode' : 'Dark Mode',
-                            isSelected: false, // This button is never "selected" in the main nav
-                            onTap: () {
-                              Global.saveTheme(!isDarkMode); // Toggle and save theme preference
-                              _animationController.forward(from: 0.0); // Trigger transition
-                              _logActivity('Toggled theme to ${isDarkMode ? 'Light' : 'Dark'} mode');
-                            },
-                            isSidebarExpanded: _isSidebarExpanded,
-                            isDarkMode: isDarkMode,
-                          ),
-                          const SizedBox(height: 10),
-                        ],
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.2),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
                       ),
-                    ),
+                    ],
                   ),
+                  child: CustomTitleBar(title: 'Countron Smart Logger'), // Assumed from main.dart
                 ),
-                // Main content area, displays the selected page or dashboard
                 Expanded(
-                  child: FadeTransition(
-                    opacity: _fadeAnimation,
-                    child: AnimatedSwitcher( // Smoothly switches between pages
-                      duration: const Duration(milliseconds: 300),
-                      transitionBuilder: (child, animation) {
-                        return SlideTransition(
-                          position: Tween<Offset>(
-                            begin: const Offset(0.1, 0),
-                            end: Offset.zero,
-                          ).animate(animation),
-                          child: FadeTransition(
-                            opacity: animation,
-                            child: child,
+                  // MODIFIED: Use shouldHideSidebar to control sidebar visibility
+                  child: shouldHideSidebar
+                      ? _pages[_selectedIndex] // If a special fullscreen page is active, show only it
+                      : Row( // Otherwise, show sidebar + main content area
+                    children: [
+                      // Sidebar: Expands on hover
+                      MouseRegion(
+                        onEnter: (_) => _isSidebarExpanded.value = true,
+                        onExit: (_) => _isSidebarExpanded.value = false,
+                        child: ValueListenableBuilder<bool>(
+                          valueListenable: _isSidebarExpanded,
+                          builder: (context, isExpanded, child) {
+                            return AnimatedContainer(
+                              duration: const Duration(milliseconds: 300),
+                              curve: Curves.easeOutQuart,
+                              width: isExpanded ? 260.0 : 80.0, // Expanded vs. collapsed width
+                              decoration: BoxDecoration(
+                                gradient: ThemeColors.getSidebarGradient(isDarkMode),
+                                borderRadius: const BorderRadius.only(
+                                  topRight: Radius.circular(24),
+                                  bottomRight: Radius.circular(24),
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.3),
+                                    blurRadius: 12,
+                                    offset: const Offset(4, 0),
+                                  ),
+                                ],
+                              ),
+                              child: child,
+                            );
+                          },
+                          child: SingleChildScrollView( // Allows scrolling if many buttons
+                            child: Column(
+                              children: [
+                                // Sidebar Logo (Home Button) - also acts as a Home shortcut
+                                SidebarLogo(
+                                  onTap: () async {
+                                    await _loadSystemData(); // Refresh data for dashboard
+                                    setState(() {
+                                      _selectedIndex = -1; // Navigate to dashboard
+                                    });
+                                    _animationController.forward(from: 0.0); // Trigger page transition animation
+                                    _logActivity('Navigated to Dashboard via Logo');
+                                  },
+                                  isSidebarExpanded: _isSidebarExpanded,
+                                  isDarkMode: isDarkMode,
+                                ),
+                                const SizedBox(height: 16),
+                                // NEW: Explicit Home button
+                                _buildSidebarButton(
+                                  icon: LucideIcons.home,
+                                  index: -1, // Use -1 for Dashboard
+                                  label: 'Home',
+                                  isDarkMode: isDarkMode,
+                                  context: context,
+                                ),
+                                const SizedBox(height: 16), // Spacing after Home button
+                                // Sidebar navigation buttons
+                                _buildSidebarButton(
+                                  icon: LucideIcons.activity,
+                                  index: 0,
+                                  label: 'New Test',
+                                  isDarkMode: isDarkMode,
+                                  context: context,
+                                ),
+                                _buildSidebarButton(
+                                  icon: LucideIcons.folderSearch,
+                                  index: 1,
+                                  label: 'Open File',
+                                  isDarkMode: isDarkMode,
+                                  context: context,
+                                ),
+                                _buildSidebarButton(
+                                  icon: LucideIcons.monitor,
+                                  index: 2,
+                                  label: 'Select Mode',
+                                  isDarkMode: isDarkMode,
+                                  context: context,
+                                ),
+                                _buildSidebarButton(
+                                  icon: LucideIcons.settings,
+                                  index: 3,
+                                  label: 'Setup',
+                                  isDarkMode: isDarkMode,
+                                  context: context,
+                                ),
+                                _buildSidebarButton(
+                                  icon: LucideIcons.databaseBackup,
+                                  index: 4,
+                                  label: 'Backup',
+                                  isDarkMode: isDarkMode,
+                                  context: context,
+                                ),
+                                _buildSidebarButton(
+                                  icon: LucideIcons.fileText,
+                                  index: 5,
+                                  label: 'Log',
+                                  isDarkMode: isDarkMode,
+                                  context: context,
+                                ),
+                                _buildSidebarButton(
+                                  icon: LucideIcons.lifeBuoy,
+                                  index: 6,
+                                  label: 'Help',
+                                  isDarkMode: isDarkMode,
+                                  context: context,
+                                ),
+                                const Divider(
+                                  color: Colors.white54,
+                                  indent: 10,
+                                  endIndent: 10,
+                                ),
+                                // Theme toggle button
+                                SidebarButton(
+                                  icon: isDarkMode ? LucideIcons.sun : LucideIcons.moon,
+                                  label: isDarkMode ? 'Light Mode' : 'Dark Mode',
+                                  isSelected: false, // This button is never "selected" in the main nav
+                                  onTap: () {
+                                    Global.saveTheme(!isDarkMode); // Toggle and save theme preference
+                                    _animationController.forward(from: 0.0); // Trigger transition
+                                    _logActivity('Toggled theme to ${isDarkMode ? 'Light' : 'Dark'} mode');
+                                  },
+                                  isSidebarExpanded: _isSidebarExpanded,
+                                  isDarkMode: isDarkMode,
+                                ),
+                                const SizedBox(height: 10),
+                              ],
+                            ),
                           ),
-                        );
-                      },
-                      // Display either the Dashboard or the selected page
-                      child: _selectedIndex == -1
-                          ? _buildDashboard(isDarkMode) // Dashboard content
-                          : _pages[_selectedIndex],      // Selected page content
-                    ),
+                        ),
+                      ),
+                      // Main content area, displays the selected page or dashboard
+                      Expanded(
+                        child: FadeTransition(
+                          opacity: _fadeAnimation,
+                          child: AnimatedSwitcher( // Smoothly switches between pages
+                            duration: const Duration(milliseconds: 300),
+                            transitionBuilder: (child, animation) {
+                              return SlideTransition(
+                                position: Tween<Offset>(
+                                  begin: const Offset(0.1, 0),
+                                  end: Offset.zero,
+                                ).animate(animation),
+                                child: FadeTransition(
+                                  opacity: animation,
+                                  child: child,
+                                ),
+                              );
+                            },
+                            // Display either the Dashboard or the selected page
+                            child: _selectedIndex == -1
+                                ? _buildDashboard(isDarkMode) // Dashboard content
+                                : _pages[_selectedIndex],      // Selected page content
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
           ),
-          ],
-        ),
-        ),
         );
       },
     );
@@ -689,8 +687,15 @@ class _HomePageState extends State<HomePage>
       icon: icon,
       label: label,
       isSelected: _selectedIndex == index,
-      onTap: () {
-        if (index == 4) { // Backup button: shows dialog
+      onTap: () async { // Made async to allow _loadSystemData
+        if (index == -1) { // Home button
+          await _loadSystemData(); // Refresh data for dashboard
+          setState(() {
+            _selectedIndex = -1; // Set index to dashboard
+          });
+          _animationController.forward(from: 0.0); // Trigger animation
+          _logActivity('Navigated to Dashboard via Home button');
+        } else if (index == 4) { // Backup button: shows dialog
           _showBackupDialog(context);
         } else if (index == 2) { // Select Mode button: shows dialog
           _showSetupDialog(context);
@@ -1310,7 +1315,7 @@ class _SidebarLogoState extends State<SidebarLogo> with SingleTickerProviderStat
 
   @override
   Widget build(BuildContext context) {
-    const String logoText = 'Countronics';
+    const String logoText = 'Countron';
     return MouseRegion(
       onEnter: _onEnter,
       onExit: _onExit,
