@@ -469,7 +469,7 @@ class _FileSelectionDialogState extends State<FileSelectionDialog> {
                                 PageRouteBuilder(
                                   transitionDuration: const Duration(milliseconds: 400), // Duration of the animation
                                   pageBuilder: (context, animation, secondaryAnimation) =>
-                                      OpenFilePage(fileName: widget.controller.text),
+                                      OpenFilePage(fileName: widget.controller.text, onExit: () {  },),
                                   transitionsBuilder: (context, animation, secondaryAnimation, child) {
                                     // Fade in and slight scale up animation
                                     return FadeTransition(

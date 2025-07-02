@@ -6,12 +6,11 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-// import 'dart:convert'; // Not used, can remove
 import '../../constants/database_manager.dart';
 import '../../constants/export.dart';
 import '../../constants/global.dart';
 import '../../constants/theme.dart';
-import '../../constants/sessionmanager.dart'; // NEW: Import SessionDatabaseManager
+import '../../constants/sessionmanager.dart';
 import '../NavPages/channel.dart';
 import '../Secondary_window/save_secondary_window.dart';
 import 'package:flutter/rendering.dart';
@@ -21,11 +20,18 @@ import '../logScreen/log.dart';
 
 class OpenFilePage extends StatefulWidget {
   final String fileName;
-  const OpenFilePage({super.key, required this.fileName});
+  final VoidCallback onExit; // <-- ADDED: Callback to exit the page
+
+  const OpenFilePage({
+    super.key,
+    required this.fileName,
+    required this.onExit, // <-- ADDED: Required in constructor
+  });
 
   @override
   State<OpenFilePage> createState() => _OpenFilePageState();
 }
+
 
 class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderStateMixin {
   final _fileNameController = TextEditingController();
@@ -108,7 +114,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       _fetchError = null;
     });
     try {
-      await _initializeDatabase(); // This is where the core change will be
+      await _initializeDatabase();
       await _fetchChannelSetupData();
       setState(() {
         _isDatabaseInitialized = true;
@@ -123,38 +129,20 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     }
   }
 
-  // MODIFIED: This method now uses SessionDatabaseManager
   Future<void> _initializeDatabase() async {
-    // These lines should typically be called once at app startup (e.g., in main.dart)
-    // and are not needed here if sqflite_common_ffi is already initialized globally.
-    // sqfliteFfiInit();
-    // databaseFactory = databaseFactoryFfi;
-
-    // Ensure the data folder exists if it doesn't already
     final appDocumentsDir = await getApplicationSupportDirectory();
     final dataDirPath = path.join(appDocumentsDir.path, 'CountronicsData');
     await Directory(dataDirPath).create(recursive: true);
 
-    // Get the database name from Global.selectedDBName. This is the session-specific DB name.
-    final dbName = Global.selectedDBName.value; // This should be populated before calling OpenFilePage
+    final dbName = Global.selectedDBName.value;
     if (dbName == null || dbName.isEmpty) {
       throw Exception("Database name (DBName) not provided in Global.selectedDBName. Cannot open session database.");
     }
-
-    // CRITICAL CHANGE: Use SessionDatabaseManager to open the session-specific database.
-    // This ensures it is tracked and will be closed by SessionDatabaseManager().closeAllSessionDatabases().
-    // IMPORTANT: Session-specific databases in 'CountronicsData' are generally NOT encrypted
-    // with the main app's PRAGMA key unless you specifically applied it when creating them.
-    // Your SerialPortScreen._saveData does NOT apply a key to the session DBs, so remove PRAGMA key here.
     _database = await SessionDatabaseManager().openSessionDatabase(dbName);
-
     LogPage.addLog('[$_currentTime] [INITIALIZE_DATABASE] Session database opened and tracked: $dbName');
   }
 
-  // This method still fetches from the main database (Countronics.db)
-  // to get the ChannelSetup data, which is correct.
   Future<void> _fetchChannelSetupData() async {
-    // We need to get the main application database for ChannelSetup data
     final mainDatabase = await DatabaseManager().database;
     try {
       final List<Map<String, dynamic>> channelSetupRaw = await mainDatabase.query('ChannelSetup');
@@ -168,101 +156,62 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       LogPage.addLog('[$_currentTime] Fetched ${_channelSetupData.length} entries from ChannelSetup');
     } catch (e) {
       LogPage.addLog('[$_currentTime] Error fetching ChannelSetup data: $e');
-      // If ChannelSetup is critical and fails, you might want to throw or set an error state.
     }
   }
 
   Future<void> fetchData({bool showFull = false}) async {
-    // This method now uses the _database instance which is the session-specific DB
-    // opened and tracked by SessionDatabaseManager.
     if (!_isDatabaseInitialized || Global.selectedRecNo?.value == null) {
       LogPage.addLog('[$_currentTime] [FETCH_DATA] Skipping fetch: database not initialized or RecNo is null');
       setState(() {
         _isLoading = false;
-        if (Global.selectedRecNo?.value == null) {
-          _fetchError = "No record selected to fetch data.";
-        } else {
-          _fetchError = "Database not ready.";
-        }
+        _fetchError = Global.selectedRecNo?.value == null ? "No record selected to fetch data." : "Database not ready.";
       });
       return;
     }
-    setState(() {
-      _isLoading = true;
-      _fetchError = null;
-    });
+    setState(() { _isLoading = true; _fetchError = null; });
     try {
       LogPage.addLog('[$_currentTime] [FETCH_DATA] Fetching data for RecNo: ${Global.selectedRecNo!.value}');
-
-      // Using the _database which is the session-specific one
-      final test1Data = await _database.query(
-        'Test1',
-        where: 'RecNo = ?',
-        whereArgs: [Global.selectedRecNo!.value],
-      );
-      final test2Data = await _database.query(
-        'Test2',
-        where: 'RecNo = ?',
-        whereArgs: [Global.selectedRecNo!.value],
-      );
+      final test1Data = await _database.query('Test1', where: 'RecNo = ?', whereArgs: [Global.selectedRecNo!.value]);
+      final test2Data = await _database.query('Test2', where: 'RecNo = ?', whereArgs: [Global.selectedRecNo!.value]);
 
       setState(() {
         tableData = test1Data.map((row) {
           final newRow = Map<String, dynamic>.from(row);
           for (int i = 1; i <= 100; i++) {
-            if (newRow.containsKey('AbsPer$i')) {
-              newRow['AbsPer$i'] = (newRow['AbsPer$i'] as num?)?.toDouble();
-            }
+            if (newRow.containsKey('AbsPer$i')) newRow['AbsPer$i'] = (newRow['AbsPer$i'] as num?)?.toDouble();
           }
           return newRow;
         }).toList();
 
         final test2Row = test2Data.isNotEmpty ? test2Data[0] : {};
-        channelNames.clear();
-        graphLineColour.clear();
-        maxLoadValues.clear();
+        channelNames.clear(); graphLineColour.clear(); maxLoadValues.clear();
 
         for (int i = 1; i <= 100; i++) {
           String? name = test2Row['ChannelName$i']?.toString().trim();
           if (name != null && name.isNotEmpty && name != 'null') {
             channelNames[i] = name;
-            final setupChannel = _channelSetupData[name]; // Get config from main DB
-            if (setupChannel != null && setupChannel.graphLineColour != 0 && setupChannel.graphLineColour != const Color(0xFF000000).value) {
-              graphLineColour[i] = Color(setupChannel.graphLineColour);
-            } else {
-              graphLineColour[i] = _getDefaultColor(i);
-            }
+            final setupChannel = _channelSetupData[name];
+            graphLineColour[i] = (setupChannel != null && setupChannel.graphLineColour != 0 && setupChannel.graphLineColour != const Color(0xFF000000).value)
+                ? Color(setupChannel.graphLineColour)
+                : _getDefaultColor(i);
 
             if (tableData.isNotEmpty) {
-              var values = tableData
-                  .map((row) => (row['AbsPer$i'] as num?)?.toDouble())
-                  .where((value) => value != null)
-                  .cast<double>()
-                  .toList();
-              if (values.isNotEmpty) {
-                maxLoadValues[i] = values.reduce((a, b) => a > b ? a : b);
-              }
+              var values = tableData.map((row) => (row['AbsPer$i'] as num?)?.toDouble()).where((v) => v != null).cast<double>().toList();
+              if (values.isNotEmpty) maxLoadValues[i] = values.reduce((a, b) => a > b ? a : b);
             }
           } else {
             break;
           }
         }
-
         selectedChannel = channelNames.isNotEmpty ? 'All' : null;
-        _calculateGraphSegments();
-        _calculateYRange();
-        _initializeControllers();
+        _calculateGraphSegments(); _calculateYRange(); _initializeControllers();
       });
       LogPage.addLog('[$_currentTime] [FETCH_DATA] Data fetched successfully.');
     } catch (e) {
       LogPage.addLog('[$_currentTime] [FETCH_DATA] Error fetching data: $e');
-      setState(() {
-        _fetchError = 'Error fetching data: $e';
-      });
+      setState(() { _fetchError = 'Error fetching data: $e'; });
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      setState(() { _isLoading = false; });
     }
   }
 
@@ -490,6 +439,44 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     }
   }
 
+  void _highlightPeakOnGraph() { /* Placeholder */ }
+
+  String _getUnitForChannel(String channelName) {
+    final setupChannel = _channelSetupData[channelName];
+    if (setupChannel != null && setupChannel.unit.isNotEmpty) return setupChannel.unit;
+    if (channelName.toLowerCase().contains('load')) return 'kN';
+    if (channelName.toLowerCase() == 'mixed') return '-';
+    return '%';
+  }
+
+  // --- NEW WIDGET FOR THE EXIT BUTTON ---
+  Widget _buildExitButton(bool isDarkMode) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        icon: Icon(Icons.arrow_back_ios_new, size: 16, color: ThemeColors.getColor('resetButton', isDarkMode)),
+        label: Text(
+          "Exit to Dashboard",
+          style: GoogleFonts.roboto(
+            color: ThemeColors.getColor('resetButton', isDarkMode),
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+          ),
+        ),
+        onPressed: widget.onExit, // Use the callback from the widget
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: BorderSide(color: ThemeColors.getColor('resetButton', isDarkMode).withOpacity(0.5)),
+          ),
+          backgroundColor: ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.5),
+        ),
+      ),
+    );
+  }
+  // --- END OF NEW WIDGET ---
+
   Widget _buildGraphNavigation(bool isDarkMode) {
     Color iconColor = ThemeColors.getColor('dialogText', isDarkMode);
     Color textColor = ThemeColors.getColor('dialogSubText', isDarkMode);
@@ -505,12 +492,12 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   IconButton(
-                    icon: Icon(Icons.zoom_in, size: 24, color: iconColor), // Increased
+                    icon: Icon(Icons.zoom_in, size: 24, color: iconColor),
                     onPressed: () => setState(() { zoomLevel *= 1.2; _animationController.forward(from: 0); _calculateYRange(); }),
                     tooltip: 'Zoom In', splashRadius: 22,
                   ),
                   IconButton(
-                    icon: Icon(Icons.zoom_out, size: 24, color: iconColor), // Increased
+                    icon: Icon(Icons.zoom_out, size: 24, color: iconColor),
                     onPressed: () => setState(() { zoomLevel /= 1.2; if (zoomLevel < 0.1) zoomLevel = 0.1; _animationController.forward(from: 0); _calculateYRange(); }),
                     tooltip: 'Zoom Out', splashRadius: 22,
                   ),
@@ -521,7 +508,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     IconButton(
-                      icon: Icon(Icons.chevron_left, size: 24, color: currentSegment > 0 ? iconColor : Colors.grey.withOpacity(0.7)), // Increased
+                      icon: Icon(Icons.chevron_left, size: 24, color: currentSegment > 0 ? iconColor : Colors.grey.withOpacity(0.7)),
                       onPressed: currentSegment > 0 ? () => setState(() => currentSegment--) : null,
                       tooltip: 'Previous Segment', splashRadius: 22,
                     ),
@@ -529,11 +516,11 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                       padding: const EdgeInsets.symmetric(horizontal: 8.0),
                       child: Text(
                         'Segment ${currentSegment + 1}/$totalSegments',
-                        style: GoogleFonts.roboto(color: textColor, fontWeight: FontWeight.w500, fontSize: 13), // Increased
+                        style: GoogleFonts.roboto(color: textColor, fontWeight: FontWeight.w500, fontSize: 13),
                       ),
                     ),
                     IconButton(
-                      icon: Icon(Icons.chevron_right, size: 24, color: currentSegment < totalSegments - 1 ? iconColor : Colors.grey.withOpacity(0.7)), // Increased
+                      icon: Icon(Icons.chevron_right, size: 24, color: currentSegment < totalSegments - 1 ? iconColor : Colors.grey.withOpacity(0.7)),
                       onPressed: currentSegment < totalSegments - 1 ? () => setState(() => currentSegment++) : null,
                       tooltip: 'Next Segment', splashRadius: 22,
                     ),
@@ -544,17 +531,14 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   IconButton(
-                    icon: Icon(Icons.analytics_outlined, color: showPeak ? ThemeColors.getColor('errorText', isDarkMode) : iconColor, size: 24), // Increased
+                    icon: Icon(Icons.analytics_outlined, color: showPeak ? ThemeColors.getColor('errorText', isDarkMode) : iconColor, size: 24),
                     onPressed: () {
                       setState(() => showPeak = !showPeak);
-                      if (showPeak && selectedChannel != null && selectedChannel != 'All') {
-                        // SnackBar logic...
-                      }
                     },
                     tooltip: 'Show Peak Value', splashRadius: 22,
                   ),
                   IconButton(
-                    icon: Icon(showDataPoints ? Icons.scatter_plot_outlined : Icons.show_chart_outlined, color: iconColor, size: 24), // Increased
+                    icon: Icon(showDataPoints ? Icons.scatter_plot_outlined : Icons.show_chart_outlined, color: iconColor, size: 24),
                     onPressed: () => setState(() => showDataPoints = !showDataPoints),
                     tooltip: 'Toggle Data Points', splashRadius: 22,
                   ),
@@ -568,7 +552,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ),
     );
   }
-
   Widget _buildChannelLegend(bool isDarkMode) {
     if (channelNames.isEmpty) return const SizedBox.shrink();
 
@@ -606,7 +589,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                     const SizedBox(width: 6),
                     Text(
                       channelName,
-                      style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 12, fontWeight: FontWeight.w500), // Increased
+                      style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 12, fontWeight: FontWeight.w500),
                     ),
                   ],
                 ),
@@ -617,17 +600,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ),
     );
   }
-
-  void _highlightPeakOnGraph() { /* Placeholder */ }
-
-  String _getUnitForChannel(String channelName) {
-    final setupChannel = _channelSetupData[channelName];
-    if (setupChannel != null && setupChannel.unit.isNotEmpty) return setupChannel.unit;
-    if (channelName.toLowerCase().contains('load')) return 'kN';
-    if (channelName.toLowerCase() == 'mixed') return '-';
-    return '%';
-  }
-
   Widget _buildGraph({List<Map<String, dynamic>>? filteredData, required bool isDarkMode}) {
     final dataToUse = filteredData ?? tableData;
 
@@ -793,7 +765,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ],
     );
   }
-
   Widget _buildDataTable(bool isDarkMode) {
     if (_isLoading && tableData.isEmpty) return Center(child: CircularProgressIndicator(color: ThemeColors.getColor('submitButton', isDarkMode)));
     if (_fetchError != null && tableData.isEmpty) return Center(child: Text(_fetchError!, style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('errorText', isDarkMode))));
@@ -822,7 +793,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                         headingRowColor: MaterialStateProperty.resolveWith((states) => ThemeColors.getColor('tableHeaderBackground', isDarkMode)),
                         headingTextStyle: GoogleFonts.roboto(fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13),
                         dataRowMinHeight: 38, dataRowMaxHeight: 44,
-                        columnSpacing: 35, // MODIFIED from 18
+                        columnSpacing: 35,
                         border: TableBorder.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5), width: 0.5),
                         columns: [
                           DataColumn(label: Text('No'), numeric: true),
@@ -862,13 +833,12 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ),
     );
   }
-
   Widget _buildTimeInputField(TextEditingController controller, String label, {bool compact = false, required bool isDarkMode}) {
-    double fieldWidth = compact ? 55 : 70; // Increased
-    double fontSize = compact ? 11 : 13;   // Increased
+    double fieldWidth = compact ? 55 : 70;
+    double fontSize = compact ? 11 : 13;
     EdgeInsets contentPadding = compact
-        ? const EdgeInsets.symmetric(horizontal: 8, vertical: 10) // Increased
-        : const EdgeInsets.symmetric(horizontal: 10, vertical: 14); // Increased
+        ? const EdgeInsets.symmetric(horizontal: 8, vertical: 10)
+        : const EdgeInsets.symmetric(horizontal: 10, vertical: 14);
 
     return SizedBox(
       width: fieldWidth,
@@ -878,7 +848,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         textAlign: TextAlign.center,
         decoration: InputDecoration(
           labelText: label,
-          labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: fontSize), // No -1
+          labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: fontSize),
           filled: true,
           fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none),
@@ -911,22 +881,20 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ),
     );
   }
-
   Widget _buildControlButton(String text, VoidCallback onPressed, {Color? explicitColor, bool? disabled, required bool isDarkMode, IconData? icon}) {
     return ElevatedButton.icon(
-      icon: icon != null ? Icon(icon, size: 20, color: Colors.white) : const SizedBox.shrink(), // Increased
-      label: Text(text, style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 14)), // Increased
+      icon: icon != null ? Icon(icon, size: 20, color: Colors.white) : const SizedBox.shrink(),
+      label: Text(text, style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 14)),
       onPressed: disabled == true ? null : onPressed,
       style: ElevatedButton.styleFrom(
         backgroundColor: explicitColor ?? ThemeColors.getColor('submitButton', isDarkMode),
-        padding: EdgeInsets.symmetric(horizontal: icon != null ? 16 : 20, vertical: 12), // Increased
+        padding: EdgeInsets.symmetric(horizontal: icon != null ? 16 : 20, vertical: 12),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         elevation: 1,
         shadowColor: Colors.black.withOpacity(0.15),
       ),
     );
   }
-
   Future<Map<String, String>?> _showTimeRangeDialog(bool isDarkMode) async {
     final fromController = TextEditingController();
     final toController = TextEditingController();
@@ -1010,7 +978,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ),
     );
   }
-
   List<Map<String, dynamic>> _filterDataByTimeRange(String fromTime, String toTime) {
     try {
       List<String> fromP = fromTime.split(':'), toP = toTime.split(':');
@@ -1030,11 +997,10 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       return tableData;
     }
   }
-
   Widget _buildChannelSelector(bool isDarkMode) {
     return Container(
-      height: 42, // Increased
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0), // Increased
+      height: 42,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
       decoration: BoxDecoration(
         color: ThemeColors.getColor('textFieldBackground', isDarkMode),
         borderRadius: BorderRadius.circular(8),
@@ -1044,9 +1010,9 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         child: DropdownButton<String>(
           value: selectedChannel,
           isDense: true,
-          style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14, fontWeight: FontWeight.w500), // Increased
+          style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14, fontWeight: FontWeight.w500),
           dropdownColor: ThemeColors.getColor('dropdownBackground', isDarkMode),
-          icon: Icon(Icons.arrow_drop_down_rounded, color: ThemeColors.getColor('dialogText', isDarkMode), size: 24), // Increased
+          icon: Icon(Icons.arrow_drop_down_rounded, color: ThemeColors.getColor('dialogText', isDarkMode), size: 24),
           onChanged: (String? newValue) {
             if (newValue != null) {
               setState(() { selectedChannel = newValue; _calculateYRange(); if (showPeak && selectedChannel != 'All') _highlightPeakOnGraph(); });
@@ -1061,7 +1027,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
               (item.child as Text).data!,
               style: GoogleFonts.roboto(
                   color: ThemeColors.getColor('dialogText', isDarkMode),
-                  fontSize: 14, // Increased
+                  fontSize: 14,
                   fontWeight: FontWeight.w500
               ),
             ),
@@ -1070,7 +1036,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ),
     );
   }
-
   void _openFloatingGraphWindow(bool isDarkMode) {
     late OverlayEntry entry;
     Offset position = const Offset(100, 100);
@@ -1106,17 +1071,16 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     Overlay.of(context).insert(entry);
     if (mounted) setState(() => _windowEntries.add(entry));
   }
-
   Widget _buildStyledAddButton(bool isDarkMode) {
     return SizedBox(
-      height: 42, // Increased
+      height: 42,
       child: ElevatedButton.icon(
-        icon: const Icon(Icons.add_chart_outlined, color: Colors.white, size: 20), // Increased
-        label: Text('Add Window', style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13.5)), // Increased
+        icon: const Icon(Icons.add_chart_outlined, color: Colors.white, size: 20),
+        label: Text('Add Window', style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13.5)),
         onPressed: () => _openFloatingGraphWindow(isDarkMode),
         style: ElevatedButton.styleFrom(
           backgroundColor: ThemeColors.getColor('submitButton', isDarkMode),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10), // Increased
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           elevation: 1.5,
           shadowColor: ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.3),
@@ -1124,7 +1088,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ),
     );
   }
-
   Widget _buildFullInputSection(bool isDarkMode) {
     return Card(
       elevation: 0,
@@ -1142,30 +1105,30 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                 Expanded(child: TextField(
                   controller: _fileNameController,
                   decoration: InputDecoration(
-                    labelText: 'File Name', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 14), // Increased
+                    labelText: 'File Name', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 14),
                     filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
                     enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5))),
                     focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 1.2)),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16), // Increased
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
                     isDense: true,
                   ),
-                  style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 15), // Increased
+                  style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 15),
                   onChanged: (value) => Global.selectedFileName.value = value,
                 )),
                 const SizedBox(width: 12),
                 Expanded(child: TextField(
                   controller: _operatorController,
                   decoration: InputDecoration(
-                    labelText: 'Operator', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 14), // Increased
+                    labelText: 'Operator', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 14),
                     filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
                     enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5))),
                     focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 1.2)),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16), // Increased
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
                     isDense: true,
                   ),
-                  style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 15), // Increased
+                  style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 15),
                   onChanged: (value) => Global.operatorName.value = value,
                 )),
               ],
@@ -1176,14 +1139,14 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
               child: Row(
                 children: [
                   Row(mainAxisSize: MainAxisSize.min, children: [
-                    Text('Scan Rate:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6), // Increased
+                    Text('Scan Rate:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6),
                     _buildTimeInputField(_scanRateHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
                     _buildTimeInputField(_scanRateMinController, 'Min', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
                     _buildTimeInputField(_scanRateSecController, 'Sec', compact: true, isDarkMode: isDarkMode),
                   ]),
                   const SizedBox(width: 16),
                   Row(mainAxisSize: MainAxisSize.min, children: [
-                    Text('Test Duration:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6), // Increased
+                    Text('Test Duration:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6),
                     _buildTimeInputField(_testDurationDayController, 'Day', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
                     _buildTimeInputField(_testDurationHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
                     _buildTimeInputField(_testDurationMinController, 'Min', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
@@ -1197,7 +1160,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ),
     );
   }
-
   Widget _buildLeftSection(bool isDarkMode) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1231,7 +1193,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                               ExportUtils.exportBasedOnMode(context: context, mode: 'Table', tableData: data, fileName: _fileNameController.text, graphImage: null, authSettings: await DatabaseManager().getAuthSettings(), channelNames: channelNames, isDarkMode: isDarkMode);
                             }, isDarkMode: isDarkMode, icon: Icons.table_chart_outlined),
                           if (Global.selectedMode.value == 'Combined')
-                            _buildControlButton('Export All (Table & Graph)', () async {
+                            _buildControlButton('Export All', () async { // <-- MODIFIED: Shortened label
                               final timeRange = await _showTimeRangeDialog(isDarkMode);
                               List<Map<String, dynamic>> data = timeRange != null ? _filterDataByTimeRange(timeRange['from']!, timeRange['to']!) : tableData;
                               Uint8List? graphImg = await _captureGraph(filteredData: timeRange != null ? data : null, isDarkMode: isDarkMode);
@@ -1247,9 +1209,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       ],
     );
   }
-
   Widget _buildRightSection(bool isDarkMode) {
-    // Conditional elevation for the graph card
     double graphCardElevation = (selectedChannel == 'All') ? 0.0 : 2.0;
 
     if (Global.selectedMode.value == 'Graph') {
@@ -1257,7 +1217,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Card(
-            elevation: 0, // Controls card always flat
+            elevation: 0,
             color: ThemeColors.getColor('cardBackground', isDarkMode),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
             child: Padding(
@@ -1266,24 +1226,24 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                 scrollDirection: Axis.horizontal,
                 child: Row(
                   children: [
-                    SizedBox(width: 130, child: TextField( // Increased
-                      controller: _fileNameController, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500), // Increased
-                      decoration: InputDecoration(labelText: 'File', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none), contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), isDense: true), // Increased
+                    SizedBox(width: 130, child: TextField(
+                      controller: _fileNameController, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500),
+                      decoration: InputDecoration(labelText: 'File', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none), contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), isDense: true),
                       onChanged: (v) => Global.selectedFileName.value = v,
                     )),
-                    SizedBox(width: 110, child: TextField( // Increased
-                      controller: _operatorController, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500), // Increased
-                      decoration: InputDecoration(labelText: 'Operator', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none), contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), isDense: true), // Increased
+                    SizedBox(width: 110, child: TextField(
+                      controller: _operatorController, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500),
+                      decoration: InputDecoration(labelText: 'Operator', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none), contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), isDense: true),
                       onChanged: (v) => Global.operatorName.value = v,
                     )),
                     Row(mainAxisSize: MainAxisSize.min, children: [
-                      Text('Seg:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 13)), const SizedBox(width: 4), // Increased
+                      Text('Seg:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 13)), const SizedBox(width: 4),
                       _buildTimeInputField(_graphVisibleHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 2), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 2),
                       _buildTimeInputField(_graphVisibleMinController, 'Min', compact: true, isDarkMode: isDarkMode),
                     ]),
                     _buildChannelSelector(isDarkMode),
                     _buildStyledAddButton(isDarkMode),
-                  ].expand((w) => [w, const SizedBox(width: 8)]).toList()..removeLast(), // Consistent spacing
+                  ].expand((w) => [w, const SizedBox(width: 8)]).toList()..removeLast(),
                 ),
               ),
             ),
@@ -1291,7 +1251,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
           const SizedBox(height: 12),
           Expanded(
             child: Card(
-              elevation: graphCardElevation, // Conditional shadow
+              elevation: graphCardElevation,
               margin: EdgeInsets.zero,
               color: ThemeColors.getColor('cardBackground', isDarkMode),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
@@ -1318,7 +1278,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
             child: Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                Text('Graph Seg:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6), // Increased
+                Text('Graph Seg:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6),
                 _buildTimeInputField(_graphVisibleHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
                 _buildTimeInputField(_graphVisibleMinController, 'Min', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 12),
                 _buildChannelSelector(isDarkMode), const SizedBox(width: 12),
@@ -1328,7 +1288,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
           ),
           Expanded(
             child: Card(
-              elevation: graphCardElevation, // Conditional shadow
+              elevation: graphCardElevation,
               margin: EdgeInsets.zero,
               color: ThemeColors.getColor('cardBackground', isDarkMode),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
@@ -1373,27 +1333,41 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
           body: SafeArea(
             child: Padding(
               padding: const EdgeInsets.all(12.0),
-              child: ValueListenableBuilder<String>(
-                valueListenable: Global.selectedMode,
-                builder: (context, mode, _) {
-                  bool showLeft = mode == 'Table' || mode == 'Combined';
-                  bool showRight = mode == 'Graph' || mode == 'Combined';
-                  int leftFlex = mode == 'Combined' ? 1 : (mode == 'Table' ? 1 : 0);
-                  int rightFlex = mode == 'Combined' ? (showLeft ? 1 : 2) : (mode == 'Graph' ? 1 : 0); // Give graph more space if it's alone or combined with table
-                  if (mode == 'Table') rightFlex = 0;
-                  if (mode == 'Graph') leftFlex = 0;
+              // --- START OF LAYOUT CHANGE ---
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 1. ADD THE EXIT BUTTON AT THE TOP
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12.0),
+                    child: _buildExitButton(isDarkMode),
+                  ),
+                  // 2. WRAP THE ORIGINAL CONTENT IN AN EXPANDED WIDGET
+                  Expanded(
+                    child: ValueListenableBuilder<String>(
+                      valueListenable: Global.selectedMode,
+                      builder: (context, mode, _) {
+                        bool showLeft = mode == 'Table' || mode == 'Combined';
+                        bool showRight = mode == 'Graph' || mode == 'Combined';
+                        int leftFlex = mode == 'Combined' ? 1 : (mode == 'Table' ? 1 : 0);
+                        int rightFlex = mode == 'Combined' ? (showLeft ? 1 : 2) : (mode == 'Graph' ? 1 : 0);
+                        if (mode == 'Table') rightFlex = 0;
+                        if (mode == 'Graph') leftFlex = 0;
 
-
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (showLeft) Expanded(flex: leftFlex, child: _buildLeftSection(isDarkMode)),
-                      if (showLeft && showRight) const SizedBox(width: 12),
-                      if (showRight) Expanded(flex: rightFlex, child: _buildRightSection(isDarkMode)),
-                    ],
-                  );
-                },
+                        return Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (showLeft) Expanded(flex: leftFlex, child: _buildLeftSection(isDarkMode)),
+                            if (showLeft && showRight) const SizedBox(width: 12),
+                            if (showRight) Expanded(flex: rightFlex, child: _buildRightSection(isDarkMode)),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ],
               ),
+              // --- END OF LAYOUT CHANGE ---
             ),
           ),
         );
@@ -1403,7 +1377,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
 
   @override
   void dispose() {
-    // Dispose of all controllers and listeners as usual.
+    // Dispose of all controllers and listeners
     _fileNameController.dispose(); _operatorController.dispose();
     _scanRateHrController.dispose(); _scanRateMinController.dispose(); _scanRateSecController.dispose();
     _testDurationDayController.dispose(); _testDurationHrController.dispose(); _testDurationMinController.dispose(); _testDurationSecController.dispose();
@@ -1418,9 +1392,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     Global.testDurationDD?.removeListener(_onGlobalChanged); Global.testDurationHH.removeListener(_onGlobalChanged); Global.testDurationMM.removeListener(_onGlobalChanged); Global.testDurationSS.removeListener(_onGlobalChanged);
     Global.isDarkMode.removeListener(_onThemeChanged);
 
-    // CRITICAL: Close the session-specific database opened by this page.
-    // This is explicitly done here because this widget is the one that opened it.
-    // SessionDatabaseManager will also close it if it's still open during a global closure.
+    // Close the session-specific database opened by this page
     if (_isDatabaseInitialized && _database.isOpen) {
       try {
         _database.close();
@@ -1429,7 +1401,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         LogPage.addLog('[$_currentTime] [DISPOSE] Error closing session database for OpenFilePage: $e');
       }
     }
-    _isDatabaseInitialized = false; // Reset flag
+    _isDatabaseInitialized = false;
 
     LogPage.addLog('[$_currentTime] [DISPOSE] OpenFilePage disposed.');
     super.dispose();

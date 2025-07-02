@@ -9,18 +9,18 @@ import '../constants/database_manager.dart';
 import '../constants/message_utils.dart';
 import '../constants/global.dart';
 import '../constants/theme.dart';
-import '../main.dart'; // Needed for CustomTitleBar, WindowButton (assuming they are here)
+import '../main.dart'; // Needed for CustomTitleBar, WindowButton
 import 'Backup/backup_restore_service.dart';
 import 'Help/HelpPage.dart';
-import 'NavPages/new_file.dart'; // Assuming this imports NewTestPage
-import 'NavPages/serialportscreen.dart'; // Assuming this imports SerialPortScreen
-import 'Open_FIle/file_browser_page.dart'; // Assuming this imports FileSelectionDialog
-import 'Open_FIle/open_file.dart'; // Assuming this imports OpenFilePage
-import 'logScreen/log.dart'; // Assuming this imports LogPage
-import 'setup/channel_setup_screen.dart'; // Assuming this imports ChannelSetupScreen
-
-// Ensure FilePicker is imported if you're using it directly here for restore
+import 'NavPages/channel.dart';
+import 'NavPages/new_file.dart';
+import 'NavPages/serialportscreen.dart';
+import 'Open_FIle/file_browser_page.dart';
+import 'Open_FIle/open_file.dart';
+import 'logScreen/log.dart';
+import 'setup/channel_setup_screen.dart';
 import 'package:file_picker/file_picker.dart';
+
 
 
 class HomePage extends StatefulWidget {
@@ -53,7 +53,6 @@ class _HomePageState extends State<HomePage>
     _originalNewTestPage = NewTestPage(onSubmit: _handleNewTestSubmit);
 
     // Define the list of pages that can be displayed in the main content area
-    // Placeholders are used for pages that are handled by dialogs or dynamically replaced.
     _pages = [
       _originalNewTestPage,      // 0: New Test (or SerialPortScreen dynamically)
       const Placeholder(),       // 1: Open File (handled by dialog first, then OpenFilePage)
@@ -64,45 +63,41 @@ class _HomePageState extends State<HomePage>
       const HelpPage(),          // 6: Help (direct navigation)
     ];
 
-    windowManager.addListener(this); // Listen for window events (e.g., maximize, minimize)
-    _loadSystemData();           // Initial load of dashboard data from DB
-    _startAutoStartCheck();      // Start the periodic check for auto-start
+    windowManager.addListener(this);
+    _loadSystemData();
+    _startAutoStartCheck();
 
-    // Setup animations for page transitions
     _animationController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 800),
-    )..forward(); // Start animation immediately on init
+    )..forward();
     _fadeAnimation = CurvedAnimation(
       parent: _animationController,
       curve: Curves.easeInOut,
     );
-    _logActivity('HomePage initialized'); // Log app startup
+    _logActivity('HomePage initialized');
   }
 
   @override
   void dispose() {
     _fileNameController.dispose();
-    _autoStartTimer?.cancel(); // Cancel any active timers
+    _autoStartTimer?.cancel();
     _isSidebarExpanded.dispose();
     _animationController.dispose();
-    windowManager.removeListener(this); // Remove window listener
+    windowManager.removeListener(this);
     super.dispose();
   }
 
-  // Utility to log activity to the LogPage
   void _logActivity(String message) {
     LogPage.addLog('[$_currentTime] $message');
   }
 
-  // Getter for current time string for logs
   String get _currentTime => DateTime.now().toString().substring(0, 19);
 
-  // Loads system-wide data from the database for display on the dashboard
   Future<void> _loadSystemData() async {
     final autoStartData = await DatabaseManager().getAutoStartData();
     final channels = await DatabaseManager().getSelectedChannels();
-    if (mounted) { // Check if the widget is still in the widget tree
+    if (mounted) {
       setState(() {
         _autoStartData = autoStartData;
         _activeChannels = channels.length;
@@ -110,19 +105,17 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  // Starts a periodic timer to check for auto-start conditions
   void _startAutoStartCheck() {
-    _autoStartTimer?.cancel(); // Cancel any existing timer to prevent duplicates
+    _autoStartTimer?.cancel();
     _autoStartTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
       if (!mounted) {
-        timer.cancel(); // Stop the timer if the widget is no longer mounted
+        timer.cancel();
         return;
       }
-      // Fetch autoStartData and channels each time to ensure freshest data for auto-start logic
       final autoStartData = await DatabaseManager().getAutoStartData();
       if (autoStartData == null) {
         print('[HomePage] No AutoStart data found, stopping timer');
-        timer.cancel(); // If no auto-start configuration, no need to keep checking
+        timer.cancel();
         return;
       }
       final startTimeHr = (autoStartData['StartTimeHr'] as num?)?.toDouble() ?? 0.0;
@@ -135,17 +128,16 @@ class _HomePageState extends State<HomePage>
       final currentHr = now.hour.toDouble();
       final currentMin = now.minute.toDouble();
 
-      // Check if current time matches the auto-start time
       if (currentHr == startTimeHr.floor() && currentMin == startTimeMin.floor()) {
         print('[HomePage] Time match found for AutoStart, fetching channels');
         final channels = await DatabaseManager().getSelectedChannels();
         if (channels.isEmpty) {
-          print('[HomePage] No channels found in SelectChannel for AutoStart, skipping.');
+          print('[HomePage] No channels found for AutoStart, skipping.');
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
-                  'AutoStart: No channels selected. Please configure channels in Setup.',
+                  'AutoStart: No channels selected. Please configure channels.',
                   style: GoogleFonts.poppins(color: ThemeColors.getColor('sidebarText', Global.isDarkMode.value)),
                 ),
                 backgroundColor: Colors.orange,
@@ -155,8 +147,8 @@ class _HomePageState extends State<HomePage>
           return;
         }
 
-        print('[HomePage] AutoStart triggered: Switching to AutoStartScreen with ${channels.length} channels');
-        timer.cancel(); // Stop this timer once auto-start is triggered to prevent re-triggering immediately
+        print('[HomePage] AutoStart triggered: Switching to AutoStartScreen');
+        timer.cancel();
         if (mounted) {
           setState(() {
             _pages[0] = AutoStartScreen(
@@ -165,7 +157,7 @@ class _HomePageState extends State<HomePage>
               endTimeMin: endTimeMin,
               scanTimeSec: scanTimeSec,
             );
-            _selectedIndex = 0; // Show the AutoStartScreen
+            _selectedIndex = 0;
           });
           _logActivity('AutoStart triggered with ${channels.length} channels');
         }
@@ -173,36 +165,37 @@ class _HomePageState extends State<HomePage>
     });
   }
 
-  // Callback from NewTestPage when channels are submitted
+  // >>> THE FIX IS HERE <<<
+  // This function is now corrected to provide the required 'onBack' parameter.
   void _handleNewTestSubmit(List<dynamic> selectedChannels) {
     setState(() {
-      // Replace the NewTestPage at index 0 with SerialPortScreen to start scanning
-      _pages[0] = SerialPortScreen(selectedChannels: selectedChannels);
-      _selectedIndex = 0; // Keep selected index at 0 to display SerialPortScreen
+      _pages[0] = SerialPortScreen(
+        selectedChannels: selectedChannels.cast<Channel>(),
+        onBack: _resetToNewTestPage, // FIX: Provided the required 'onBack' function.
+      );
+      _selectedIndex = 0;
     });
     _logActivity('New Test started with ${selectedChannels.length} channels');
   }
 
-  // Resets the view back to the initial NewTestPage
+  // This function is required by the fix above. It handles the back action.
   void _resetToNewTestPage() {
     setState(() {
       _pages[0] = _originalNewTestPage;
       _selectedIndex = 0;
     });
-    // The periodic _startAutoStartCheck() is still running, so no need to restart it here.
     _logActivity('Reset to New Test page');
   }
 
-  // Shows the Backup & Restore dialog
   void _showBackupDialog(BuildContext context) {
-    bool isLoading = false; // State for loading indicator within the dialog
+    bool isLoading = false;
     showDialog(
       context: context,
-      barrierDismissible: false, // Prevent dismissing while loading
-      barrierColor: Colors.black.withOpacity(0.4), // Darken background
-      builder: (BuildContext dialogContext) { // Use dialogContext to pop the dialog
+      barrierDismissible: false,
+      barrierColor: Colors.black.withOpacity(0.4),
+      builder: (BuildContext dialogContext) {
         return BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8), // Blur background
+          filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
           child: Dialog(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
             backgroundColor: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
@@ -220,43 +213,24 @@ class _HomePageState extends State<HomePage>
                   end: Alignment.bottomRight,
                 ),
               ),
-              child: StatefulBuilder( // Use StatefulBuilder to manage dialog's internal state
-                builder: (context, setState) { // Local setState for the dialog
+              child: StatefulBuilder(
+                builder: (context, setState) {
                   return Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text(
-                        'Backup & Restore',
-                        style: GoogleFonts.poppins(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w700,
-                          color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                        ),
-                      ),
+                      Text('Backup & Restore', style: GoogleFonts.poppins(fontSize: 24, fontWeight: FontWeight.w700, color: ThemeColors.getColor('dialogText', Global.isDarkMode.value))),
                       const SizedBox(height: 12),
-                      Text(
-                        'Securely manage your data',
-                        style: GoogleFonts.poppins(
-                          fontSize: 14,
-                          color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
-                        ),
-                      ),
+                      Text('Securely manage your data', style: GoogleFonts.poppins(fontSize: 14, color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value))),
                       const SizedBox(height: 24),
-                      if (isLoading) // Show loading indicator if processing
+                      if (isLoading)
                         Column(
                           children: [
-                            AnimatedLoadingIndicator(isDarkMode: Global.isDarkMode.value), // Custom animation
+                            AnimatedLoadingIndicator(isDarkMode: Global.isDarkMode.value),
                             const SizedBox(height: 12),
-                            Text(
-                              'Processing...',
-                              style: GoogleFonts.poppins(
-                                color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                                fontSize: 16,
-                              ),
-                            ),
+                            Text('Processing...', style: GoogleFonts.poppins(color: ThemeColors.getColor('dialogText', Global.isDarkMode.value), fontSize: 16)),
                           ],
                         )
-                      else // Show buttons if not loading
+                      else
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: [
@@ -265,15 +239,11 @@ class _HomePageState extends State<HomePage>
                               icon: LucideIcons.archive,
                               gradient: ThemeColors.getDialogButtonGradient(Global.isDarkMode.value, 'backup'),
                               onPressed: () async {
-                                setState(() => isLoading = true); // Set loading true
+                                setState(() => isLoading = true);
                                 final result = await _backupRestoreService.backupDatabase();
-                                setState(() => isLoading = false); // Set loading false
-                                Navigator.of(dialogContext).pop(); // Pop the dialog
-                                MessageUtils.showMessage(
-                                  context, // Use widget's context for ScaffoldMessenger
-                                  result,
-                                  isError: result.contains('failed') || result.contains('cancelled'),
-                                );
+                                setState(() => isLoading = false);
+                                Navigator.of(dialogContext).pop();
+                                MessageUtils.showMessage(context, result, isError: result.contains('failed') || result.contains('cancelled'));
                                 _logActivity('Backup initiated: $result');
                               },
                             ),
@@ -282,53 +252,33 @@ class _HomePageState extends State<HomePage>
                               icon: LucideIcons.refreshCw,
                               gradient: ThemeColors.getDialogButtonGradient(Global.isDarkMode.value, 'restore'),
                               onPressed: () async {
-                                // 1. Trigger file picker WITHOUT setting loading state yet
-                                FilePickerResult? filePickerResult = await FilePicker.platform.pickFiles(
-                                  type: FileType.custom,
-                                  allowedExtensions: ['zip'], // Only allow .zip files for restore
-                                );
-
+                                FilePickerResult? filePickerResult = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['zip']);
                                 if (filePickerResult == null) {
-                                  // User cancelled file picking, do not show loading and return
                                   MessageUtils.showMessage(context, 'Restore cancelled by user.', isError: true);
                                   _logActivity('Restore cancelled by user (file picker).');
-                                  return; // Stay in the dialog
+                                  return;
                                 }
-
                                 String? filePath = filePickerResult.files.single.path;
                                 if (filePath == null) {
                                   MessageUtils.showMessage(context, 'Selected file path is null.', isError: true);
                                   _logActivity('Restore failed: Selected file path is null.');
-                                  return; // Stay in the dialog
+                                  return;
                                 }
-
-                                // 2. File picked, NOW set loading state and proceed with actual restore
-                                setState(() => isLoading = true); // Set loading true
+                                setState(() => isLoading = true);
                                 final result = await _backupRestoreService.performRestore(filePath);
-                                setState(() => isLoading = false); // Set loading false
-                                Navigator.of(dialogContext).pop(); // Pop the dialog
-                                MessageUtils.showMessage(
-                                  context, // Use widget's context for ScaffoldMessenger
-                                  result,
-                                  isError: result.contains('failed'),
-                                );
+                                setState(() => isLoading = false);
+                                Navigator.of(dialogContext).pop();
+                                MessageUtils.showMessage(context, result, isError: result.contains('failed'));
                                 _logActivity('Restore initiated: $result');
                               },
                             ),
                           ],
                         ),
                       const SizedBox(height: 24),
-                      if (!isLoading) // Show Cancel button only if not loading
+                      if (!isLoading)
                         TextButton(
-                          onPressed: () => Navigator.of(dialogContext).pop(), // Pop the dialog
-                          child: Text(
-                            'Cancel',
-                            style: GoogleFonts.poppins(
-                              fontSize: 16,
-                              color: Colors.redAccent,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
+                          onPressed: () => Navigator.of(dialogContext).pop(),
+                          child: Text('Cancel', style: GoogleFonts.poppins(fontSize: 16, color: Colors.redAccent, fontWeight: FontWeight.w600)),
                         ),
                     ],
                   );
@@ -342,7 +292,6 @@ class _HomePageState extends State<HomePage>
     _logActivity('Backup dialog opened');
   }
 
-  // Shows the "Select Display Mode" dialog
   void _showSetupDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -354,7 +303,7 @@ class _HomePageState extends State<HomePage>
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
             backgroundColor: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
             child: Container(
-              width: 400, // Adjusted width for better layout
+              width: 400,
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(20),
@@ -370,74 +319,21 @@ class _HomePageState extends State<HomePage>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    'Select Display Mode',
-                    style: GoogleFonts.poppins(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w600,
-                      color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                    ),
-                  ),
+                  Text('Select Display Mode', style: GoogleFonts.poppins(fontSize: 22, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', Global.isDarkMode.value))),
                   const SizedBox(height: 12),
-                  Text(
-                    'Choose your preferred visualization',
-                    style: GoogleFonts.poppins(
-                      fontSize: 14,
-                      color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
-                    ),
-                  ),
+                  Text('Choose your preferred visualization', style: GoogleFonts.poppins(fontSize: 14, color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value))),
                   const SizedBox(height: 24),
                   Column(
                     children: [
-                      _buildDialogButton(
-                        text: 'Graph Mode',
-                        icon: LucideIcons.barChart2,
-                        gradient: ThemeColors.getDialogButtonGradient(Global.isDarkMode.value, 'graph'),
-                        onPressed: () {
-                          Global.selectedMode.value = 'Graph'; // Update global mode
-                          Navigator.of(context).pop();
-                          MessageUtils.showMessage(context, 'Graph mode selected!');
-                          _logActivity('Graph mode selected');
-                        },
-                      ),
+                      _buildDialogButton(text: 'Graph Mode', icon: LucideIcons.barChart2, gradient: ThemeColors.getDialogButtonGradient(Global.isDarkMode.value, 'graph'), onPressed: () { Global.selectedMode.value = 'Graph'; Navigator.of(context).pop(); MessageUtils.showMessage(context, 'Graph mode selected!'); _logActivity('Graph mode selected'); }),
                       const SizedBox(height: 12),
-                      _buildDialogButton(
-                        text: 'Table Mode',
-                        icon: LucideIcons.table,
-                        gradient: ThemeColors.getDialogButtonGradient(Global.isDarkMode.value, 'table'),
-                        onPressed: () {
-                          Global.selectedMode.value = 'Table'; // Update global mode
-                          Navigator.of(context).pop();
-                          MessageUtils.showMessage(context, 'Table mode selected!');
-                          _logActivity('Table mode selected');
-                        },
-                      ),
+                      _buildDialogButton(text: 'Table Mode', icon: LucideIcons.table, gradient: ThemeColors.getDialogButtonGradient(Global.isDarkMode.value, 'table'), onPressed: () { Global.selectedMode.value = 'Table'; Navigator.of(context).pop(); MessageUtils.showMessage(context, 'Table mode selected!'); _logActivity('Table mode selected'); }),
                       const SizedBox(height: 12),
-                      _buildDialogButton(
-                        text: 'Combined Mode',
-                        icon: LucideIcons.layoutGrid,
-                        gradient: ThemeColors.getDialogButtonGradient(Global.isDarkMode.value, 'combined'),
-                        onPressed: () {
-                          Global.selectedMode.value = 'Combined'; // Update global mode
-                          Navigator.of(context).pop();
-                          MessageUtils.showMessage(context, 'Combined mode selected!');
-                          _logActivity('Combined mode selected');
-                        },
-                      ),
+                      _buildDialogButton(text: 'Combined Mode', icon: LucideIcons.layoutGrid, gradient: ThemeColors.getDialogButtonGradient(Global.isDarkMode.value, 'combined'), onPressed: () { Global.selectedMode.value = 'Combined'; Navigator.of(context).pop(); MessageUtils.showMessage(context, 'Combined mode selected!'); _logActivity('Combined mode selected'); }),
                     ],
                   ),
                   const SizedBox(height: 24),
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: Text(
-                      'Cancel',
-                      style: GoogleFonts.poppins(
-                        fontSize: 16,
-                        color: Colors.redAccent,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
+                  TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('Cancel', style: GoogleFonts.poppins(fontSize: 16, color: Colors.redAccent, fontWeight: FontWeight.w600))),
                 ],
               ),
             ),
@@ -448,16 +344,51 @@ class _HomePageState extends State<HomePage>
     _logActivity('Setup dialog opened');
   }
 
-  // Shows the "Open File" dialog
+
   void _showOpenFileDialog(BuildContext context) {
     showDialog(
       context: context,
-      builder: (BuildContext dialogContext) { // Use dialogContext for this dialog's Navigator
-        // FileSelectionDialog is assumed to be in file_browser_page.dart
+      // We pass the builder's context (`dialogContext`) to the dialog
+      // so it can be closed from within the callback.
+      builder: (BuildContext dialogContext) {
         return FileSelectionDialog(
           controller: _fileNameController,
-          // Removed onOpenPressed here, as the open action is now only on main dialog's button
-          // The FileSelectionDialog's internal onTap will just populate the _fileNameController
+          // *** THIS IS THE KEY CHANGE ***
+          // We provide a custom function for the "Open" button.
+          onOpenPressed: () {
+            // 1. Check if a file has been selected.
+            if (_fileNameController.text.isNotEmpty) {
+
+              // 2. Close the FileSelectionDialog.
+              // We use the `dialogContext` from the `showDialog` builder.
+              Navigator.of(dialogContext).pop();
+
+              // 3. Update the HomePage's state to show the OpenFilePage.
+              setState(() {
+                // Replace the placeholder at index 1 with the actual OpenFilePage
+                _pages[1] = OpenFilePage(fileName: _fileNameController.text, onExit: () {  },);
+
+                // Set the selected index to 1 to show the OpenFilePage
+                _selectedIndex = 1;
+              });
+
+              // Optional: Trigger animations and log the activity
+              _animationController.forward(from: 0.0);
+              _logActivity('Navigated to Open File page for: ${_fileNameController.text}');
+
+            } else {
+              // If no file is selected, show an error message.
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'Please select a file first.',
+                    style: GoogleFonts.poppins(color: ThemeColors.getColor('sidebarText', Global.isDarkMode.value)),
+                  ),
+                  backgroundColor: Colors.redAccent,
+                ),
+              );
+            }
+          },
         );
       },
     );
@@ -466,16 +397,12 @@ class _HomePageState extends State<HomePage>
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
-      valueListenable: Global.isDarkMode, // Rebuilds when theme changes
+      valueListenable: Global.isDarkMode,
       builder: (context, isDarkMode, child) {
         print('[HomePage] Building with isDarkMode: $isDarkMode');
 
-        // Determine if SerialPortScreen OR AutoStartScreen is currently active
-        // These pages should occupy the full screen without the sidebar.
-        final bool shouldHideSidebar = (_selectedIndex == 0 && (
-            _pages[0] is SerialPortScreen ||
-                _pages[0] is AutoStartScreen
-        ));
+        final bool shouldHideSidebar = (_selectedIndex == 0 &&
+            (_pages[0] is SerialPortScreen || _pages[0] is AutoStartScreen));
 
         return Scaffold(
           body: Container(
@@ -491,27 +418,20 @@ class _HomePageState extends State<HomePage>
             ),
             child: Column(
               children: [
-                // Custom title bar for window controls and branding
                 Container(
                   decoration: BoxDecoration(
                     color: ThemeColors.getColor('dialogBackground', isDarkMode).withOpacity(0.95),
                     boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.2),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
+                      BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8, offset: const Offset(0, 2)),
                     ],
                   ),
-                  child: CustomTitleBar(title: 'Countron Smart Logger'), // Assumed from main.dart
+                  child: CustomTitleBar(title: 'Countron Smart Logger'),
                 ),
                 Expanded(
-                  // MODIFIED: Use shouldHideSidebar to control sidebar visibility
                   child: shouldHideSidebar
-                      ? _pages[_selectedIndex] // If a special fullscreen page is active, show only it
-                      : Row( // Otherwise, show sidebar + main content area
+                      ? _pages[_selectedIndex]
+                      : Row(
                     children: [
-                      // Sidebar: Expands on hover
                       MouseRegion(
                         onEnter: (_) => _isSidebarExpanded.value = true,
                         onExit: (_) => _isSidebarExpanded.value = false,
@@ -521,146 +441,51 @@ class _HomePageState extends State<HomePage>
                             return AnimatedContainer(
                               duration: const Duration(milliseconds: 300),
                               curve: Curves.easeOutQuart,
-                              width: isExpanded ? 260.0 : 80.0, // Expanded vs. collapsed width
+                              width: isExpanded ? 260.0 : 80.0,
                               decoration: BoxDecoration(
                                 gradient: ThemeColors.getSidebarGradient(isDarkMode),
-                                borderRadius: const BorderRadius.only(
-                                  topRight: Radius.circular(24),
-                                  bottomRight: Radius.circular(24),
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withOpacity(0.3),
-                                    blurRadius: 12,
-                                    offset: const Offset(4, 0),
-                                  ),
-                                ],
+                                borderRadius: const BorderRadius.only(topRight: Radius.circular(24), bottomRight: Radius.circular(24)),
+                                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 12, offset: const Offset(4, 0))],
                               ),
                               child: child,
                             );
                           },
-                          child: SingleChildScrollView( // Allows scrolling if many buttons
+                          child: SingleChildScrollView(
                             child: Column(
                               children: [
-                                // Sidebar Logo (Home Button) - also acts as a Home shortcut
-                                SidebarLogo(
-                                  onTap: () async {
-                                    await _loadSystemData(); // Refresh data for dashboard
-                                    setState(() {
-                                      _selectedIndex = -1; // Navigate to dashboard
-                                    });
-                                    _animationController.forward(from: 0.0); // Trigger page transition animation
-                                    _logActivity('Navigated to Dashboard via Logo');
-                                  },
-                                  isSidebarExpanded: _isSidebarExpanded,
-                                  isDarkMode: isDarkMode,
-                                ),
+                                SidebarLogo(onTap: () async { await _loadSystemData(); setState(() { _selectedIndex = -1; }); _animationController.forward(from: 0.0); _logActivity('Navigated to Dashboard via Logo'); }, isSidebarExpanded: _isSidebarExpanded, isDarkMode: isDarkMode),
                                 const SizedBox(height: 16),
-                                // NEW: Explicit Home button
-                                _buildSidebarButton(
-                                  icon: LucideIcons.home,
-                                  index: -1, // Use -1 for Dashboard
-                                  label: 'Home',
-                                  isDarkMode: isDarkMode,
-                                  context: context,
-                                ),
-                                const SizedBox(height: 16), // Spacing after Home button
-                                // Sidebar navigation buttons
-                                _buildSidebarButton(
-                                  icon: LucideIcons.activity,
-                                  index: 0,
-                                  label: 'New Test',
-                                  isDarkMode: isDarkMode,
-                                  context: context,
-                                ),
-                                _buildSidebarButton(
-                                  icon: LucideIcons.folderSearch,
-                                  index: 1,
-                                  label: 'Open File',
-                                  isDarkMode: isDarkMode,
-                                  context: context,
-                                ),
-                                _buildSidebarButton(
-                                  icon: LucideIcons.monitor,
-                                  index: 2,
-                                  label: 'Select Mode',
-                                  isDarkMode: isDarkMode,
-                                  context: context,
-                                ),
-                                _buildSidebarButton(
-                                  icon: LucideIcons.settings,
-                                  index: 3,
-                                  label: 'Setup',
-                                  isDarkMode: isDarkMode,
-                                  context: context,
-                                ),
-                                _buildSidebarButton(
-                                  icon: LucideIcons.databaseBackup,
-                                  index: 4,
-                                  label: 'Backup',
-                                  isDarkMode: isDarkMode,
-                                  context: context,
-                                ),
-                                _buildSidebarButton(
-                                  icon: LucideIcons.fileText,
-                                  index: 5,
-                                  label: 'Log',
-                                  isDarkMode: isDarkMode,
-                                  context: context,
-                                ),
-                                _buildSidebarButton(
-                                  icon: LucideIcons.lifeBuoy,
-                                  index: 6,
-                                  label: 'Help',
-                                  isDarkMode: isDarkMode,
-                                  context: context,
-                                ),
-                                const Divider(
-                                  color: Colors.white54,
-                                  indent: 10,
-                                  endIndent: 10,
-                                ),
-                                // Theme toggle button
-                                SidebarButton(
-                                  icon: isDarkMode ? LucideIcons.sun : LucideIcons.moon,
-                                  label: isDarkMode ? 'Light Mode' : 'Dark Mode',
-                                  isSelected: false, // This button is never "selected" in the main nav
-                                  onTap: () {
-                                    Global.saveTheme(!isDarkMode); // Toggle and save theme preference
-                                    _animationController.forward(from: 0.0); // Trigger transition
-                                    _logActivity('Toggled theme to ${isDarkMode ? 'Light' : 'Dark'} mode');
-                                  },
-                                  isSidebarExpanded: _isSidebarExpanded,
-                                  isDarkMode: isDarkMode,
-                                ),
+                                _buildSidebarButton(icon: LucideIcons.home, index: -1, label: 'Home', isDarkMode: isDarkMode, context: context),
+                                const SizedBox(height: 16),
+                                _buildSidebarButton(icon: LucideIcons.activity, index: 0, label: 'New Test', isDarkMode: isDarkMode, context: context),
+                                _buildSidebarButton(icon: LucideIcons.folderSearch, index: 1, label: 'Open File', isDarkMode: isDarkMode, context: context),
+                                _buildSidebarButton(icon: LucideIcons.monitor, index: 2, label: 'Select Mode', isDarkMode: isDarkMode, context: context),
+                                _buildSidebarButton(icon: LucideIcons.settings, index: 3, label: 'Setup', isDarkMode: isDarkMode, context: context),
+                                _buildSidebarButton(icon: LucideIcons.databaseBackup, index: 4, label: 'Backup', isDarkMode: isDarkMode, context: context),
+                                _buildSidebarButton(icon: LucideIcons.fileText, index: 5, label: 'Log', isDarkMode: isDarkMode, context: context),
+                                _buildSidebarButton(icon: LucideIcons.lifeBuoy, index: 6, label: 'Help', isDarkMode: isDarkMode, context: context),
+                                const Divider(color: Colors.white54, indent: 10, endIndent: 10),
+                                SidebarButton(icon: isDarkMode ? LucideIcons.sun : LucideIcons.moon, label: isDarkMode ? 'Light Mode' : 'Dark Mode', isSelected: false, onTap: () { Global.saveTheme(!isDarkMode); _animationController.forward(from: 0.0); _logActivity('Toggled theme to ${isDarkMode ? 'Light' : 'Dark'} mode'); }, isSidebarExpanded: _isSidebarExpanded, isDarkMode: isDarkMode),
                                 const SizedBox(height: 10),
                               ],
                             ),
                           ),
                         ),
                       ),
-                      // Main content area, displays the selected page or dashboard
                       Expanded(
                         child: FadeTransition(
                           opacity: _fadeAnimation,
-                          child: AnimatedSwitcher( // Smoothly switches between pages
+                          child: AnimatedSwitcher(
                             duration: const Duration(milliseconds: 300),
                             transitionBuilder: (child, animation) {
                               return SlideTransition(
-                                position: Tween<Offset>(
-                                  begin: const Offset(0.1, 0),
-                                  end: Offset.zero,
-                                ).animate(animation),
-                                child: FadeTransition(
-                                  opacity: animation,
-                                  child: child,
-                                ),
+                                position: Tween<Offset>(begin: const Offset(0.1, 0), end: Offset.zero).animate(animation),
+                                child: FadeTransition(opacity: animation, child: child),
                               );
                             },
-                            // Display either the Dashboard or the selected page
                             child: _selectedIndex == -1
-                                ? _buildDashboard(isDarkMode) // Dashboard content
-                                : _pages[_selectedIndex],      // Selected page content
+                                ? _buildDashboard(isDarkMode)
+                                : _pages[_selectedIndex],
                           ),
                         ),
                       ),
@@ -675,48 +500,31 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // Helper method to build sidebar buttons, handles navigation and dialogs
-  Widget _buildSidebarButton({
-    required IconData icon,
-    required int index,
-    required String label,
-    required bool isDarkMode,
-    required BuildContext context,
-  }) {
+  Widget _buildSidebarButton({required IconData icon, required int index, required String label, required bool isDarkMode, required BuildContext context}) {
     return SidebarButton(
       icon: icon,
       label: label,
       isSelected: _selectedIndex == index,
-      onTap: () async { // Made async to allow _loadSystemData
-        if (index == -1) { // Home button
-          await _loadSystemData(); // Refresh data for dashboard
-          setState(() {
-            _selectedIndex = -1; // Set index to dashboard
-          });
-          _animationController.forward(from: 0.0); // Trigger animation
+      onTap: () async {
+        if (index == -1) {
+          await _loadSystemData();
+          setState(() => _selectedIndex = -1);
+          _animationController.forward(from: 0.0);
           _logActivity('Navigated to Dashboard via Home button');
-        } else if (index == 4) { // Backup button: shows dialog
+        } else if (index == 4) {
           _showBackupDialog(context);
-        } else if (index == 2) { // Select Mode button: shows dialog
+        } else if (index == 2) {
           _showSetupDialog(context);
-        } else if (index == 1) { // Open File button: shows dialog
+        } else if (index == 1) {
           _showOpenFileDialog(context);
         } else {
-          // For regular navigation pages:
-          // If navigating to 'New Test' (index 0), ensure it's the initial channel selection page
           if (index == 0) {
             _pages[0] = _originalNewTestPage;
-          }
-          // If navigating to 'Log' (index 5), ensure it's a fresh LogPage instance
-          // This might be desired if LogPage manages its own state that needs resetting.
-          else if (index == 5) {
+          } else if (index == 5) {
             _pages[5] = const LogPage();
           }
-
-          setState(() {
-            _selectedIndex = index; // Update the selected index to show the new page
-          });
-          _animationController.forward(from: 0.0); // Trigger page transition animation
+          setState(() => _selectedIndex = index);
+          _animationController.forward(from: 0.0);
           _logActivity('Navigated to $label page');
         }
       },
@@ -725,92 +533,44 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // Helper method to build buttons used within dialogs
-  Widget _buildDialogButton({
-    required String text,
-    required IconData icon,
-    required LinearGradient gradient,
-    required VoidCallback onPressed,
-  }) {
+  Widget _buildDialogButton({required String text, required IconData icon, required LinearGradient gradient, required VoidCallback onPressed}) {
     return GestureDetector(
       onTap: onPressed,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          gradient: gradient,
-          borderRadius: BorderRadius.circular(12),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.2),
-              blurRadius: 8,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
+        decoration: BoxDecoration(gradient: gradient, borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8, offset: const Offset(0, 4))]),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
-          mainAxisSize: MainAxisSize.min, // Shrink to fit content
+          mainAxisSize: MainAxisSize.min,
           children: [
             Icon(icon, color: Colors.white, size: 20),
             const SizedBox(width: 8),
-            Text(
-              text,
-              style: GoogleFonts.poppins(
-                fontSize: 14,
-                color: Colors.white,
-                fontWeight: FontWeight.w600,
-              ),
-              overflow: TextOverflow.visible,
-              softWrap: false, // Prevent wrapping for single line buttons
-            ),
+            Text(text, style: GoogleFonts.poppins(fontSize: 14, color: Colors.white, fontWeight: FontWeight.w600), overflow: TextOverflow.visible, softWrap: false),
           ],
         ),
       ),
     );
   }
 
-  // Helper method to build prominent action buttons on the dashboard
-  Widget _buildProminentActionButton({
-    required String text,
-    required IconData icon,
-    required VoidCallback onPressed,
-    required bool isDarkMode,
-  }) {
+  Widget _buildProminentActionButton({required String text, required IconData icon, required VoidCallback onPressed, required bool isDarkMode}) {
     return MouseRegion(
-      onEnter: (_) => setState(() => _isHovered = true), // Set hover state
-      onExit: (_) => setState(() => _isHovered = false), // Reset hover state
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
       child: GestureDetector(
         onTap: onPressed,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
-          width: 180, // Fixed width for consistency
+          width: 180,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-          decoration: BoxDecoration(
-            gradient: ThemeColors.getButtonGradient(isDarkMode), // Dynamic gradient based on theme
-            borderRadius: BorderRadius.circular(12),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(_isHovered ? 0.3 : 0.2), // Larger shadow on hover
-                blurRadius: 8,
-                offset: const Offset(0, 4),
-              ),
-            ],
-          ),
+          decoration: BoxDecoration(gradient: ThemeColors.getButtonGradient(isDarkMode), borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black.withOpacity(_isHovered ? 0.3 : 0.2), blurRadius: 8, offset: const Offset(0, 4))]),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(icon, color: Colors.white, size: 22),
               const SizedBox(width: 10),
-              Text(
-                text,
-                style: GoogleFonts.poppins(
-                  fontSize: 14,
-                  color: Colors.white,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
+              Text(text, style: GoogleFonts.poppins(fontSize: 14, color: Colors.white, fontWeight: FontWeight.w600)),
             ],
           ),
         ),
@@ -818,151 +578,45 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // Builds the main dashboard content view
   Widget _buildDashboard(bool isDarkMode) {
-    final uptime = DateTime.now().difference(_appStartTime); // Calculate app uptime
+    final uptime = DateTime.now().difference(_appStartTime);
     final uptimeStr = '${uptime.inHours}h ${uptime.inMinutes % 60}m';
-    // Format auto-start/end times, default to 'N/A' if data is null
-    final startTime = _autoStartData != null
-        ? '${_autoStartData!['StartTimeHr'].toInt().toString().padLeft(2, '0')}:${_autoStartData!['StartTimeMin'].toInt().toString().padLeft(2, '0')}'
-        : 'N/A';
-    final endTime = _autoStartData != null
-        ? '${_autoStartData!['EndTimeHr'].toInt().toString().padLeft(2, '0')}:${_autoStartData!['EndTimeMin'].toInt().toString().padLeft(2, '0')}'
-        : 'N/A';
+    final startTime = _autoStartData != null ? '${_autoStartData!['StartTimeHr'].toInt().toString().padLeft(2, '0')}:${_autoStartData!['StartTimeMin'].toInt().toString().padLeft(2, '0')}' : 'N/A';
+    final endTime = _autoStartData != null ? '${_autoStartData!['EndTimeHr'].toInt().toString().padLeft(2, '0')}:${_autoStartData!['EndTimeMin'].toInt().toString().padLeft(2, '0')}' : 'N/A';
     return SingleChildScrollView(
       child: Padding(
         padding: const EdgeInsets.all(32),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Dashboard',
-              style: GoogleFonts.poppins(
-                fontSize: 28,
-                fontWeight: FontWeight.w700,
-                color: ThemeColors.getColor('dialogText', isDarkMode),
-              ),
-            ),
+            Text('Dashboard', style: GoogleFonts.poppins(fontSize: 28, fontWeight: FontWeight.w700, color: ThemeColors.getColor('dialogText', isDarkMode))),
             const SizedBox(height: 8),
-            Text(
-              'Monitor and control your system',
-              style: GoogleFonts.poppins(
-                fontSize: 16,
-                color: ThemeColors.getColor('dialogSubText', isDarkMode),
-              ),
-            ),
+            Text('Monitor and control your system', style: GoogleFonts.poppins(fontSize: 16, color: ThemeColors.getColor('dialogSubText', isDarkMode))),
             const SizedBox(height: 24),
-            // Section for quick action buttons
             Container(
               padding: const EdgeInsets.symmetric(vertical: 16),
-              decoration: BoxDecoration(
-                color: ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.9),
-                borderRadius: BorderRadius.circular(12),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.15),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
+              decoration: BoxDecoration(color: ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.9), borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 10, offset: const Offset(0, 4))]),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  _buildProminentActionButton(
-                    text: 'Start Scan',
-                    icon: LucideIcons.play,
-                    onPressed: () {
-                      setState(() {
-                        _selectedIndex = 0;
-                        _pages[0] = _originalNewTestPage; // Ensure it goes to channel selection first
-                      });
-                      _animationController.forward(from: 0.0);
-                      _logActivity('Quick Action: Start Scan');
-                    },
-                    isDarkMode: isDarkMode,
-                  ),
-                  _buildProminentActionButton(
-                    text: 'Open File',
-                    icon: LucideIcons.folderOpen,
-                    onPressed: () => _showOpenFileDialog(context),
-                    isDarkMode: isDarkMode,
-                  ),
-                  _buildProminentActionButton(
-                    text: 'Mode',
-                    icon: LucideIcons.monitor,
-                    onPressed: () => _showSetupDialog(context),
-                    isDarkMode: isDarkMode,
-                  ),
+                  _buildProminentActionButton(text: 'Start Scan', icon: LucideIcons.play, onPressed: () { setState(() { _selectedIndex = 0; _pages[0] = _originalNewTestPage; }); _animationController.forward(from: 0.0); _logActivity('Quick Action: Start Scan'); }, isDarkMode: isDarkMode),
+                  _buildProminentActionButton(text: 'Open File', icon: LucideIcons.folderOpen, onPressed: () => _showOpenFileDialog(context), isDarkMode: isDarkMode),
+                  _buildProminentActionButton(text: 'Mode', icon: LucideIcons.monitor, onPressed: () => _showSetupDialog(context), isDarkMode: isDarkMode),
                 ],
               ),
             ),
             const SizedBox(height: 24),
-            // Grid of information cards
             GridView.count(
-              crossAxisCount: MediaQuery.of(context).size.width > 1200 ? 3 : 2, // Responsive grid
+              crossAxisCount: MediaQuery.of(context).size.width > 1200 ? 3 : 2,
               crossAxisSpacing: 24,
               mainAxisSpacing: 24,
-              shrinkWrap: true, // Take only necessary space
-              physics: const NeverScrollableScrollPhysics(), // Disable internal scrolling
-              childAspectRatio: 1.2, // Aspect ratio for cards
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              childAspectRatio: 1.2,
               children: [
-                _buildDashboardCard(
-                  title: 'System Status',
-                  icon: LucideIcons.monitor,
-                  content: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildStatusRow('Active Channels', '$_activeChannels', isDarkMode),
-                      _buildStatusRow('AutoStart Time', startTime, isDarkMode),
-                      _buildStatusRow('AutoEnd Time', endTime, isDarkMode),
-                      _buildStatusRow('Uptime', uptimeStr, isDarkMode),
-                      const Spacer(), // Pushes the progress bar to the bottom
-                      LinearProgressIndicator(
-                        value: _activeChannels > 0 ? _activeChannels / 50.0 : 0.0, // Max 50 channels?
-                        backgroundColor: ThemeColors.getColor('cardBorder', isDarkMode),
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          ThemeColors.getColor('buttonGradientStart', isDarkMode),
-                        ),
-                      ),
-                    ],
-                  ),
-                  isDarkMode: isDarkMode,
-                ),
-                _buildDashboardCard(
-                  title: 'Recent Logs',
-                  icon: LucideIcons.fileText,
-                  content: SizedBox(
-                    height: 120, // Fixed height for log list
-                    child: ListView(
-                      physics: const ClampingScrollPhysics(), // Prevent "bouncy" scrolling
-                      children: LogPage.getRecentLogs(3) // Get latest 3 logs
-                          .map((log) => _buildLogItem(log, isDarkMode))
-                          .toList(),
-                    ),
-                  ),
-                  isDarkMode: isDarkMode,
-                ),
-                _buildDashboardCard(
-                  title: 'System Info',
-                  icon: LucideIcons.info,
-                  content: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildStatusRow('Version', '2.1.3', isDarkMode),
-                      _buildStatusRow('Theme', isDarkMode ? 'Dark' : 'Light', isDarkMode),
-                      const Spacer(),
-                      Text(
-                        'Last Updated: 05/26/2025', // Placeholder for actual update date
-                        style: GoogleFonts.poppins(
-                          fontSize: 12,
-                          color: ThemeColors.getColor('cardText', isDarkMode).withOpacity(0.7),
-                        ),
-                      ),
-                    ],
-                  ),
-                  isDarkMode: isDarkMode,
-                ),
+                _buildDashboardCard(title: 'System Status', icon: LucideIcons.monitor, content: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [_buildStatusRow('Active Channels', '$_activeChannels', isDarkMode), _buildStatusRow('AutoStart Time', startTime, isDarkMode), _buildStatusRow('AutoEnd Time', endTime, isDarkMode), _buildStatusRow('Uptime', uptimeStr, isDarkMode), const Spacer(), LinearProgressIndicator(value: _activeChannels > 0 ? _activeChannels / 50.0 : 0.0, backgroundColor: ThemeColors.getColor('cardBorder', isDarkMode), valueColor: AlwaysStoppedAnimation<Color>(ThemeColors.getColor('buttonGradientStart', isDarkMode)))]), isDarkMode: isDarkMode),
+                _buildDashboardCard(title: 'Recent Logs', icon: LucideIcons.fileText, content: SizedBox(height: 120, child: ListView(physics: const ClampingScrollPhysics(), children: LogPage.getRecentLogs(3).map((log) => _buildLogItem(log, isDarkMode)).toList())), isDarkMode: isDarkMode),
+                _buildDashboardCard(title: 'System Info', icon: LucideIcons.info, content: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [_buildStatusRow('Version', '2.1.3', isDarkMode), _buildStatusRow('Theme', isDarkMode ? 'Dark' : 'Light', isDarkMode), const Spacer(), Text('Last Updated: 05/26/2025', style: GoogleFonts.poppins(fontSize: 12, color: ThemeColors.getColor('cardText', isDarkMode).withOpacity(0.7)))],), isDarkMode: isDarkMode),
               ],
             ),
           ],
@@ -971,123 +625,50 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  // Helper method to build individual dashboard info cards
-  Widget _buildDashboardCard({
-    required String title,
-    required IconData icon,
-    required Widget content,
-    required bool isDarkMode,
-  }) {
+  Widget _buildDashboardCard({required String title, required IconData icon, required Widget content, required bool isDarkMode}) {
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOut,
       padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: ThemeColors.getColor('cardBackground', isDarkMode),
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.15),
-            blurRadius: 12,
-            spreadRadius: 2,
-            offset: const Offset(0, 4),
-          ),
-        ],
-        border: Border.all( // Subtle border for definition
-          color: ThemeColors.getColor('cardBorder', isDarkMode),
-          width: 1,
-        ),
-      ),
+      decoration: BoxDecoration(color: ThemeColors.getColor('cardBackground', isDarkMode), borderRadius: BorderRadius.circular(8), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 12, spreadRadius: 2, offset: const Offset(0, 4))], border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 1)),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: ThemeColors.getColor('cardIcon', isDarkMode).withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(
-                  icon,
-                  color: ThemeColors.getColor('CardIcon', isDarkMode),
-                  size: 28,
-                ),
-              ),
+              Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: ThemeColors.getColor('cardIcon', isDarkMode).withOpacity(0.2), borderRadius: BorderRadius.circular(8)), child: Icon(icon, color: ThemeColors.getColor('CardIcon', isDarkMode), size: 28)),
               const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  title,
-                  style: GoogleFonts.poppins(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: ThemeColors.getColor('dialogText', isDarkMode),
-                  ),
-                  overflow: TextOverflow.ellipsis, // Truncate long titles
-                ),
-              ),
+              Expanded(child: Text(title, style: GoogleFonts.poppins(fontSize: 18, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode)), overflow: TextOverflow.ellipsis)),
             ],
           ),
           const SizedBox(height: 16),
-          Expanded(child: content), // Content widget takes remaining space
+          Expanded(child: content),
         ],
       ),
     );
   }
 
-  // Helper method to build a row for status information within a card
   Widget _buildStatusRow(String label, String value, bool isDarkMode) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(
-            label,
-            style: GoogleFonts.poppins(
-              fontSize: 12,
-              color: ThemeColors.getColor('cardText', isDarkMode).withOpacity(0.8),
-            ),
-          ),
-          Text(
-            value,
-            style: GoogleFonts.poppins(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: ThemeColors.getColor('cardText', isDarkMode),
-            ),
-          ),
+          Text(label, style: GoogleFonts.poppins(fontSize: 12, color: ThemeColors.getColor('cardText', isDarkMode).withOpacity(0.8))),
+          Text(value, style: GoogleFonts.poppins(fontSize: 12, fontWeight: FontWeight.w600, color: ThemeColors.getColor('cardText', isDarkMode))),
         ],
       ),
     );
   }
 
-  // Helper method to build a single log item for the Recent Logs card
   Widget _buildLogItem(String text, bool isDarkMode) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: ThemeColors.getColor('buttonGradientStart', isDarkMode),
-            ),
-          ),
+          Container(width: 6, height: 6, decoration: BoxDecoration(shape: BoxShape.circle, color: ThemeColors.getColor('buttonGradientStart', isDarkMode))),
           const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              text,
-              style: GoogleFonts.poppins(
-                fontSize: 12,
-                color: ThemeColors.getColor('cardText', isDarkMode),
-              ),
-              overflow: TextOverflow.ellipsis, // Truncate long log messages
-            ),
-          ),
+          Expanded(child: Text(text, style: GoogleFonts.poppins(fontSize: 12, color: ThemeColors.getColor('cardText', isDarkMode)), overflow: TextOverflow.ellipsis)),
         ],
       ),
     );
@@ -1095,8 +676,7 @@ class _HomePageState extends State<HomePage>
 }
 
 // ====================================================================
-// START: Reusable Sidebar Components (SidebarButton, SidebarLogo)
-// These widgets are part of the HomePage file but could be extracted.
+// Reusable Components
 // ====================================================================
 
 class SidebarButton extends StatefulWidget {
@@ -1107,16 +687,7 @@ class SidebarButton extends StatefulWidget {
   final ValueNotifier<bool> isSidebarExpanded;
   final bool isDarkMode;
 
-  const SidebarButton({
-    super.key,
-    required this.icon,
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-    required this.isSidebarExpanded,
-    required this.isDarkMode,
-  });
-
+  const SidebarButton({super.key, required this.icon, required this.label, required this.isSelected, required this.onTap, required this.isSidebarExpanded, required this.isDarkMode});
   @override
   State<SidebarButton> createState() => _SidebarButtonState();
 }
@@ -1130,35 +701,14 @@ class _SidebarButtonState extends State<SidebarButton> with SingleTickerProvider
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 200),
-    );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.05).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
-    );
-    _glowAnimation = Tween<double>(begin: 0.0, end: 0.3).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
-    );
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 200));
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.05).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
+    _glowAnimation = Tween<double>(begin: 0.0, end: 0.3).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
   }
-
   @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  // Handle mouse enter event for hover effects
-  void _onEnter(PointerEvent _) {
-    setState(() => _isHovered = true);
-    _controller.forward();
-  }
-
-  // Handle mouse exit event for hover effects
-  void _onExit(PointerEvent _) {
-    setState(() => _isHovered = false);
-    _controller.reverse();
-  }
+  void dispose() { _controller.dispose(); super.dispose(); }
+  void _onEnter(PointerEvent _) { setState(() => _isHovered = true); _controller.forward(); }
+  void _onExit(PointerEvent _) { setState(() => _isHovered = false); _controller.reverse(); }
 
   @override
   Widget build(BuildContext context) {
@@ -1166,83 +716,30 @@ class _SidebarButtonState extends State<SidebarButton> with SingleTickerProvider
       onEnter: _onEnter,
       onExit: _onExit,
       child: GestureDetector(
-        onTap: () {
-          // Play a quick animation on tap before executing the callback
-          _controller.forward(from: 0.0).then((_) {
-            _controller.reverse();
-            widget.onTap();
-          });
-        },
+        onTap: () { _controller.forward(from: 0.0).then((_) { _controller.reverse(); widget.onTap(); }); },
         child: ValueListenableBuilder<bool>(
           valueListenable: widget.isSidebarExpanded,
           builder: (context, isExpanded, child) {
             return Tooltip(
-              message: isExpanded ? '' : widget.label, // Show tooltip only when collapsed
-              textStyle: GoogleFonts.poppins(
-                color: Colors.white,
-                fontSize: 12,
-              ),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.9),
-                borderRadius: BorderRadius.circular(8),
-              ),
+              message: isExpanded ? '' : widget.label,
+              textStyle: GoogleFonts.poppins(color: Colors.white, fontSize: 12),
+              decoration: BoxDecoration(color: Colors.black.withOpacity(0.9), borderRadius: BorderRadius.circular(8)),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 300),
                 curve: Curves.easeOut,
                 margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: widget.isSelected // Highlight if selected
-                      ? ThemeColors.getColor('sidebarIconSelected', widget.isDarkMode).withOpacity(0.2)
-                      : _isHovered // Highlight on hover
-                      ? ThemeColors.getColor('sidebarGlow', widget.isDarkMode).withOpacity(0.1)
-                      : Colors.transparent,
+                  color: widget.isSelected ? ThemeColors.getColor('sidebarIconSelected', widget.isDarkMode).withOpacity(0.2) : _isHovered ? ThemeColors.getColor('sidebarGlow', widget.isDarkMode).withOpacity(0.1) : Colors.transparent,
                   borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: ThemeColors.getColor('sidebarGlow', widget.isDarkMode)
-                          .withOpacity(_glowAnimation.value), // Glow effect
-                      blurRadius: 6,
-                      spreadRadius: 1,
-                    ),
-                  ],
+                  boxShadow: [BoxShadow(color: ThemeColors.getColor('sidebarGlow', widget.isDarkMode).withOpacity(_glowAnimation.value), blurRadius: 6, spreadRadius: 1)],
                 ),
                 child: Row(
                   children: [
-                    ScaleTransition( // Icon scales on hover/tap
-                      scale: _scaleAnimation,
-                      child: Icon(
-                        widget.icon,
-                        color: widget.isSelected
-                            ? ThemeColors.getColor('sidebarIconSelected', widget.isDarkMode)
-                            : _isHovered
-                            ? ThemeColors.getColor('sidebarText', widget.isDarkMode)
-                            : ThemeColors.getColor('sidebarIcon', widget.isDarkMode),
-                        size: 24,
-                      ),
-                    ),
-                    AnimatedSlide( // Text slides in/out based on expansion
-                      offset: isExpanded ? Offset.zero : const Offset(0.2, 0),
-                      duration: const Duration(milliseconds: 300),
-                      curve: Curves.easeInOut,
-                      child: AnimatedOpacity( // Text fades in/out based on expansion
-                        opacity: isExpanded ? 1.0 : 0.0,
-                        duration: const Duration(milliseconds: 300),
-                        curve: Curves.easeOut,
-                        child: isExpanded
-                            ? Padding(
-                          padding: const EdgeInsets.only(left: 10),
-                          child: Text(
-                            widget.label,
-                            style: GoogleFonts.poppins(
-                              color: ThemeColors.getColor('sidebarText', widget.isDarkMode),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        )
-                            : const SizedBox.shrink(), // Hide text when collapsed
+                    ScaleTransition(scale: _scaleAnimation, child: Icon(widget.icon, color: widget.isSelected ? ThemeColors.getColor('sidebarIconSelected', widget.isDarkMode) : _isHovered ? ThemeColors.getColor('sidebarText', widget.isDarkMode) : ThemeColors.getColor('sidebarIcon', widget.isDarkMode), size: 24)),
+                    AnimatedSlide(offset: isExpanded ? Offset.zero : const Offset(0.2, 0), duration: const Duration(milliseconds: 300), curve: Curves.easeInOut,
+                      child: AnimatedOpacity(opacity: isExpanded ? 1.0 : 0.0, duration: const Duration(milliseconds: 300), curve: Curves.easeOut,
+                        child: isExpanded ? Padding(padding: const EdgeInsets.only(left: 10), child: Text(widget.label, style: GoogleFonts.poppins(color: ThemeColors.getColor('sidebarText', widget.isDarkMode), fontSize: 13, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis)) : const SizedBox.shrink(),
                       ),
                     ),
                   ],
@@ -1261,13 +758,7 @@ class SidebarLogo extends StatefulWidget {
   final ValueNotifier<bool> isSidebarExpanded;
   final bool isDarkMode;
 
-  const SidebarLogo({
-    super.key,
-    required this.onTap,
-    required this.isSidebarExpanded,
-    required this.isDarkMode,
-  });
-
+  const SidebarLogo({super.key, required this.onTap, required this.isSidebarExpanded, required this.isDarkMode});
   @override
   State<SidebarLogo> createState() => _SidebarLogoState();
 }
@@ -1282,36 +773,15 @@ class _SidebarLogoState extends State<SidebarLogo> with SingleTickerProviderStat
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    )..forward(); // Start animation on init
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.05).animate(
-      CurvedAnimation(parent: _controller, curve: const Interval(0.0, 0.3, curve: Curves.easeOut)),
-    );
-    _glowAnimation = Tween<double>(begin: 0.0, end: 0.3).animate(
-      CurvedAnimation(parent: _controller, curve: const Interval(0.0, 0.3, curve: Curves.easeInOut)),
-    );
-    _textAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: const Interval(0.2, 1.0, curve: Curves.easeOut)),
-    );
+    _controller = AnimationController(vsync: this, duration: const Duration(milliseconds: 600))..forward();
+    _scaleAnimation = Tween<double>(begin: 1.0, end: 1.05).animate(CurvedAnimation(parent: _controller, curve: const Interval(0.0, 0.3, curve: Curves.easeOut)));
+    _glowAnimation = Tween<double>(begin: 0.0, end: 0.3).animate(CurvedAnimation(parent: _controller, curve: const Interval(0.0, 0.3, curve: Curves.easeInOut)));
+    _textAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(CurvedAnimation(parent: _controller, curve: const Interval(0.2, 1.0, curve: Curves.easeOut)));
   }
-
   @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _onEnter(PointerEvent _) {
-    setState(() => _isHovered = true);
-    _controller.forward();
-  }
-
-  void _onExit(PointerEvent _) {
-    setState(() => _isHovered = false);
-    _controller.reverse();
-  }
+  void dispose() { _controller.dispose(); super.dispose(); }
+  void _onEnter(PointerEvent _) { setState(() => _isHovered = true); _controller.forward(); }
+  void _onExit(PointerEvent _) { setState(() => _isHovered = false); _controller.reverse(); }
 
   @override
   Widget build(BuildContext context) {
@@ -1320,12 +790,7 @@ class _SidebarLogoState extends State<SidebarLogo> with SingleTickerProviderStat
       onEnter: _onEnter,
       onExit: _onExit,
       child: GestureDetector(
-        onTap: () {
-          _controller.forward(from: 0.0).then((_) {
-            _controller.reverse();
-            widget.onTap(); // Execute the provided onTap callback
-          });
-        },
+        onTap: () { _controller.forward(from: 0.0).then((_) { _controller.reverse(); widget.onTap(); }); },
         child: ValueListenableBuilder<bool>(
           valueListenable: widget.isSidebarExpanded,
           builder: (context, isExpanded, child) {
@@ -1335,70 +800,30 @@ class _SidebarLogoState extends State<SidebarLogo> with SingleTickerProviderStat
               margin: const EdgeInsets.all(8),
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: _isHovered
-                    ? ThemeColors.getColor('sidebarGlow', widget.isDarkMode).withOpacity(0.2)
-                    : Colors.transparent,
+                color: _isHovered ? ThemeColors.getColor('sidebarGlow', widget.isDarkMode).withOpacity(0.2) : Colors.transparent,
                 borderRadius: BorderRadius.circular(12),
-                boxShadow: [
-                  BoxShadow(
-                    color: ThemeColors.getColor('sidebarGlow', widget.isDarkMode)
-                        .withOpacity(_glowAnimation.value),
-                    blurRadius: 6,
-                    spreadRadius: 1,
-                  ),
-                ],
+                boxShadow: [BoxShadow(color: ThemeColors.getColor('sidebarGlow', widget.isDarkMode).withOpacity(_glowAnimation.value), blurRadius: 6, spreadRadius: 1)],
               ),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  ScaleTransition(
-                    scale: _scaleAnimation,
-                    child: Icon(
-                      LucideIcons.cpu, // Logo icon
-                      color: _isHovered
-                          ? ThemeColors.getColor('sidebarText', widget.isDarkMode)
-                          : ThemeColors.getColor('sidebarIcon', widget.isDarkMode),
-                      size: 24,
-                    ),
-                  ),
-                  AnimatedSlide(
-                    offset: isExpanded ? Offset.zero : const Offset(0.2, 0),
-                    duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeInOut,
-                    child: AnimatedOpacity(
-                      opacity: isExpanded ? 1.0 : 0.0,
-                      duration: const Duration(milliseconds: 300),
-                      curve: Curves.easeOut,
-                      child: isExpanded
-                          ? Padding(
+                  ScaleTransition(scale: _scaleAnimation, child: Icon(LucideIcons.cpu, color: _isHovered ? ThemeColors.getColor('sidebarText', widget.isDarkMode) : ThemeColors.getColor('sidebarIcon', widget.isDarkMode), size: 24)),
+                  AnimatedSlide(offset: isExpanded ? Offset.zero : const Offset(0.2, 0), duration: const Duration(milliseconds: 300), curve: Curves.easeInOut,
+                    child: AnimatedOpacity(opacity: isExpanded ? 1.0 : 0.0, duration: const Duration(milliseconds: 300), curve: Curves.easeOut,
+                      child: isExpanded ? Padding(
                         padding: const EdgeInsets.only(left: 8),
                         child: Row(
-                          // Animate each character of the logo text
                           children: List.generate(logoText.length, (index) {
                             return AnimatedBuilder(
                               animation: _textAnimation,
                               builder: (context, child) {
                                 double t = (_textAnimation.value * logoText.length - index).clamp(0.0, 1.0);
-                                return Opacity(
-                                  opacity: t,
-                                  child: Transform.translate(
-                                    offset: Offset(0, (1.0 - t) * 8), // Slide in from bottom
-                                    child: Text(
-                                      logoText[index],
-                                      style: GoogleFonts.poppins(
-                                        color: ThemeColors.getColor('sidebarText', widget.isDarkMode),
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                  ),
-                                );
+                                return Opacity(opacity: t, child: Transform.translate(offset: Offset(0, (1.0 - t) * 8), child: Text(logoText[index], style: GoogleFonts.poppins(color: ThemeColors.getColor('sidebarText', widget.isDarkMode), fontSize: 14, fontWeight: FontWeight.w700))));
                               },
                             );
                           }),
                         ),
-                      )
-                          : const SizedBox.shrink(),
+                      ) : const SizedBox.shrink(),
                     ),
                   ),
                 ],
@@ -1411,16 +836,9 @@ class _SidebarLogoState extends State<SidebarLogo> with SingleTickerProviderStat
   }
 }
 
-// ====================================================================
-// END: Reusable Sidebar Components
-// ====================================================================
-
-
-// Custom Animated Loading Indicator Widget for dialogs
 class AnimatedLoadingIndicator extends StatefulWidget {
   final bool isDarkMode;
   const AnimatedLoadingIndicator({Key? key, required this.isDarkMode}) : super(key: key);
-
   @override
   _AnimatedLoadingIndicatorState createState() => _AnimatedLoadingIndicatorState();
 }
@@ -1434,35 +852,13 @@ class _AnimatedLoadingIndicatorState extends State<AnimatedLoadingIndicator> wit
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(); // Repeat indefinitely for continuous loading
-
-    _rotationAnimation = Tween<double>(begin: 0, end: 1).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.linear), // Linear rotation
-    );
-
-    _scaleAnimation = TweenSequence<double>([ // Pulsating scale effect
-      TweenSequenceItem(tween: Tween<double>(begin: 0.8, end: 1.2), weight: 1),
-      TweenSequenceItem(tween: Tween<double>(begin: 1.2, end: 0.8), weight: 1),
-    ]).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
-    );
-
-    _colorAnimation = ColorTween( // Color oscillates between two theme colors
-      begin: ThemeColors.getColor('buttonGradientStart', widget.isDarkMode),
-      end: ThemeColors.getColor('buttonGradientEnd', widget.isDarkMode),
-    ).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
-    );
+    _controller = AnimationController(vsync: this, duration: const Duration(seconds: 2))..repeat();
+    _rotationAnimation = Tween<double>(begin: 0, end: 1).animate(CurvedAnimation(parent: _controller, curve: Curves.linear));
+    _scaleAnimation = TweenSequence<double>([TweenSequenceItem(tween: Tween<double>(begin: 0.8, end: 1.2), weight: 1), TweenSequenceItem(tween: Tween<double>(begin: 1.2, end: 0.8), weight: 1)]).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
+    _colorAnimation = ColorTween(begin: ThemeColors.getColor('buttonGradientStart', widget.isDarkMode), end: ThemeColors.getColor('buttonGradientEnd', widget.isDarkMode)).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
   }
-
   @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+  void dispose() { _controller.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
@@ -1472,25 +868,8 @@ class _AnimatedLoadingIndicatorState extends State<AnimatedLoadingIndicator> wit
         return Stack(
           alignment: Alignment.center,
           children: [
-            SizedBox(
-              width: 80,
-              height: 80,
-              child: CircularProgressIndicator(
-                valueColor: _colorAnimation, // Animated color for indicator
-                strokeWidth: 4,
-              ),
-            ),
-            ScaleTransition(
-              scale: _scaleAnimation, // Animated scale for icon
-              child: RotationTransition(
-                turns: _rotationAnimation, // Animated rotation for icon
-                child: Icon(
-                  LucideIcons.hardDrive, // Icon related to data/storage
-                  size: 40,
-                  color: _colorAnimation.value, // Animated color for icon
-                ),
-              ),
-            ),
+            SizedBox(width: 80, height: 80, child: CircularProgressIndicator(valueColor: _colorAnimation, strokeWidth: 4)),
+            ScaleTransition(scale: _scaleAnimation, child: RotationTransition(turns: _rotationAnimation, child: Icon(LucideIcons.hardDrive, size: 40, color: _colorAnimation.value))),
           ],
         );
       },
