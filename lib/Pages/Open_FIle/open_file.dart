@@ -16,6 +16,7 @@ import '../Secondary_window/save_secondary_window.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:path/path.dart' as path;
+import '../homepage.dart';
 import '../logScreen/log.dart';
 
 class OpenFilePage extends StatefulWidget {
@@ -463,7 +464,16 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
             fontSize: 14,
           ),
         ),
-        onPressed: widget.onExit, // Use the callback from the widget
+        // --- MODIFICATION IS HERE ---
+        onPressed: () {
+          // Navigate to HomePage and remove all previous routes
+          Navigator.pushAndRemoveUntil(
+            context,
+            MaterialPageRoute(builder: (context) => const HomePage()), // Assuming HomePage() is correct
+                (Route<dynamic> route) => false,
+          );
+        },
+        // --- END OF MODIFICATION ---
         style: TextButton.styleFrom(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           shape: RoundedRectangleBorder(
@@ -1193,7 +1203,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                               ExportUtils.exportBasedOnMode(context: context, mode: 'Table', tableData: data, fileName: _fileNameController.text, graphImage: null, authSettings: await DatabaseManager().getAuthSettings(), channelNames: channelNames, isDarkMode: isDarkMode);
                             }, isDarkMode: isDarkMode, icon: Icons.table_chart_outlined),
                           if (Global.selectedMode.value == 'Combined')
-                            _buildControlButton('Export All', () async { // <-- MODIFIED: Shortened label
+                            _buildControlButton('Export All', () async {
                               final timeRange = await _showTimeRangeDialog(isDarkMode);
                               List<Map<String, dynamic>> data = timeRange != null ? _filterDataByTimeRange(timeRange['from']!, timeRange['to']!) : tableData;
                               Uint8List? graphImg = await _captureGraph(filteredData: timeRange != null ? data : null, isDarkMode: isDarkMode);
