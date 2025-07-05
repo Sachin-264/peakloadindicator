@@ -1074,7 +1074,7 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
       left: position.dx, top: position.dy,
       child: SaveMultiWindowGraph(
         windowId: 'window_${_windowEntries.length}', initialData: dataByChannel, channelColors: convertedgraphLineColour, channelConfigs: channelConfigs, entry: entry,
-        onPositionUpdate: (newPosition) => position = newPosition,
+        // onPositionUpdate: (newPosition) => position = newPosition,
         onClose: (closedEntry) { if (mounted) setState(() { _windowEntries.remove(closedEntry); closedEntry.remove(); }); },
       ),
     ));

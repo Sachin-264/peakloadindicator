@@ -372,18 +372,21 @@ class DatabaseManager {
         String? companyName,
         String? companyAddress,
         String? logoPath,
+        bool? isAutoSaveEnabled,
+        int? autoSaveIntervalSeconds,
       }) async {
     final db = await database;
     try {
-      // REMOVED: Encryption logic
       await db.delete('AuthSettings');
       await db.insert('AuthSettings', {
         'isAuthEnabled': isAuthEnabled ? 1 : 0,
         'username': username,
-        'password': password, // Store password directly (unencrypted)
+        'password': password,
         'companyName': companyName ?? '',
         'companyAddress': companyAddress ?? '',
         'logoPath': logoPath,
+        'isAutoSaveEnabled': isAutoSaveEnabled ?? false ? 1 : 0, // Save the new setting
+        'autoSaveIntervalSeconds': autoSaveIntervalSeconds ?? 30,
       });
       print('[DatabaseManager] Auth settings saved');
       LogPage.addLog('[${_currentTime}] Auth settings saved');
@@ -393,6 +396,7 @@ class DatabaseManager {
       throw e;
     }
   }
+
 
   Future<void> saveComPortSettings(String port, int baudRate, int dataBits, String parity, int stopBits) async {
     final db = await database;

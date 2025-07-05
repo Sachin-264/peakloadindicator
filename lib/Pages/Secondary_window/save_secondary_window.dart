@@ -1,12 +1,22 @@
 import 'dart:async';
 import 'dart:math';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
+import 'package:intl/intl.dart';
+import 'package:lucide_icons/lucide_icons.dart';
+import 'package:syncfusion_flutter_charts/charts.dart';
 import '../../constants/colors.dart';
 import '../../constants/global.dart';
 import '../NavPages/channel.dart';
+
+// Data model for Syncfusion Charts
+class ChartData {
+  final DateTime time;
+  final double? value;
+  final double? xValue; // For channel-vs-channel mode
+
+  ChartData(this.time, this.value, {this.xValue});
+}
 
 // GraphDataNotifier for graph data updates
 class GraphDataNotifier extends ChangeNotifier {
@@ -35,7 +45,6 @@ class GraphDataNotifier extends ChangeNotifier {
 class SmoothScrollBehavior extends ScrollBehavior {
   @override
   ScrollPhysics getScrollPhysics(BuildContext context) => const ClampingScrollPhysics();
-
   @override
   Widget buildViewportChrome(BuildContext context, Widget child, AxisDirection axisDirection) => child;
 }
@@ -63,14 +72,10 @@ extension StreamExtensions<T> on Stream<T> {
         },
         handleDone: (sink) {
           timer?.cancel();
-          if (hasData) {
-            sink.add(latestData!);
-          }
+          if (hasData) sink.add(latestData!);
           sink.close();
         },
-        handleError: (error, stackTrace, sink) {
-          sink.addError(error, stackTrace);
-        },
+        handleError: (error, stackTrace, sink) => sink.addError(error, stackTrace),
       ),
     );
   }
@@ -82,53 +87,19 @@ class SaveMultiWindowGraph extends StatefulWidget {
   final Map<String, Color> channelColors;
   final Map<String, Channel> channelConfigs;
   final OverlayEntry entry;
-  final Function(Offset)? onPositionUpdate;
   final Function(OverlayEntry)? onClose;
+  final Function(String channelId, Color newColor)? onColorChanged;
 
-  SaveMultiWindowGraph({
+  const SaveMultiWindowGraph({
     super.key,
     required this.windowId,
     required this.initialData,
     required this.channelColors,
     required this.channelConfigs,
     required this.entry,
-    this.onPositionUpdate,
     this.onClose,
-  }) {
-    // Log received data in constructor
-    print('[MULTI_WINDOW_GRAPH] Constructor called for windowId: $windowId');
-    print('  initialData:');
-    initialData.forEach((channelId, dataPoints) {
-      print('    Channel ID: $channelId');
-      print('    Number of data points: ${dataPoints.length}');
-      print('    Sample data (first 5 points):');
-      dataPoints.take(5).forEach((point) {
-        print('      Time: ${point['time']}, Value: ${point['value']}, Timestamp: ${point['Timestamp']}');
-      });
-      if (dataPoints.length > 5) {
-        print('      ... (total ${dataPoints.length} points)');
-      }
-    });
-    print('  channelConfigs:');
-    channelConfigs.forEach((channelId, channel) {
-      print('    Channel ID: $channelId');
-      print('      recNo: ${channel.recNo}');
-      print('      channelName: ${channel.channelName}');
-      print('      startingCharacter: ${channel.startingCharacter}');
-      print('      dataLength: ${channel.dataLength}');
-      print('      decimalPlaces: ${channel.decimalPlaces}');
-      print('      unit: ${channel.unit}');
-      print('      chartMaximumValue: ${channel.chartMaximumValue}');
-      print('      chartMinimumValue: ${channel.chartMinimumValue}');
-      print('      targetAlarmMax: ${channel.targetAlarmMax}');
-      print('      targetAlarmMin: ${channel.targetAlarmMin}');
-      print('      targetAlarmColour: 0x${channel.targetAlarmColour.toRadixString(16).padLeft(8, '0')}');
-    });
-    print('  channelColors:');
-    channelColors.forEach((channelId, color) {
-      print('    Channel ID: $channelId, Color: 0x${color.value.toRadixString(16).padLeft(8, '0')}');
-    });
-  }
+    this.onColorChanged,
+  });
 
   @override
   State<SaveMultiWindowGraph> createState() => _SaveMultiWindowGraphState();
@@ -145,6 +116,7 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
   Set<String> selectedChannels = {};
   String? xAxisChannel;
   final showPeaks = ValueNotifier<bool>(true);
+  final showDataPoints = ValueNotifier<bool>(false);
   bool showXAxisOptions = true;
   bool isMinimized = false;
   bool isMaximized = false;
@@ -155,34 +127,20 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
   double timeRangeMinutes = 1.0;
   bool initialSelectionDone = false;
   int currentSegmentIndex = 0;
-  Map<String, Map<String, dynamic>> peakValues = {};
+  Map<String, ChartData> peakValues = {};
 
-  // Parse time string (e.g., "19:53:32") to timestamp (milliseconds since epoch)
   double _parseTimeToTimestamp(String? timeStr) {
-    if (timeStr == null || timeStr.isEmpty) {
-      print('[MULTI_WINDOW_GRAPH] Null or empty time string, using current time');
-      return DateTime.now().millisecondsSinceEpoch.toDouble();
-    }
+    if (timeStr == null || timeStr.isEmpty) return DateTime.now().millisecondsSinceEpoch.toDouble();
     try {
       List<String> parts = timeStr.split(':');
       if (parts.length == 3) {
         int hours = int.parse(parts[0]);
         int minutes = int.parse(parts[1]);
         int seconds = int.parse(parts[2]);
-        return DateTime.now()
-            .copyWith(
-          hour: hours,
-          minute: minutes,
-          second: seconds,
-          millisecond: 0,
-          microsecond: 0,
-        )
-            .millisecondsSinceEpoch
-            .toDouble();
+        return DateTime.now().copyWith(hour: hours, minute: minutes, second: seconds, millisecond: 0, microsecond: 0).millisecondsSinceEpoch.toDouble();
       }
       throw FormatException('Invalid time format: $timeStr');
     } catch (e) {
-      print('[MULTI_WINDOW_GRAPH] Error parsing time $timeStr: $e');
       return DateTime.now().millisecondsSinceEpoch.toDouble();
     }
   }
@@ -190,192 +148,89 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 150),
-    );
+    _animationController = AnimationController(vsync: this, duration: const Duration(milliseconds: 150));
 
-    // Initialize data notifier
     final timeRangeMs = (timeRangeHours + (timeRangeMinutes / 60)) * 3600000;
-    final initialSegments = widget.initialData.map((channel, data) => MapEntry(
-      channel,
-      _createSegments(data, timeRangeMs),
-    ));
-    _dataNotifier = GraphDataNotifier(
-      initialSegments,
-      Map.from(widget.channelColors),
-      Map.from(widget.channelConfigs),
-    );
-
-    // Log initialSegments in initState
-    print('[MULTI_WINDOW_GRAPH] initState: Initial segments created');
-    initialSegments.forEach((channelId, segments) {
-      print('  Channel ID: $channelId');
-      print('    Number of segments: ${segments.length}');
-      segments.asMap().forEach((index, segment) {
-        print('    Segment $index:');
-        print('      Number of points: ${segment.length}');
-        print('      Sample data (first 5 points):');
-        segment.take(5).forEach((point) {
-          print('        Time: ${point['time']}, Value: ${point['value']}, Timestamp: ${point['Timestamp']}');
-        });
-        if (segment.length > 5) {
-          print('        ... (total ${segment.length} points)');
-        }
-      });
-    });
-
-    // Set default selected channels
+    final initialSegments = widget.initialData.map((channel, data) => MapEntry(channel, _createSegments(data, timeRangeMs)));
+    _dataNotifier = GraphDataNotifier(initialSegments, Map.from(widget.channelColors), Map.from(widget.channelConfigs));
     selectedChannels.addAll(widget.channelConfigs.keys);
     initialSelectionDone = selectedChannels.isNotEmpty;
 
-    // Throttled stream listener
-    _subscription = Global.graphDataStream.throttle(const Duration(milliseconds: 100)).listen(
-          (update) {
-        print('[MULTI_WINDOW_GRAPH] Stream update received');
-        if (update.containsKey('dataByChannel') &&
-            update.containsKey('channelColors') &&
-            update.containsKey('channelConfigs')) {
-          final newData = Map<String, List<Map<String, dynamic>>>.from(update['dataByChannel']);
-          final timeRangeMs = (timeRangeHours + (timeRangeMinutes / 60)) * 3600000;
-          final updatedSegments = Map<String, List<List<Map<String, dynamic>>>>.from(_dataNotifier.dataByChannelSegments);
+    _subscription = Global.graphDataStream.throttle(const Duration(milliseconds: 100)).listen((update) {
+      if (update.containsKey('dataByChannel') && update.containsKey('channelColors') && update.containsKey('channelConfigs')) {
+        final newData = Map<String, List<Map<String, dynamic>>>.from(update['dataByChannel']);
+        final timeRangeMs = (timeRangeHours + (timeRangeMinutes / 60)) * 3600000;
+        final updatedSegments = Map<String, List<List<Map<String, dynamic>>>>.from(_dataNotifier.dataByChannelSegments);
 
-          newData.forEach((channel, data) {
-            // Process new data points
-            for (var point in data) {
-              // Add Timestamp if missing
-              if (!point.containsKey('Timestamp') || point['Timestamp'] == null) {
-                point['Timestamp'] = _parseTimeToTimestamp(point['time']);
-              }
-              // Use 0.0 for null value
-              if (point['value'] == null || (point['value'] is num && (point['value'] as num).isNaN)) {
-                print('[MULTI_WINDOW_GRAPH] Stream: Setting null/invalid value to 0.0 for Channel $channel: $point');
-                point['value'] = 0.0;
-              }
-              // Use current time string for null time
-              if (point['time'] == null || (point['time'] is String && point['time'].isEmpty)) {
-                point['time'] = DateTime.fromMillisecondsSinceEpoch(point['Timestamp'].toInt())
-                    .toIso8601String()
-                    .split('T')[1]
-                    .split('.')[0];
-              }
-            }
-            updatedSegments.putIfAbsent(channel, () => [[]]);
-            final segments = updatedSegments[channel]!;
-            for (var point in data) {
-              final timestamp = (point['Timestamp'] as num?)?.toDouble() ?? _parseTimeToTimestamp(point['time']);
-              if (segments.isEmpty || segments.last.isEmpty) {
+        newData.forEach((channel, data) {
+          for (var point in data) {
+            point['Timestamp'] ??= _parseTimeToTimestamp(point['time']);
+            point['value'] ??= 0.0;
+            point['time'] ??= DateTime.fromMillisecondsSinceEpoch(point['Timestamp'].toInt()).toIso8601String().split('T')[1].split('.')[0];
+          }
+          updatedSegments.putIfAbsent(channel, () => [[]]);
+          final segments = updatedSegments[channel]!;
+          for (var point in data) {
+            final timestamp = (point['Timestamp'] as num).toDouble();
+            if (segments.isEmpty || segments.last.isEmpty) {
+              segments.add([point]);
+            } else {
+              final segmentStartTime = (segments.last.first['Timestamp'] as num).toDouble();
+              if (timestamp >= segmentStartTime + timeRangeMs) {
                 segments.add([point]);
               } else {
-                final segmentStartTime = (segments.last.first['Timestamp'] as num?)?.toDouble() ?? 0;
-                if (timestamp >= segmentStartTime + timeRangeMs) {
-                  segments.add([point]);
-                } else {
-                  segments.last.add(point);
-                  // Cap segment size to 2000 points
-                  if (segments.last.length > 2000) {
-                    segments.last.removeRange(0, segments.last.length - 2000);
-                  }
-                }
+                segments.last.add(point);
+                if (segments.last.length > 2000) segments.last.removeRange(0, segments.last.length - 2000);
               }
             }
-          });
-
-          // Recreate segments to ensure correct start times
-          newData.forEach((channel, data) {
-            updatedSegments[channel] = _createSegments(
-              updatedSegments[channel]!.expand((s) => s).toList(),
-              timeRangeMs,
-            );
-          });
-
-          currentSegmentIndex = updatedSegments.values
-              .where((segments) => segments.isNotEmpty)
-              .map((segments) => segments.length - 1)
-              .reduce(max);
-
-          final newColors = Map<String, Color>.from(update['channelColors']);
-          final updatedColors = Map<String, Color>.from(_dataNotifier.channelColors)..addAll(newColors);
-          _dataNotifier.updateData(
-            newData: updatedSegments,
-            newColors: updatedColors,
-            newConfigs: Map<String, Channel>.from(update['channelConfigs']),
-          );
-
-          // Reset xAxisChannel if selectedChannels changes
-          if (selectedChannels.length != 2) {
-            xAxisChannel = null;
-            showXAxisOptions = true;
           }
+        });
+
+        newData.forEach((channel, data) => updatedSegments[channel] = _createSegments(updatedSegments[channel]!.expand((s) => s).toList(), timeRangeMs));
+        if (updatedSegments.values.where((s) => s.isNotEmpty).isNotEmpty) {
+          currentSegmentIndex = updatedSegments.values.where((s) => s.isNotEmpty).map((s) => s.length - 1).reduce(max);
         }
-      },
-      onError: (error) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error updating graph data: $error')),
-        );
-      },
-    );
+        final broadcastColors = Map<String, Color>.from(update['channelColors']);
+        final localColors = _dataNotifier.channelColors;
+        final mergedColors = {...broadcastColors, ...localColors};
+        _dataNotifier.updateData(newData: updatedSegments, newColors: mergedColors, newConfigs: Map<String, Channel>.from(update['channelConfigs']));
+        if (selectedChannels.length != 2) {
+          xAxisChannel = null;
+          showXAxisOptions = true;
+        }
+      }
+    }, onError: (error) { if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error updating graph data: $error'))); });
   }
 
   List<List<Map<String, dynamic>>> _createSegments(List<Map<String, dynamic>> data, double timeRangeMs) {
-    if (data.isEmpty) {
-      print('[MULTI_WINDOW_GRAPH] _createSegments: Empty data, returning single empty segment');
-      return [[]];
-    }
+    if (data.isEmpty) return [[]];
     final segments = <List<Map<String, dynamic>>>[];
-    // Process input data
     final processedData = data.map((point) {
       final newPoint = Map<String, dynamic>.from(point);
-      // Add Timestamp if missing
-      if (!newPoint.containsKey('Timestamp') || newPoint['Timestamp'] == null) {
-        newPoint['Timestamp'] = _parseTimeToTimestamp(newPoint['time']);
-      }
-      // Use 0.0 for null value
-      if (newPoint['value'] == null || (newPoint['value'] is num && (newPoint['value'] as num).isNaN)) {
-        print('[MULTI_WINDOW_GRAPH] _createSegments: Setting null/invalid value to 0.0: $newPoint');
-        newPoint['value'] = 0.0;
-      }
-      // Use time from Timestamp if time is null
-      if (newPoint['time'] == null || (newPoint['time'] is String && newPoint['time'].isEmpty)) {
-        newPoint['time'] = DateTime.fromMillisecondsSinceEpoch(newPoint['Timestamp'].toInt())
-            .toIso8601String()
-            .split('T')[1]
-            .split('.')[0];
-      }
+      newPoint['Timestamp'] ??= _parseTimeToTimestamp(newPoint['time']);
+      newPoint['value'] ??= 0.0;
+      newPoint['time'] ??= DateTime.fromMillisecondsSinceEpoch(newPoint['Timestamp'].toInt()).toIso8601String().split('T')[1].split('.')[0];
       return newPoint;
     }).toList();
-
-    // Sort by Timestamp
-    final sortedData = processedData
-      ..sort((a, b) => ((a['Timestamp'] as num?) ?? 0).compareTo((b['Timestamp'] as num?) ?? 0));
-
+    final sortedData = processedData..sort((a, b) => (a['Timestamp'] as num).compareTo(b['Timestamp'] as num));
     double? segmentStartTime;
     segments.add([]);
-
     for (var point in sortedData) {
-      final timestamp = (point['Timestamp'] as num?)?.toDouble() ?? _parseTimeToTimestamp(point['time']);
-
+      final timestamp = (point['Timestamp'] as num).toDouble();
       if (segmentStartTime == null) {
         segmentStartTime = timestamp;
         segments.last.add(point);
         continue;
       }
-
       if (timestamp >= segmentStartTime + timeRangeMs) {
         segments.add([point]);
         segmentStartTime = timestamp;
       } else {
         segments.last.add(point);
       }
-
-      // Cap segment size
-      if (segments.last.length > 2000) {
-        segments.last.removeRange(0, segments.last.length - 2000);
-      }
+      if (segments.last.length > 2000) segments.last.removeRange(0, segments.last.length - 2000);
     }
-
     currentSegmentIndex = segments.isEmpty ? 0 : segments.length - 1;
-    print('[MULTI_WINDOW_GRAPH] _createSegments: Created ${segments.length} segments');
     return segments.isEmpty ? [[]] : segments;
   }
 
@@ -384,254 +239,99 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
     _subscription?.cancel();
     _animationController?.dispose();
     showPeaks.dispose();
+    showDataPoints.dispose();
     isChannelPanelOpen.dispose();
     isLegendPanelOpen.dispose();
     super.dispose();
   }
 
-  void _updateSize(double width, double height) {
-    setState(() {
-      windowWidth = width.clamp(400, 1920);
-      windowHeight = height.clamp(isMinimized ? 40 : 200, 1080);
-    });
-  }
-
-  void _updatePosition(DragUpdateDetails details) {
-    if (isMaximized) return;
-    setState(() {
-      position += details.delta;
-      widget.onPositionUpdate?.call(position);
-    });
-  }
-
-  void _resizeWindow(DragUpdateDetails details, String edge) {
-    if (isMaximized) return;
-    setState(() {
-      double newWidth = windowWidth;
-      double newHeight = windowHeight;
-      Offset newPosition = position;
-
-      switch (edge) {
-        case 'top':
-          newHeight -= details.delta.dy;
-          newPosition = Offset(position.dx, position.dy + details.delta.dy);
-          break;
-        case 'bottom':
-          newHeight += details.delta.dy;
-          break;
-        case 'left':
-          newWidth -= details.delta.dx;
-          newPosition = Offset(position.dx + details.delta.dx, position.dy);
-          break;
-        case 'right':
-          newWidth += details.delta.dx;
-          break;
-        case 'topLeft':
-          newWidth -= details.delta.dx;
-          newHeight -= details.delta.dy;
-          newPosition = Offset(position.dx + details.delta.dx, position.dy + details.delta.dy);
-          break;
-        case 'topRight':
-          newWidth += details.delta.dx;
-          newHeight -= details.delta.dy;
-          newPosition = Offset(position.dx, position.dy + details.delta.dy);
-          break;
-        case 'bottomLeft':
-          newWidth -= details.delta.dx;
-          newHeight += details.delta.dy;
-          newPosition = Offset(position.dx + details.delta.dx, position.dy);
-          break;
-        case 'bottomRight':
-          newWidth += details.delta.dx;
-          newHeight += details.delta.dy;
-          break;
-      }
-
-      _updateSize(newWidth, newHeight);
-      position = newPosition;
-      widget.onPositionUpdate?.call(position);
-    });
-  }
-
-  void _minimizeWindow() {
-    setState(() {
-      if (!isMinimized) {
-        previousWidth = windowWidth;
-        previousHeight = windowHeight;
-        _updateSize(windowWidth, 40);
-        isMinimized = true;
-      } else {
-        _updateSize(previousWidth ?? 850, previousHeight ?? 450);
-        isMinimized = false;
-      }
-    });
-  }
-
-  void _maximizeWindow() {
-    setState(() {
-      if (!isMaximized) {
-        previousWidth = windowWidth;
-        previousHeight = windowHeight;
-        _updateSize(MediaQuery.of(context).size.width, MediaQuery.of(context).size.height);
-        position = Offset.zero;
-        isMaximized = true;
-      } else {
-        _updateSize(previousWidth ?? 850, previousHeight ?? 450);
-        position = const Offset(100, 100);
-        isMaximized = false;
-      }
-      widget.onPositionUpdate?.call(position);
-    });
-  }
-
-  void _closeWindow() {
-    widget.entry.remove();
-    widget.onClose?.call(widget.entry);
-  }
+  void _updateSize(double width, double height) => setState(() { windowWidth = width.clamp(isMinimized ? 280 : 400, 1920); windowHeight = height.clamp(isMinimized ? 40 : 200, 1080); });
+  void _updatePosition(DragUpdateDetails details) { if (!isMaximized) setState(() => position += details.delta); }
+  void _resizeWindow(DragUpdateDetails details, String edge) { if (!isMaximized) setState(() { double newWidth = windowWidth, newHeight = windowHeight; Offset newPosition = position; switch (edge) { case 'top': newHeight -= details.delta.dy; newPosition = Offset(position.dx, position.dy + details.delta.dy); break; case 'bottom': newHeight += details.delta.dy; break; case 'left': newWidth -= details.delta.dx; newPosition = Offset(position.dx + details.delta.dx, position.dy); break; case 'right': newWidth += details.delta.dx; break; case 'topLeft': newWidth -= details.delta.dx; newHeight -= details.delta.dy; newPosition = Offset(position.dx + details.delta.dx, position.dy + details.delta.dy); break; case 'topRight': newWidth += details.delta.dx; newHeight -= details.delta.dy; newPosition = Offset(position.dx, position.dy + details.delta.dy); break; case 'bottomLeft': newWidth -= details.delta.dx; newHeight += details.delta.dy; newPosition = Offset(position.dx + details.delta.dx, position.dy); break; case 'bottomRight': newWidth += details.delta.dx; newHeight += details.delta.dy; break; } _updateSize(newWidth, newHeight); position = newPosition; }); }
+  void _minimizeWindow() => setState(() { if (!isMinimized) { previousWidth = windowWidth; previousHeight = windowHeight; _updateSize(280, 40); isMinimized = true; } else { _updateSize(previousWidth ?? 850, previousHeight ?? 450); isMinimized = false; } });
+  void _maximizeWindow() => setState(() { if (!isMaximized) { previousWidth = windowWidth; previousHeight = windowHeight; _updateSize(MediaQuery.of(context).size.width, MediaQuery.of(context).size.height); position = Offset.zero; isMaximized = true; } else { _updateSize(previousWidth ?? 850, previousHeight ?? 450); position = const Offset(100, 100); isMaximized = false; } });
+  void _closeWindow() { widget.entry.remove(); widget.onClose?.call(widget.entry); }
 
   Widget _buildChannelPanel() {
     return ValueListenableBuilder<bool>(
       valueListenable: isChannelPanelOpen,
       builder: (context, open, _) {
         return AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          width: open ? 250 : 0,
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.95),
-            borderRadius: const BorderRadius.only(
-              topLeft: Radius.circular(12),
-              bottomLeft: Radius.circular(12),
-            ),
-            boxShadow: [
-              if (open)
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.1),
-                  blurRadius: 4,
-                  offset: const Offset(2, 0),
-                ),
-            ],
-          ),
-          child: open
-              ? ScrollConfiguration(
+          duration: const Duration(milliseconds: 200), width: open ? 250 : 0,
+          decoration: BoxDecoration(color: Colors.white.withOpacity(0.95), borderRadius: const BorderRadius.only(topLeft: Radius.circular(12), bottomLeft: Radius.circular(12)), boxShadow: [if (open) BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(2, 0))]),
+          child: open ? ScrollConfiguration(
             behavior: SmoothScrollBehavior(),
             child: SingleChildScrollView(
               physics: const AlwaysScrollableScrollPhysics(),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: Text(
-                      'Channels',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 16,
-                        color: Colors.black87,
-                      ),
-                    ),
-                  ),
+                  const Padding(padding: EdgeInsets.all(12), child: Text('Channels', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.black87))),
                   ..._dataNotifier.channelConfigs.keys.map((channel) {
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         ListTile(
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                          title: Text(
-                            _dataNotifier.channelConfigs[channel]?.channelName ?? channel,
-                            style: const TextStyle(fontSize: 14),
-                          ),
-                          leading: Checkbox(
-                            value: selectedChannels.contains(channel),
-                            onChanged: (value) {
-                              setState(() {
-                                if (value == true) {
-                                  selectedChannels.add(channel);
-                                } else {
-                                  if (selectedChannels.length <= 1) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('At least one channel must be selected.'),
-                                      ),
-                                    );
-                                    return;
-                                  }
-                                  selectedChannels.remove(channel);
-                                  peakValues.remove(channel);
-                                }
-                                if (selectedChannels.length != 2) {
-                                  xAxisChannel = null;
-                                  showXAxisOptions = true;
-                                }
-                                initialSelectionDone = selectedChannels.isNotEmpty;
-                              });
-                            },
-                          ),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4), title: Text(_dataNotifier.channelConfigs[channel]?.channelName ?? channel, style: const TextStyle(fontSize: 14)),
+                          leading: Checkbox(value: selectedChannels.contains(channel), onChanged: (value) => setState(() { if (value == true) { selectedChannels.add(channel); } else { if (selectedChannels.length <= 1) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('At least one channel must be selected.'))); return; } selectedChannels.remove(channel); peakValues.remove(channel); } if (selectedChannels.length != 2) { xAxisChannel = null; showXAxisOptions = true; } initialSelectionDone = selectedChannels.isNotEmpty; })),
                         ),
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                           child: BlockPicker(
                             pickerColor: _dataNotifier.channelColors[channel] ?? Colors.blue,
                             onColorChanged: (color) {
-                              final updatedColors = Map<String, Color>.from(_dataNotifier.channelColors)
-                                ..[channel] = color;
-                              _dataNotifier.updateData(
-                                newData: _dataNotifier.dataByChannelSegments,
-                                newColors: updatedColors,
-                                newConfigs: _dataNotifier.channelConfigs,
-                              );
+                              final updatedColors = Map<String, Color>.from(_dataNotifier.channelColors).. [channel] = color;
+                              setState(() {
+                                _dataNotifier.updateData(newData: _dataNotifier.dataByChannelSegments, newColors: updatedColors, newConfigs: _dataNotifier.channelConfigs);
+                                widget.onColorChanged?.call(channel, color);
+                              });
                             },
-                            availableColors: const [
-                              Colors.red,
-                              Colors.blue,
-                              Colors.green,
-                              Colors.yellow,
-                              Colors.purple,
-                              Colors.orange,
-                              Colors.cyan,
-                              Colors.pink,
-                            ],
-                            layoutBuilder: (context, colors, picker) => Column(
-                              children: [
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  children: colors.map((color) => picker(color)).toList(),
-                                ),
-                              ],
-                            ),
+                            availableColors: const [Colors.red, Colors.blue, Colors.green, Colors.yellow, Colors.purple, Colors.orange, Colors.cyan, Colors.pink],
+                            layoutBuilder: (context, colors, picker) => Column(children: [Wrap(spacing: 8, runSpacing: 8, children: colors.map((color) => picker(color)).toList())]),
                           ),
                         ),
                       ],
                     );
                   }),
                   const SizedBox(height: 12),
-                  if (!initialSelectionDone)
-                    const Padding(
-                      padding: EdgeInsets.all(12),
-                      child: Text(
-                        'Please select at least one channel.',
-                        style: TextStyle(color: Colors.red, fontSize: 12),
-                      ),
-                    ),
+                  if (!initialSelectionDone) const Padding(padding: EdgeInsets.all(12), child: Text('Please select at least one channel.', style: TextStyle(color: Colors.red, fontSize: 12))),
                 ],
               ),
             ),
-          )
-              : null,
+          ) : null,
         );
       },
     );
   }
 
+  ({dynamic minX, dynamic maxX, double minY, double maxY}) _calculateAxisBounds(bool isXYMode, List<ChartData> allData) {
+    if (allData.isEmpty) return (minX: 0, maxX: 100, minY: 0, maxY: 100);
+
+    double minY = double.infinity, maxY = -double.infinity;
+    if (isXYMode) {
+      double minX = double.infinity, maxX = -double.infinity;
+      for (var data in allData) {
+        if (data.xValue != null) { minX = min(minX, data.xValue!); maxX = max(maxX, data.xValue!); }
+        if (data.value != null) { minY = min(minY, data.value!); maxY = max(maxY, data.value!); }
+      }
+      double xPadding = (maxX - minX) * 0.1; if (xPadding == 0) xPadding = 10;
+      double yPadding = (maxY - minY) * 0.1; if (yPadding == 0) yPadding = 10;
+      return (minX: minX - xPadding, maxX: maxX + xPadding, minY: minY - yPadding, maxY: maxY + yPadding);
+    } else {
+      DateTime minX = allData.first.time, maxX = allData.first.time;
+      for (var data in allData) {
+        if (data.time.isBefore(minX)) minX = data.time;
+        if (data.time.isAfter(maxX)) maxX = data.time;
+        if (data.value != null) { minY = min(minY, data.value!); maxY = max(maxY, data.value!); }
+      }
+      double yPadding = (maxY - minY) * 0.1; if (yPadding == 0) yPadding = 10;
+      return (minX: minX, maxX: maxX, minY: minY - yPadding, maxY: maxY + yPadding);
+    }
+  }
+
   Widget _buildGraph() {
     if (!initialSelectionDone || selectedChannels.isEmpty) {
-      print('[MULTI_WINDOW_GRAPH] _buildGraph: No channels selected');
-      return const Center(
-        child: Text(
-          'Please select at least one channel to display the graph.',
-          style: TextStyle(color: Colors.grey, fontSize: 16),
-        ),
-      );
+      return const Center(child: Text('Please select at least one channel.', style: TextStyle(color: Colors.grey, fontSize: 16)));
     }
 
     return AnimatedBuilder(
@@ -640,417 +340,130 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
         final dataByChannelSegments = _dataNotifier.dataByChannelSegments;
         final channelColors = _dataNotifier.channelColors;
         final channelConfigs = _dataNotifier.channelConfigs;
-
-        if (dataByChannelSegments.isEmpty ||
-            dataByChannelSegments.values.every((segments) => segments.every((data) => data.isEmpty))) {
-          print('[MULTI_WINDOW_GRAPH] _buildGraph: No data available in dataByChannelSegments');
-          return const Center(
-            child: Text(
-              'No data available...',
-              style: TextStyle(color: Colors.grey, fontSize: 16),
-            ),
-          );
-        }
-
-        // Graph segment display with navigation
-        final segmentDisplay = Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_left, color: AppColors.submitButton, size: 16),
-                tooltip: 'Previous Graph Segment',
-                onPressed: currentSegmentIndex > 0
-                    ? () {
-                  setState(() {
-                    currentSegmentIndex--;
-                  });
-                }
-                    : null,
-              ),
-              Text(
-                'Graph Segment ${currentSegmentIndex + 1}',
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black87,
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.arrow_right, color: AppColors.submitButton, size: 16),
-                tooltip: 'Next Graph Segment',
-                onPressed: currentSegmentIndex <
-                    _dataNotifier.dataByChannelSegments.values
-                        .where((segments) => segments.isNotEmpty)
-                        .map((segments) => segments.length - 1)
-                        .reduce(max)
-                    ? () {
-                  setState(() {
-                    currentSegmentIndex++;
-                  });
-                }
-                    : null,
-              ),
-            ],
-          ),
-        );
-
-        List<LineChartBarData> lineBarsData = [];
-        double minX = double.infinity;
-        double maxX = -double.infinity;
-        double minY = double.infinity;
-        double maxY = -double.infinity;
         peakValues.clear();
 
-        if (xAxisChannel != null && selectedChannels.length == 2) {
-          // Channel vs Channel mode: Plot one line
-          final otherChannel = selectedChannels.firstWhere((c) => c != xAxisChannel);
-          if (channelConfigs.containsKey(xAxisChannel) &&
-              channelConfigs.containsKey(otherChannel) &&
-              channelColors.containsKey(otherChannel)) {
-            final xData = (dataByChannelSegments[xAxisChannel] ?? [[]])[currentSegmentIndex];
-            final yData = (dataByChannelSegments[otherChannel] ?? [[]])[currentSegmentIndex];
+        if (dataByChannelSegments.isEmpty || dataByChannelSegments.values.every((s) => s.every((d) => d.isEmpty))) {
+          return const Center(child: Text('No data available...', style: TextStyle(color: Colors.grey, fontSize: 16)));
+        }
 
-            List<FlSpot> spots = [];
-            for (int i = 0; i < min(xData.length, yData.length); i++) {
-              final xValue = xData[i]['value'] ?? 0.0;
-              final yValue = yData[i]['value'] ?? 0.0;
-              if (xValue is num && yValue is num && xValue.isFinite && yValue.isFinite) {
-                spots.add(FlSpot(xValue.toDouble(), yValue.toDouble()));
-              } else {
-                print('[MULTI_WINDOW_GRAPH] _buildGraph: Invalid Channel vs Channel point at index $i: x=$xValue, y=$yValue');
-              }
-            }
+        List<CartesianSeries> series = [];
+        List<ChartData> allDataForBoundsCalculation = [];
+        bool isXYMode = xAxisChannel != null && selectedChannels.length == 2;
 
-            print('[MULTI_WINDOW_GRAPH] _buildGraph: Channel vs Channel mode');
-            print('  xAxisChannel: $xAxisChannel, otherChannel: $otherChannel');
-            print('  Spots generated: ${spots.length}');
-
-            if (spots.isNotEmpty) {
-              // Sort spots by x-value for correct rendering
-              spots.sort((a, b) => a.x.compareTo(b.x));
-
-              // Peak detection for Y-axis channel
-              if (showPeaks.value) {
-                final peakSpot = spots.reduce((a, b) => a.y > b.y ? a : b);
-                peakValues[otherChannel] = {
-                  'x': peakSpot.x,
-                  'y': peakSpot.y,
-                };
-              }
-
-              final xValues = spots.map((s) => s.x).where((x) => x.isFinite);
-              final yValues = spots.map((s) => s.y).where((y) => y.isFinite);
-
-              if (xValues.isNotEmpty && yValues.isNotEmpty) {
-                minX = xValues.reduce(min);
-                maxX = xValues.reduce(max);
-                minY = yValues.reduce(min);
-                maxY = yValues.reduce(max);
-              }
-
-              lineBarsData.add(
-                LineChartBarData(
-                  spots: spots,
-                  isCurved: true,
-                  curveSmoothness: 0.3,
-                  color: channelColors[otherChannel]!,
-                  barWidth: 2.0,
-                  dotData: FlDotData(
-                    show: showPeaks.value,
-                    getDotPainter: (spot, percent, barData, index) {
-                      final isPeak = showPeaks.value &&
-                          peakValues[otherChannel]?['x'] == spot.x &&
-                          peakValues[otherChannel]?['y'] == spot.y;
-                      return FlDotCirclePainter(
-                        radius: isPeak ? 6 : 3,
-                        color: isPeak ? channelColors[otherChannel]!.withOpacity(1) : channelColors[otherChannel]!.withOpacity(0.7),
-                        strokeWidth: isPeak ? 2 : 1,
-                        strokeColor: Colors.white,
-                      );
-                    },
-                  ),
-                  belowBarData: BarAreaData(show: false),
-                ),
-              );
-            } else {
-              print('[MULTI_WINDOW_GRAPH] _buildGraph: No valid spots for Channel vs Channel mode');
+        if (isXYMode) {
+          final yChannelId = selectedChannels.firstWhere((c) => c != xAxisChannel);
+          final xDataSegment = (dataByChannelSegments[xAxisChannel] ?? [[]])[min(currentSegmentIndex, (dataByChannelSegments[xAxisChannel] ?? [[]]).length - 1)];
+          final yDataSegment = (dataByChannelSegments[yChannelId] ?? [[]])[min(currentSegmentIndex, (dataByChannelSegments[yChannelId] ?? [[]]).length - 1)];
+          final Map<int, double> xValueMap = { for (var p in xDataSegment) ((p['Timestamp'] as num?)?.toInt() ?? 0): ((p['value'] as num?)?.toDouble() ?? 0.0) };
+          List<ChartData> xyPoints = [];
+          for (var yPoint in yDataSegment) {
+            final timestamp = (yPoint['Timestamp'] as num?)?.toInt();
+            final yValue = (yPoint['value'] as num?)?.toDouble();
+            if (timestamp != null && yValue != null && xValueMap.containsKey(timestamp)) {
+              xyPoints.add(ChartData(DateTime.fromMillisecondsSinceEpoch(timestamp), yValue, xValue: xValueMap[timestamp]));
             }
           }
+          if(xyPoints.isNotEmpty) {
+            allDataForBoundsCalculation.addAll(xyPoints);
+            series.add(LineSeries<ChartData, double>(
+              dataSource: xyPoints, xValueMapper: (ChartData data, _) => data.xValue, yValueMapper: (ChartData data, _) => data.value,
+              name: channelConfigs[yChannelId]?.channelName, color: channelColors[yChannelId]!, animationDuration: 0,
+              markerSettings: MarkerSettings(isVisible: showDataPoints.value, height: 3, width: 3),
+            ));
+          }
         } else {
-          // Time-based mode: Plot one line per channel
-          for (var channel in selectedChannels) {
-            if (!channelConfigs.containsKey(channel) || !channelColors.containsKey(channel)) {
-              print('[MULTI_WINDOW_GRAPH] _buildGraph: Missing config or color for channel $channel');
-              continue;
-            }
-
-            final color = channelColors[channel]!;
-            final segments = dataByChannelSegments[channel] ?? [[]];
+          for (var channelId in selectedChannels) {
+            final segments = dataByChannelSegments[channelId] ?? [[]];
             final channelData = currentSegmentIndex < segments.length ? segments[currentSegmentIndex] : [];
-
-            if (channelData.isEmpty) {
-              print('[MULTI_WINDOW_GRAPH] _buildGraph: No data for channel $channel in segment $currentSegmentIndex');
-              continue;
+            List<ChartData> timePoints = channelData.map((d) {
+              final timestamp = (d['Timestamp'] as num?)?.toDouble() ?? _parseTimeToTimestamp(d['time']);
+              return ChartData(DateTime.fromMillisecondsSinceEpoch(timestamp.toInt()), (d['value'] as num?)?.toDouble());
+            }).toList();
+            if (timePoints.isNotEmpty) {
+              allDataForBoundsCalculation.addAll(timePoints);
+              series.add(LineSeries<ChartData, DateTime>(
+                dataSource: timePoints, xValueMapper: (ChartData data, _) => data.time, yValueMapper: (ChartData data, _) => data.value,
+                name: channelConfigs[channelId]?.channelName, color: channelColors[channelId]!, animationDuration: 0,
+                markerSettings: MarkerSettings(isVisible: showDataPoints.value, height: 3, width: 3),
+              ));
             }
-
-            List<FlSpot> spots = channelData
-                .asMap()
-                .entries
-                .where((entry) {
-              final d = entry.value;
-              final hasTimestamp = d['Timestamp'] != null && d['Timestamp'] is num && (d['Timestamp'] as num).isFinite;
-              final hasTime = d['time'] is String && d['time'].isNotEmpty;
-              if (!hasTimestamp && !hasTime) {
-                print('[MULTI_WINDOW_GRAPH] _buildGraph: Invalid timestamp for channel $channel at index ${entry.key}: $d');
-                return false;
-              }
-              return true;
-            })
-                .map((entry) {
-              final d = entry.value;
-              double timestamp;
-              if (d['Timestamp'] != null && d['Timestamp'] is num && (d['Timestamp'] as num).isFinite) {
-                timestamp = (d['Timestamp'] as num).toDouble();
-              } else {
-                timestamp = _parseTimeToTimestamp(d['time']);
-              }
-              final value = (d['value'] is num && (d['value'] as num).isFinite) ? (d['value'] as num).toDouble() : 0.0;
-              return FlSpot(timestamp, value);
-            })
-                .toList();
-
-            print('[MULTI_WINDOW_GRAPH] _buildGraph: Channel $channel, Spots generated: ${spots.length}');
-
-            if (spots.isEmpty) {
-              print('[MULTI_WINDOW_GRAPH] _buildGraph: No valid spots for channel $channel');
-              continue;
-            }
-
-            // Sort spots by x-value to ensure correct rendering
-            spots.sort((a, b) => a.x.compareTo(b.x));
-
-            // Peak detection
-            if (spots.isNotEmpty && showPeaks.value) {
-              final peakSpot = spots.reduce((a, b) => a.y > b.y ? a : b);
-              peakValues[channel] = {
-                'x': peakSpot.x,
-                'y': peakSpot.y,
-                'timestamp': DateTime.fromMillisecondsSinceEpoch(peakSpot.x.toInt()).toString(),
-              };
-            }
-
-            final xValues = spots.map((s) => s.x).where((x) => x.isFinite);
-            final yValues = spots.map((s) => s.y).where((y) => y.isFinite);
-
-            if (xValues.isNotEmpty && yValues.isNotEmpty) {
-              minX = min(minX, xValues.reduce(min));
-              maxX = max(maxX, xValues.reduce(max));
-              minY = min(minY, yValues.reduce(min));
-              maxY = max(maxY, yValues.reduce(max));
-            }
-
-            lineBarsData.add(
-              LineChartBarData(
-                spots: spots,
-                isCurved: true,
-                curveSmoothness: 0.3,
-                color: color,
-                barWidth: 2.0,
-                dotData: FlDotData(
-                  show: showPeaks.value,
-                  getDotPainter: (spot, percent, barData, index) {
-                    final isPeak = showPeaks.value &&
-                        peakValues[channel]?['x'] == spot.x &&
-                        peakValues[channel]?['y'] == spot.y;
-                    return FlDotCirclePainter(
-                      radius: isPeak ? 6 : 3,
-                      color: isPeak ? color.withOpacity(1) : color.withOpacity(0.7),
-                      strokeWidth: isPeak ? 2 : 1,
-                      strokeColor: Colors.white,
-                    );
-                  },
-                ),
-                belowBarData: BarAreaData(show: false),
-              ),
-            );
           }
         }
 
-        if (lineBarsData.isEmpty) {
-          print('[MULTI_WINDOW_GRAPH] _buildGraph: No valid line bars data to plot');
-          return const Center(
-            child: Text(
-              'No valid data to plot. Please check data source.',
-              style: TextStyle(color: Colors.grey, fontSize: 16),
-            ),
-          );
+        if (showPeaks.value) {
+          for (var channelId in selectedChannels) {
+            if(isXYMode && channelId == xAxisChannel) continue;
+            final segments = dataByChannelSegments[channelId] ?? [[]];
+            final channelData = currentSegmentIndex < segments.length ? segments[currentSegmentIndex] : [];
+            if (channelData.isNotEmpty) {
+              Map<String, dynamic>? peakRawPoint;
+              for(var p in channelData) { if(peakRawPoint == null || (p['value'] as num? ?? 0.0) > (peakRawPoint['value'] as num? ?? 0.0)) { peakRawPoint = p; } }
+              if(peakRawPoint != null) {
+                final peakValue = (peakRawPoint['value'] as num?)?.toDouble();
+                final peakTimestamp = (peakRawPoint['Timestamp'] as num?)?.toInt();
+                if (peakValue != null && peakTimestamp != null) {
+                  ChartData peak;
+                  if (isXYMode) {
+                    final xDataSegment = (dataByChannelSegments[xAxisChannel] ?? [[]])[min(currentSegmentIndex, (dataByChannelSegments[xAxisChannel] ?? [[]]).length - 1)];
+                    final xPeakPoint = xDataSegment.firstWhere((p) => (p['Timestamp'] as num?)?.toInt() == peakTimestamp, orElse: () => {'value': 0.0});
+                    peak = ChartData(DateTime.fromMillisecondsSinceEpoch(peakTimestamp), peakValue, xValue: (xPeakPoint['value'] as num?)?.toDouble());
+                  } else {
+                    peak = ChartData(DateTime.fromMillisecondsSinceEpoch(peakTimestamp), peakValue);
+                  }
+                  peakValues[channelId] = peak;
+                  series.add(ScatterSeries<ChartData, dynamic>(
+                    dataSource: [peak], xValueMapper: (ChartData data, _) => isXYMode ? data.xValue : data.time, yValueMapper: (ChartData data, _) => data.value,
+                    color: channelColors[channelId], animationDuration: 0,
+                    markerSettings: MarkerSettings(isVisible: true, height: 10, width: 10, shape: DataMarkerType.circle, borderWidth: 2, borderColor: Colors.black.withOpacity(0.7)),
+                    dataLabelSettings: DataLabelSettings(isVisible: true, labelAlignment: ChartDataLabelAlignment.top, builder: (d,p,s,pi,si) => Container(padding: const EdgeInsets.all(4), decoration: BoxDecoration(color: channelColors[channelId], borderRadius: BorderRadius.circular(4)), child: Text(peak.value!.toStringAsFixed(channelConfigs[channelId]?.decimalPlaces ?? 1), style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)))),
+                  ));
+                }
+              }
+            }
+          }
         }
 
-        // Handle edge cases for axis ranges
-        final now = DateTime.now().millisecondsSinceEpoch.toDouble();
-        final timeRangeMs = (timeRangeHours + (timeRangeMinutes / 60)) * 3600000;
-        if (xAxisChannel == null) {
-          minX = minX.isFinite ? minX : now - timeRangeMs;
-          maxX = maxX.isFinite ? maxX : now;
-        } else {
-          minX = minX.isFinite ? minX : 0;
-          maxX = maxX.isFinite ? maxX : 100;
-        }
-        minY = minY.isFinite ? minY : 0;
-        maxY = maxY.isFinite ? maxY : 100;
+        final bounds = _calculateAxisBounds(isXYMode, allDataForBoundsCalculation);
+        final yChannelId = isXYMode ? selectedChannels.firstWhere((c) => c != xAxisChannel) : selectedChannels.length == 1 ? selectedChannels.first : null;
 
-        // Ensure non-zero ranges to prevent interval == 0
-        double xRange = maxX - minX;
-        double yRange = maxY - minY;
-        if (xRange == 0) {
-          xRange = xAxisChannel == null ? timeRangeMs : 100;
-          minX -= xRange / 2;
-          maxX += xRange / 2;
-        }
-        if (yRange == 0) {
-          yRange = 1;
-          minY -= 0.5;
-          maxY += 0.5;
-        }
+        final yAxisTitle = isXYMode
+            ? '${channelConfigs[yChannelId]?.channelName ?? 'Y-Axis'} (${channelConfigs[yChannelId]?.unit ?? ''})'
+            : yChannelId != null
+            ? '${channelConfigs[yChannelId]?.channelName ?? 'Value'} (${channelConfigs[yChannelId]?.unit ?? ''})'
+            : 'Value';
 
-        // Add padding to ranges
-        maxY += yRange * 0.15;
-        minY -= yRange * 0.1;
-        if (minY < 0 && xAxisChannel == null) minY = 0;
-        maxX += xRange * 0.05;
-        minX -= xRange * 0.05;
+        final xAxisTitle = isXYMode
+            ? '${channelConfigs[xAxisChannel]?.channelName ?? 'X-Axis'} (${channelConfigs[xAxisChannel]?.unit ?? ''})'
+            : 'Time (HH:mm:ss)';
 
-        print('[MULTI_WINDOW_GRAPH] _buildGraph: Plotting with minX: $minX, maxX: $maxX, minY: $minY, maxY: $maxY');
+        // FIX: Dynamically set the tooltip format
+        final String tooltipFormat = isXYMode
+            ? 'series.name : point.y\n${channelConfigs[xAxisChannel]?.channelName ?? 'X-Value'} : point.x'
+            : 'series.name : point.y';
 
         return Column(
           children: [
-            segmentDisplay,
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(icon: const Icon(Icons.arrow_left, color: AppColors.submitButton, size: 16), onPressed: currentSegmentIndex > 0 ? () => setState(() => currentSegmentIndex--) : null),
+                  Text('Graph Segment ${currentSegmentIndex + 1}', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.black87)),
+                  IconButton(icon: const Icon(Icons.arrow_right, color: AppColors.submitButton, size: 16), onPressed: currentSegmentIndex < dataByChannelSegments.values.where((s) => s.isNotEmpty).map((s) => s.length - 1).fold(0, max) ? () => setState(() => currentSegmentIndex++) : null),
+                ],
+              ),
+            ),
             Expanded(
-              child: LineChart(
-                LineChartData(
-                  gridData: FlGridData(
-                    show: true,
-                    drawVerticalLine: false,
-                    drawHorizontalLine: true,
-                    getDrawingHorizontalLine: (value) => FlLine(
-                      color: Colors.grey.withOpacity(0.3),
-                      strokeWidth: 1,
-                    ),
-                  ),
-                  titlesData: FlTitlesData(
-                    leftTitles: AxisTitles(
-                      axisNameWidget: Text(
-                        xAxisChannel == null
-                            ? 'Value (${channelConfigs.isNotEmpty ? channelConfigs.values.first.unit : "Unit"})'
-                            : 'Value (${channelConfigs[selectedChannels.firstWhere((c) => c != xAxisChannel)]?.unit ?? "Unit"})',
-                        style: const TextStyle(
-                          color: Colors.black,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
-                      ),
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 50,
-                        interval: max(0.1, yRange / 5),
-                        getTitlesWidget: (value, meta) {
-                          if (!value.isFinite) return const SizedBox();
-                          return Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: Text(
-                              value.toStringAsFixed(2),
-                              style: const TextStyle(color: Colors.black, fontSize: 12),
-                              textAlign: TextAlign.right,
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                    bottomTitles: AxisTitles(
-                      axisNameWidget: Text(
-                        xAxisChannel == null
-                            ? 'Time'
-                            : 'Value (${channelConfigs[xAxisChannel]?.unit ?? "Unit"})',
-                        style: const TextStyle(
-                          color: Colors.black,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
-                      ),
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 40,
-                        interval: xAxisChannel == null ? timeRangeMs / 5 : max(0.1, xRange / 5),
-                        getTitlesWidget: (value, meta) {
-                          if (!value.isFinite) return const SizedBox();
-                          if (xAxisChannel == null) {
-                            final time = DateTime.fromMillisecondsSinceEpoch(value.toInt());
-                            return Padding(
-                              padding: const EdgeInsets.only(top: 8),
-                              child: Text(
-                                "${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}",
-                                style: const TextStyle(color: Colors.black, fontSize: 12),
-                              ),
-                            );
-                          } else {
-                            return Padding(
-                              padding: const EdgeInsets.only(top: 8),
-                              child: Text(
-                                value.toStringAsFixed(2),
-                                style: const TextStyle(color: Colors.black, fontSize: 12),
-                              ),
-                            );
-                          }
-                        },
-                      ),
-                    ),
-                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  ),
-                  borderData: FlBorderData(
-                    show: true,
-                    border: Border.all(color: Colors.grey.withOpacity(0.5), width: 1),
-                  ),
-                  minX: minX,
-                  maxX: maxX,
-                  minY: minY,
-                  maxY: maxY,
-                  lineBarsData: lineBarsData,
-                  lineTouchData: LineTouchData(
-                    enabled: true,
-                    touchTooltipData: LineTouchTooltipData(
-                      // tooltipBorder: Colors.black,
-                      getTooltipItems: (List<LineBarSpot> touchedSpots) {
-                        return touchedSpots.map((spot) {
-                          if (xAxisChannel != null && selectedChannels.length == 2) {
-                            final yChannel = selectedChannels.firstWhere((c) => c != xAxisChannel);
-                            final xChannelName = channelConfigs[xAxisChannel]?.channelName ?? xAxisChannel!;
-                            final yChannelName = channelConfigs[yChannel]?.channelName ?? yChannel;
-                            return LineTooltipItem(
-                              '$yChannelName: ${spot.y.toStringAsFixed(2)} ${channelConfigs[yChannel]?.unit ?? ''}\n'
-                                  '$xChannelName: ${spot.x.toStringAsFixed(2)} ${channelConfigs[xAxisChannel]?.unit ?? ''}',
-                              const TextStyle(color: Colors.white, fontSize: 12),
-                            );
-                          } else {
-                            final channel = selectedChannels.toList()[spot.barIndex];
-                            final channelName = channelConfigs[channel]?.channelName ?? 'Unknown';
-                            final time = DateTime.fromMillisecondsSinceEpoch(spot.x.toInt());
-                            final timeStr =
-                                "${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}";
-                            return LineTooltipItem(
-                              'Channel: $channelName\n'
-                                  'Value: ${spot.y.toStringAsFixed(2)} ${channelConfigs[channel]?.unit ?? ''}\n'
-                                  'Time: $timeStr',
-                              const TextStyle(color: Colors.white, fontSize: 12),
-                            );
-                          }
-                        }).toList();
-                      },
-                    ),
-                    handleBuiltInTouches: true,
-                  ),
+              child: SfCartesianChart(
+                primaryXAxis: isXYMode ? NumericAxis(title: AxisTitle(text: xAxisTitle), minimum: bounds.minX, maximum: bounds.maxX) : DateTimeAxis(dateFormat: DateFormat('HH:mm:ss'), title: AxisTitle(text: xAxisTitle), minimum: bounds.minX, maximum: bounds.maxX),
+                primaryYAxis: NumericAxis(title: AxisTitle(text: yAxisTitle), minimum: bounds.minY, maximum: bounds.maxY),
+                series: series,
+                trackballBehavior: TrackballBehavior(
+                  enable: true,
+                  activationMode: ActivationMode.singleTap,
+                  // FIX: Use the dynamic format string
+                  tooltipSettings: InteractiveTooltip(enable: true, format: tooltipFormat),
                 ),
               ),
             ),
@@ -1060,12 +473,7 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
     );
   }
 
-  Widget _buildTitleBarButton({
-    required IconData icon,
-    required String tooltip,
-    required VoidCallback onPressed,
-    bool isClose = false,
-  }) {
+  Widget _buildTitleBarButton({required IconData icon, required String tooltip, required VoidCallback onPressed, bool isClose = false}) {
     return MouseRegion(
       onEnter: (_) => _animationController?.forward(),
       onExit: (_) => _animationController?.reverse(),
@@ -1079,20 +487,7 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
             customBorder: const CircleBorder(),
             child: AnimatedBuilder(
               animation: _animationController!,
-              builder: (context, child) {
-                return Transform.scale(
-                  scale: 1.0 + (_animationController!.value * 0.1),
-                  child: SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: Icon(
-                      icon,
-                      color: Colors.white,
-                      size: 18,
-                    ),
-                  ),
-                );
-              },
+              builder: (context, child) => Transform.scale(scale: 1.0 + (_animationController!.value * 0.1), child: SizedBox(width: 28, height: 28, child: Icon(icon, color: Colors.white, size: 18))),
             ),
           ),
         ),
@@ -1106,14 +501,7 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
       child: TextField(
         controller: controller,
         keyboardType: TextInputType.number,
-        decoration: InputDecoration(
-          labelText: label,
-          labelStyle: const TextStyle(fontSize: 12, color: Colors.black87),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
-          isDense: true,
-        ),
+        decoration: InputDecoration(labelText: label, labelStyle: const TextStyle(fontSize: 12, color: Colors.black87), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)), isDense: true),
         style: const TextStyle(fontSize: 12),
         onChanged: (value) {
           setState(() {
@@ -1121,27 +509,11 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
             final minutes = double.tryParse(_timeRangeMinController.text) ?? 0.0;
             timeRangeHours = hours.clamp(0.0, 24.0);
             timeRangeMinutes = minutes.clamp(0.0, 59.0);
-            if (timeRangeHours == 0 && timeRangeMinutes == 0) {
-              timeRangeMinutes = 1.0;
-              _timeRangeMinController.text = '1';
-            }
+            if (timeRangeHours == 0 && timeRangeMinutes == 0) { timeRangeMinutes = 1.0; _timeRangeMinController.text = '1'; }
             final timeRangeMs = (timeRangeHours + (timeRangeMinutes / 60)) * 3600000;
-            final newSegments = _dataNotifier.dataByChannelSegments.map((channel, segments) => MapEntry(
-              channel,
-              _createSegments(
-                segments.expand((s) => s).toList(),
-                timeRangeMs,
-              ),
-            ));
-            _dataNotifier.updateData(
-              newData: newSegments,
-              newColors: _dataNotifier.channelColors,
-              newConfigs: _dataNotifier.channelConfigs,
-            );
-            currentSegmentIndex = newSegments.values
-                .where((segments) => segments.isNotEmpty)
-                .map((segments) => segments.length - 1)
-                .reduce(max);
+            final newSegments = _dataNotifier.dataByChannelSegments.map((channel, segments) => MapEntry(channel, _createSegments(segments.expand((s) => s).toList(), timeRangeMs)));
+            _dataNotifier.updateData(newData: newSegments, newColors: _dataNotifier.channelColors, newConfigs: _dataNotifier.channelConfigs);
+            if (newSegments.values.where((s) => s.isNotEmpty).isNotEmpty) { currentSegmentIndex = newSegments.values.where((s) => s.isNotEmpty).map((s) => s.length - 1).reduce(max); }
           });
         },
       ),
@@ -1158,24 +530,9 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
         return AnimatedContainer(
           duration: const Duration(milliseconds: 200),
           height: open ? null : 0,
-          constraints: BoxConstraints(
-            maxWidth: windowWidth - (isChannelPanelOpen.value ? 250 : 0) - 32,
-            maxHeight: 100,
-          ),
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.95),
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: [
-              if (open)
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.1),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
-                ),
-            ],
-          ),
-          child: open
-              ? AnimatedBuilder(
+          constraints: BoxConstraints(maxWidth: windowWidth - (isChannelPanelOpen.value ? 250 : 0) - 32, maxHeight: 100),
+          decoration: BoxDecoration(color: Colors.white.withOpacity(0.95), borderRadius: BorderRadius.circular(8), boxShadow: [if (open) BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, 2))]),
+          child: open ? AnimatedBuilder(
             animation: _dataNotifier,
             builder: (context, _) {
               return SingleChildScrollView(
@@ -1185,66 +542,20 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Wrap(
-                        spacing: 8,
-                        runSpacing: 4,
+                        spacing: 8, runSpacing: 4,
                         children: selectedChannels.map((channel) {
                           final color = _dataNotifier.channelColors[channel] ?? Colors.blue;
                           final peak = peakValues[channel];
                           final channelName = _dataNotifier.channelConfigs[channel]?.channelName ?? channel;
-                          final peakText = peak != null && showPeaks.value
-                              ? ' (${peak['y'].toStringAsFixed(1)})'
-                              : '';
+                          final peakText = peak != null && showPeaks.value ? ' (${peak.value!.toStringAsFixed(1)})' : '';
                           return GestureDetector(
-                            onTap: () {
-                              setState(() {
-                                if (selectedChannels.contains(channel)) {
-                                  if (selectedChannels.length <= 1) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('At least one channel must be selected.'),
-                                      ),
-                                    );
-                                    return;
-                                  }
-                                  selectedChannels.remove(channel);
-                                  peakValues.remove(channel);
-                                } else {
-                                  selectedChannels.add(channel);
-                                }
-                                if (selectedChannels.length != 2) {
-                                  xAxisChannel = null;
-                                  showXAxisOptions = true;
-                                }
-                                initialSelectionDone = selectedChannels.isNotEmpty;
-                              });
-                            },
+                            onTap: () => setState(() { if (selectedChannels.contains(channel)) { if (selectedChannels.length <= 1) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('At least one channel must be selected.'))); return; } selectedChannels.remove(channel); peakValues.remove(channel); } else { selectedChannels.add(channel); } if (selectedChannels.length != 2) { xAxisChannel = null; showXAxisOptions = true; } initialSelectionDone = selectedChannels.isNotEmpty; }),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Container(
-                                  width: 12,
-                                  height: 12,
-                                  decoration: BoxDecoration(
-                                    color: color,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: selectedChannels.contains(channel) ? Colors.black : Colors.grey,
-                                      width: selectedChannels.contains(channel) ? 1.5 : 1,
-                                    ),
-                                  ),
-                                ),
+                                Container(width: 12, height: 12, decoration: BoxDecoration(color: color, shape: BoxShape.circle, border: Border.all(color: selectedChannels.contains(channel) ? Colors.black : Colors.grey, width: selectedChannels.contains(channel) ? 1.5 : 1))),
                                 const SizedBox(width: 4),
-                                ConstrainedBox(
-                                  constraints: const BoxConstraints(maxWidth: 150),
-                                  child: Text(
-                                    '$channelName$peakText',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: selectedChannels.contains(channel) ? Colors.black : Colors.grey,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
+                                ConstrainedBox(constraints: const BoxConstraints(maxWidth: 150), child: Text('$channelName$peakText', style: TextStyle(fontSize: 11, color: selectedChannels.contains(channel) ? Colors.black : Colors.grey), overflow: TextOverflow.ellipsis)),
                               ],
                             ),
                           );
@@ -1254,10 +565,7 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text(
-                            'Segment Duration:',
-                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87),
-                          ),
+                          const Text('Segment Duration:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87)),
                           const SizedBox(width: 8),
                           _buildTimeInputField(_timeRangeHrController, 'Hr'),
                           const SizedBox(width: 8),
@@ -1269,64 +577,16 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Text(
-                              'X-Axis:',
-                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87),
-                            ),
+                            const Text('X-Axis:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black87)),
                             const SizedBox(width: 8),
                             Wrap(
-                              spacing: 8,
-                              runSpacing: 4,
+                              spacing: 8, runSpacing: 4,
                               children: [
                                 if (showXAxisOptions) ...[
-                                  TextButton(
-                                    onPressed: () {
-                                      setState(() {
-                                        xAxisChannel = null;
-                                        showXAxisOptions = false;
-                                      });
-                                    },
-                                    child: Text(
-                                      'Time',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: xAxisChannel == null ? AppColors.submitButton : Colors.black87,
-                                        fontWeight: xAxisChannel == null ? FontWeight.bold : FontWeight.normal,
-                                      ),
-                                    ),
-                                  ),
-                                  ...selectedChannels.map((channel) => TextButton(
-                                    onPressed: () {
-                                      setState(() {
-                                        xAxisChannel = channel;
-                                        showXAxisOptions = false;
-                                      });
-                                    },
-                                    child: Text(
-                                      _dataNotifier.channelConfigs[channel]?.channelName ?? channel,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: xAxisChannel == channel ? AppColors.submitButton : Colors.black87,
-                                        fontWeight: xAxisChannel == channel ? FontWeight.bold : FontWeight.normal,
-                                      ),
-                                    ),
-                                  )),
+                                  TextButton(onPressed: () => setState(() { xAxisChannel = null; showXAxisOptions = false; }), child: Text('Time', style: TextStyle(fontSize: 12, color: xAxisChannel == null ? AppColors.submitButton : Colors.black87, fontWeight: xAxisChannel == null ? FontWeight.bold : FontWeight.normal))),
+                                  ...selectedChannels.map((channel) => TextButton(onPressed: () => setState(() { xAxisChannel = channel; showXAxisOptions = false; }), child: Text(_dataNotifier.channelConfigs[channel]?.channelName ?? channel, style: TextStyle(fontSize: 12, color: xAxisChannel == channel ? AppColors.submitButton : Colors.black87, fontWeight: xAxisChannel == channel ? FontWeight.bold : FontWeight.normal)))),
                                 ] else ...[
-                                  TextButton(
-                                    onPressed: () {
-                                      setState(() {
-                                        showXAxisOptions = true;
-                                      });
-                                    },
-                                    child: const Text(
-                                      'Select X-Axis',
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: AppColors.submitButton,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
+                                  TextButton(onPressed: () => setState(() => showXAxisOptions = true), child: const Text('Select X-Axis', style: TextStyle(fontSize: 12, color: AppColors.submitButton, fontWeight: FontWeight.bold))),
                                 ],
                               ],
                             ),
@@ -1338,8 +598,7 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
                 ),
               );
             },
-          )
-              : null,
+          ) : null,
         );
       },
     );
@@ -1349,21 +608,7 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
     return GestureDetector(
       onPanUpdate: (details) => _resizeWindow(details, edge),
       child: MouseRegion(
-        cursor: edge.contains('top') && edge.contains('left')
-            ? SystemMouseCursors.resizeUpLeft
-            : edge.contains('top') && edge.contains('right')
-            ? SystemMouseCursors.resizeUpRight
-            : edge.contains('bottom') && edge.contains('left')
-            ? SystemMouseCursors.resizeDownLeft
-            : edge.contains('bottom') && edge.contains('right')
-            ? SystemMouseCursors.resizeDownRight
-            : edge.contains('top')
-            ? SystemMouseCursors.resizeUp
-            : edge.contains('bottom')
-            ? SystemMouseCursors.resizeDown
-            : edge.contains('left')
-            ? SystemMouseCursors.resizeLeft
-            : SystemMouseCursors.resizeRight,
+        cursor: edge.contains('top') && edge.contains('left') ? SystemMouseCursors.resizeUpLeft : edge.contains('top') && edge.contains('right') ? SystemMouseCursors.resizeUpRight : edge.contains('bottom') && edge.contains('left') ? SystemMouseCursors.resizeDownLeft : edge.contains('bottom') && edge.contains('right') ? SystemMouseCursors.resizeDownRight : edge.contains('top') ? SystemMouseCursors.resizeUp : edge.contains('bottom') ? SystemMouseCursors.resizeDown : edge.contains('left') ? SystemMouseCursors.resizeLeft : SystemMouseCursors.resizeRight,
         child: Container(
           width: edge.contains('top') || edge.contains('bottom') ? null : size,
           height: edge.contains('left') || edge.contains('right') ? null : size,
@@ -1375,195 +620,99 @@ class _SaveMultiWindowGraphState extends State<SaveMultiWindowGraph> with Single
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      elevation: 8,
-      borderRadius: BorderRadius.circular(12),
-      child: Stack(
-        children: [
-          Container(
-            width: windowWidth,
-            height: windowHeight,
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Colors.white, Color(0xFFF5F5F5)],
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
+    return Positioned(
+      left: position.dx,
+      top: position.dy,
+      child: Material(
+        elevation: 8,
+        borderRadius: BorderRadius.circular(12),
+        color: Colors.transparent,
+        child: Stack(
+          children: [
+            Container(
+              width: windowWidth,
+              height: windowHeight,
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(colors: [Colors.white, Color(0xFFF5F5F5)], begin: Alignment.topCenter, end: Alignment.bottomCenter),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.withOpacity(0.3)),
+                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 12, offset: const Offset(0, 4))],
               ),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.grey.withOpacity(0.3)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.2),
-                  blurRadius: 12,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Column(
-              children: [
-                GestureDetector(
-                  onPanUpdate: _updatePosition,
-                  child: Container(
-                    padding: EdgeInsets.symmetric(horizontal: 12, vertical: isMinimized ? 4 : 8),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [AppColors.submitButton, AppColors.submitButton.withOpacity(0.8)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
+              child: Column(
+                children: [
+                  GestureDetector(
+                    onPanUpdate: _updatePosition,
+                    child: Container(
+                      padding: EdgeInsets.symmetric(horizontal: 12, vertical: isMinimized ? 4 : 8),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(colors: [AppColors.submitButton, AppColors.submitButton.withOpacity(0.8)], begin: Alignment.topLeft, end: Alignment.bottomRight),
+                        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+                        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, 2))],
                       ),
-                      borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.1),
-                          blurRadius: 4,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.show_chart, color: Colors.white, size: 18),
+                              const SizedBox(width: 8),
+                              Text("Live Graph - ${widget.windowId}", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: isMinimized ? 12 : 14, letterSpacing: 1.1)),
+                            ],
+                          ),
+                          Row(
+                            children: [
+                              _buildTitleBarButton(icon: isMinimized ? Icons.unfold_more : Icons.unfold_less, tooltip: isMinimized ? 'Restore' : 'Minimize', onPressed: _minimizeWindow),
+                              _buildTitleBarButton(icon: isMaximized ? Icons.fullscreen_exit : Icons.fullscreen, tooltip: isMaximized ? 'Restore' : 'Maximize', onPressed: _maximizeWindow),
+                              _buildTitleBarButton(icon: Icons.close, tooltip: 'Close', onPressed: _closeWindow, isClose: true),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          children: [
-                            const Icon(
-                              Icons.show_chart,
-                              color: Colors.white,
-                              size: 18,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              "Live Graph - ${widget.windowId}",
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: isMinimized ? 12 : 14,
-                                letterSpacing: 1.1,
+                  ),
+                  if (!isMinimized)
+                    Expanded(
+                      child: Row(
+                        children: [
+                          _buildChannelPanel(),
+                          Expanded(
+                            child: Padding(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                children: [
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      ValueListenableBuilder<bool>(valueListenable: isChannelPanelOpen, builder: (context, open, _) => Tooltip(message: open ? 'Hide Channel Panel' : 'Show Channel Panel', child: IconButton(icon: Icon(open ? Icons.arrow_left : Icons.arrow_right, color: AppColors.submitButton), onPressed: () => isChannelPanelOpen.value = !open))),
+                                      ValueListenableBuilder<bool>(valueListenable: showPeaks, builder: (context, show, _) => Tooltip(message: show ? 'Hide Peaks' : 'Show Peaks', child: IconButton(icon: Icon(Icons.insights, color: show ? AppColors.submitButton : Colors.grey), onPressed: () => showPeaks.value = !show))),
+                                      ValueListenableBuilder<bool>(valueListenable: showDataPoints, builder: (context, show, _) => Tooltip(message: show ? 'Hide Data Points' : 'Show Data Points', child: IconButton(icon: Icon(Icons.grain, color: show ? AppColors.submitButton : Colors.grey), onPressed: () => showDataPoints.value = !show))),
+                                      ValueListenableBuilder<bool>(valueListenable: isLegendPanelOpen, builder: (context, open, _) => Tooltip(message: open ? 'Hide Legend Panel' : 'Show Legend Panel', child: IconButton(icon: Icon(open ? Icons.arrow_drop_down : Icons.arrow_drop_up, color: AppColors.submitButton), onPressed: () => isLegendPanelOpen.value = !open))),
+                                    ],
+                                  ),
+                                  Expanded(child: _buildGraph()),
+                                  _buildLegend(),
+                                ],
                               ),
                             ),
-                          ],
-                        ),
-                        Row(
-                          children: [
-                            _buildTitleBarButton(
-                              icon: Icons.remove,
-                              tooltip: isMinimized ? 'Restore' : 'Minimize',
-                              onPressed: _minimizeWindow,
-                            ),
-                            _buildTitleBarButton(
-                              icon: isMaximized ? Icons.fullscreen_exit : Icons.fullscreen,
-                              tooltip: isMaximized ? 'Restore' : 'Maximize',
-                              onPressed: _maximizeWindow,
-                            ),
-                            _buildTitleBarButton(
-                              icon: Icons.close,
-                              tooltip: 'Close',
-                              onPressed: _closeWindow,
-                              isClose: true,
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                if (!isMinimized)
-                  Expanded(
-                    child: Row(
-                      children: [
-                        _buildChannelPanel(),
-                        Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.all(16),
-                            child: Column(
-                              children: [
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    ValueListenableBuilder<bool>(
-                                      valueListenable: isChannelPanelOpen,
-                                      builder: (context, open, _) {
-                                        return Tooltip(
-                                          message: open ? 'Hide Channel Panel' : 'Show Channel Panel',
-                                          child: IconButton(
-                                            icon: Icon(
-                                              open ? Icons.arrow_left : Icons.arrow_right,
-                                              color: AppColors.submitButton,
-                                            ),
-                                            onPressed: () {
-                                              if (!initialSelectionDone && !open) {
-                                                isChannelPanelOpen.value = true;
-                                              } else if (initialSelectionDone) {
-                                                isChannelPanelOpen.value = !open;
-                                              }
-                                            },
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                    ValueListenableBuilder<bool>(
-                                      valueListenable: showPeaks,
-                                      builder: (context, show, _) {
-                                        return Tooltip(
-                                          message: show ? 'Hide Peaks' : 'Show Peaks',
-                                          child: IconButton(
-                                            icon: Icon(
-                                              Icons.insights,
-                                              color: show ? AppColors.submitButton : Colors.grey,
-                                            ),
-                                            onPressed: () {
-                                              showPeaks.value = !show;
-                                              if (!show) {
-                                                setState(() {
-                                                  peakValues.clear();
-                                                });
-                                              }
-                                            },
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                    ValueListenableBuilder<bool>(
-                                      valueListenable: isLegendPanelOpen,
-                                      builder: (context, open, _) {
-                                        return Tooltip(
-                                          message: open ? 'Hide Legend Panel' : 'Show Legend Panel',
-                                          child: IconButton(
-                                            icon: Icon(
-                                              open ? Icons.arrow_drop_down : Icons.arrow_drop_up,
-                                              color: AppColors.submitButton,
-                                            ),
-                                            onPressed: () {
-                                              isLegendPanelOpen.value = !open;
-                                            },
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ],
-                                ),
-                                Expanded(child: _buildGraph()),
-                                _buildLegend(),
-                              ],
-                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
-          ),
-          if (!isMinimized && !isMaximized) ...[
-            Positioned(top: 0, left: 0, right: 0, child: _buildResizeHandle('top')),
-            Positioned(bottom: 0, left: 0, right: 0, child: _buildResizeHandle('bottom')),
-            Positioned(left: 0, top: 0, bottom: 0, child: _buildResizeHandle('left')),
-            Positioned(right: 0, top: 0, bottom: 0, child: _buildResizeHandle('right')),
-            Positioned(top: 0, left: 0, child: _buildResizeHandle('topLeft', size: 15)),
-            Positioned(top: 0, right: 0, child: _buildResizeHandle('topRight', size: 15)),
-            Positioned(bottom: 0, left: 0, child: _buildResizeHandle('bottomLeft', size: 15)),
-            Positioned(bottom: 0, right: 0, child: _buildResizeHandle('bottomRight', size: 15)),
+            if (!isMinimized && !isMaximized) ...[
+              Positioned(top: 0, left: 0, right: 0, child: _buildResizeHandle('top')),
+              Positioned(bottom: 0, left: 0, right: 0, child: _buildResizeHandle('bottom')),
+              Positioned(left: 0, top: 0, bottom: 0, child: _buildResizeHandle('left')),
+              Positioned(right: 0, top: 0, bottom: 0, child: _buildResizeHandle('right')),
+              Positioned(top: 0, left: 0, child: _buildResizeHandle('topLeft', size: 15)),
+              Positioned(top: 0, right: 0, child: _buildResizeHandle('topRight', size: 15)),
+              Positioned(bottom: 0, left: 0, child: _buildResizeHandle('bottomLeft', size: 15)),
+              Positioned(bottom: 0, right: 0, child: _buildResizeHandle('bottomRight', size: 15)),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

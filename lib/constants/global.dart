@@ -58,7 +58,7 @@ class Global {
   StreamController<Map<String, dynamic>>.broadcast();
   static Stream<Map<String, dynamic>> get graphDataStream => _graphDataStreamController.stream;
   static Sink<Map<String, dynamic>> get graphDataSink => _graphDataStreamController.sink;
-
+  static bool get hasGraphDataListener => _graphDataStreamController.hasListener;
   // Good practice: a dispose method for global resources, though not automatically called for static classes
   static void dispose() {
     _graphDataStreamController.close();
