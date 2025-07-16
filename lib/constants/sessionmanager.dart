@@ -4,7 +4,9 @@ import 'dart:io';
 
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart'; // Ensure this is sqflite_common_ffi
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
+import '../Pages/logScreen/log.dart'; // Ensure this is sqflite_common_ffi
 
 class SessionDatabaseManager {
   static final SessionDatabaseManager _instance = SessionDatabaseManager._internal();

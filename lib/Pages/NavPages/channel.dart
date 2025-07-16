@@ -12,7 +12,7 @@ class Channel {
   final double chartMinimumValue;
   final double? targetAlarmMax; // Nullable
   final double? targetAlarmMin; // Nullable
-  final int graphLineColour;
+  final dynamic graphLineColour; // Can be int or String from DB
   final int targetAlarmColour;
 
   Channel({
@@ -30,18 +30,45 @@ class Channel {
     required this.targetAlarmColour,
   });
 
+  // --- NEW: copyWith method to solve the error ---
+  /// Creates a copy of this Channel but with the given fields replaced with the new values.
+  Channel copyWith({
+    double? recNo,
+    String? channelName,
+    String? startingCharacter,
+    int? dataLength,
+    int? decimalPlaces,
+    String? unit,
+    double? chartMaximumValue,
+    double? chartMinimumValue,
+    double? targetAlarmMax,
+    double? targetAlarmMin,
+    dynamic graphLineColour,
+    int? targetAlarmColour,
+  }) {
+    return Channel(
+      recNo: recNo ?? this.recNo,
+      channelName: channelName ?? this.channelName,
+      startingCharacter: startingCharacter ?? this.startingCharacter,
+      dataLength: dataLength ?? this.dataLength,
+      decimalPlaces: decimalPlaces ?? this.decimalPlaces,
+      unit: unit ?? this.unit,
+      chartMaximumValue: chartMaximumValue ?? this.chartMaximumValue,
+      chartMinimumValue: chartMinimumValue ?? this.chartMinimumValue,
+      targetAlarmMax: targetAlarmMax ?? this.targetAlarmMax,
+      targetAlarmMin: targetAlarmMin ?? this.targetAlarmMin,
+      graphLineColour: graphLineColour ?? this.graphLineColour,
+      targetAlarmColour: targetAlarmColour ?? this.targetAlarmColour,
+    );
+  }
+
   factory Channel.fromJson(Map<String, dynamic> json) {
+    // --- Robust Parsing Helpers ---
     int _parseToInt(dynamic value, int defaultValue) {
       if (value == null) return defaultValue;
       if (value is int) return value;
       if (value is double) return value.toInt();
-      if (value is String) {
-        int? parsedInt = int.tryParse(value);
-        if (parsedInt != null) return parsedInt;
-        double? parsedDouble = double.tryParse(value);
-        if (parsedDouble != null) return parsedDouble.toInt();
-        return defaultValue;
-      }
+      if (value is String) return int.tryParse(value) ?? defaultValue;
       return defaultValue;
     }
 
@@ -54,35 +81,37 @@ class Channel {
     }
 
     double? _parseToNullableDouble(dynamic value) {
-      if (value == null) return null;
+      if (value == null || value.toString().isEmpty) return null;
       if (value is double) return value;
       if (value is int) return value.toDouble();
       if (value is String) return double.tryParse(value);
       return null;
     }
 
-    int _parseColor(dynamic colorValue, int defaultValue) {
+    dynamic _parseGraphLineColour(dynamic colorValue) {
       if (colorValue is String && colorValue.isNotEmpty) {
-        String hex = colorValue.replaceAll('#', '').toUpperCase();
-        if (hex.length == 3) hex = hex.split('').map((c) => c + c).join('');
-        if (hex.length == 6) hex = 'FF$hex';
-        if (hex.length == 8) {
-          try {
-            return int.parse(hex, radix: 16);
-          } catch (e) {
-            return defaultValue;
-          }
-        }
-        return defaultValue;
-      } else if (colorValue is int) {
-        if (colorValue & 0xFF000000 == 0) return 0xFF000000 | colorValue;
         return colorValue;
       }
-      return defaultValue;
+      if (colorValue is int) {
+        return colorValue;
+      }
+      return '00FF00'; // Default to green hex string if invalid
     }
 
-    const int defaultGraphColor = 0xFF00FF00;
-    const int defaultAlarmColor = 0xFFFF0000;
+    int _parseTargetAlarmColour(dynamic colorValue) {
+      const int defaultColor = 0xFFFF0000; // Red
+      if (colorValue is String && colorValue.isNotEmpty) {
+        String hex = colorValue.replaceAll('#', '').toUpperCase();
+        if (hex.length == 6) hex = 'FF$hex';
+        if (hex.length == 8) {
+          return int.tryParse(hex, radix: 16) ?? defaultColor;
+        }
+      } else if (colorValue is int) {
+        return colorValue;
+      }
+      return defaultColor;
+    }
+    // --- End of Parsing Helpers ---
 
     return Channel(
       recNo: _parseToDouble(json['RecNo'], 0.0),
@@ -95,16 +124,12 @@ class Channel {
       chartMinimumValue: _parseToDouble(json['ChartMinimumValue'], 0.0),
       targetAlarmMax: _parseToNullableDouble(json['TargetAlarmMax']),
       targetAlarmMin: _parseToNullableDouble(json['TargetAlarmMin']),
-      graphLineColour: _parseColor(json['graphLineColour'], defaultGraphColor),
-      targetAlarmColour: _parseColor(json['TargetAlarmColour'], defaultAlarmColor),
+      graphLineColour: _parseGraphLineColour(json['graphLineColour']),
+      targetAlarmColour: _parseTargetAlarmColour(json['TargetAlarmColour']),
     );
   }
 
   Map<String, dynamic> toJson() {
-    String _toColorHexString(int colorValue) {
-      return colorValue.toRadixString(16).padLeft(8, '0').substring(2).toUpperCase();
-    }
-
     return {
       'RecNo': recNo,
       'ChannelName': channelName,
@@ -116,21 +141,8 @@ class Channel {
       'ChartMinimumValue': chartMinimumValue,
       'TargetAlarmMax': targetAlarmMax,
       'TargetAlarmMin': targetAlarmMin,
-      'graphLineColour': _toColorHexString(graphLineColour),
-      'TargetAlarmColour': _toColorHexString(targetAlarmColour),
+      'graphLineColour': graphLineColour.toString(),
+      'TargetAlarmColour': targetAlarmColour.toRadixString(16).padLeft(8, '0').substring(2).toUpperCase(),
     };
-  }
-
-  @override
-  String toString() {
-    return 'Channel('
-        'recNo: $recNo, '
-        'channelName: "$channelName", '
-        'startingCharacter: "$startingCharacter", '
-        'decimalPlaces: $decimalPlaces, '
-        'targetAlarmMax: $targetAlarmMax, '
-        'targetAlarmMin: $targetAlarmMin, '
-        'graphLineColour: #${graphLineColour.toRadixString(16).padLeft(8, '0').toUpperCase()}'
-        ')';
   }
 }

@@ -1,1338 +1,538 @@
-// export.dart
-
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:pdf/widgets.dart' as pw;
-import 'package:pdf/pdf.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:open_filex/open_filex.dart';
-import 'package:csv/csv.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // REQUIRED for ByteData
-// Removed unused 'colors.dart' import if not needed
-import 'package:peakloadindicator/constants/theme.dart'; // Ensure this path is correct
-import 'package:syncfusion_flutter_xlsio/xlsio.dart' as xlsio;
-import 'package:image/image.dart' as img;
 
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:path/path.dart' as p;
+import 'package:syncfusion_flutter_pdf/pdf.dart';
+import 'package:syncfusion_flutter_xlsio/xlsio.dart' as xlsio;
+
+import '../Pages/NavPages/channel.dart';
 import '../Pages/logScreen/log.dart';
 import 'database_manager.dart';
+import 'message_utils.dart';
 
+enum ExportFormat { excel, csv, pdf, docx }
+
+/// A utility class for handling all data and graph export functionalities.
 class ExportUtils {
-  static String get _currentTime => DateTime.now().toIso8601String().substring(0, 19);
-
-  // Utility to resize images dynamically based on document constraints
-  static Future<Uint8List> _resizeImage(Uint8List imageBytes, {int? maxWidth, int? maxHeight, bool isLogo = false}) async {
-    try {
-      final image = img.decodeImage(imageBytes);
-      if (image == null) {
-        LogPage.addLog('[$_currentTime] Image resizing: Failed to decode image.');
-        return imageBytes;
-      }
-      // Increased for logo
-      final targetMaxWidth = isLogo ? 150 : (maxWidth ?? 800);
-      final targetMaxHeight = isLogo ? 50 : (maxHeight ?? 400); // Changed from 50 to 50 for consistency with DOC
-      final scale = (targetMaxWidth != null && targetMaxHeight != null)
-          ? (image.width / targetMaxWidth > image.height / targetMaxHeight
-          ? targetMaxWidth / image.width
-          : targetMaxHeight / image.height)
-          : 1.0;
-      final targetWidth = (image.width * scale).round();
-      final targetHeight = (image.height * scale).round();
-      final resized = img.copyResize(image, width: targetWidth, height: targetHeight, interpolation: img.Interpolation.cubic);
-      final resizedBytes = img.encodePng(resized, level: 0);
-      LogPage.addLog('[$_currentTime] Image resized to ${resized.width}x${resized.height}, size: ${resizedBytes.length} bytes, isLogo: $isLogo');
-      return Uint8List.fromList(resizedBytes);
-    } catch (e) {
-      LogPage.addLog('[$_currentTime] Image resizing error: $e');
-      return imageBytes;
-    }
-  }
-
-  // Utility to calculate rows per page dynamically based on page height and content
-  static int _calculateRowsPerPage(double pageHeight, double rowHeight, int tableHeaderRowCount, bool hasGraph) {
-    // Approximate space for top header (company info, report title, custom header) and footer
-    const double fixedHeaderFooterHeight = 200; // Increased to accommodate custom header/footer
-    const double graphHeight = 350; // Approx. height if graph is included
-
-    // Calculate space available for table data rows, accounting for table's own header rows
-    final availableHeightForTableData = pageHeight - fixedHeaderFooterHeight - (hasGraph ? graphHeight : 0) - (rowHeight * tableHeaderRowCount);
-    final rows = (availableHeightForTableData / rowHeight).floor();
-    LogPage.addLog('[$_currentTime] Calculated rows per page: $rows (pageHeight: $pageHeight, rowHeight: $rowHeight, tableHeaderRowCount: $tableHeaderRowCount, hasGraph: $hasGraph)');
-    // Ensure a reasonable range of rows per page to avoid extreme density or too few rows
-    return rows.clamp(15, 60);
-  }
-
-  // NEW: Dialog to collect custom header and footer text
-  static Future<Map<String, String>?> _showCustomHeaderFooterDialog(BuildContext context, bool isDarkMode) async {
-    final headerController = TextEditingController();
-    final footerController = TextEditingController();
-    String? errorMessage;
-
-    return await showDialog<Map<String, String>>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              title: Text(
-                'Custom Header & Footer',
-                style: GoogleFonts.roboto(
-                  color: ThemeColors.getColor('dialogText', isDarkMode),
-                  fontWeight: FontWeight.bold,
-                  fontSize: 18,
-                ),
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: headerController,
-                    decoration: InputDecoration(
-                      labelText: 'Header Text (optional)',
-                      hintText: 'e.g., Confidential Report',
-                      labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 13),
-                      hintStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.5), fontSize: 13),
-                      filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      isDense: true,
-                    ),
-                    style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14),
-                    maxLines: 2,
-                  ),
-                  const SizedBox(height: 15),
-                  TextField(
-                    controller: footerController,
-                    decoration: InputDecoration(
-                      labelText: 'Footer Text (optional)',
-                      hintText: 'e.g., Property of Countronics Pvt. Ltd.',
-                      labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 13),
-                      hintStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.5), fontSize: 13),
-                      filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      isDense: true,
-                    ),
-                    style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14),
-                    maxLines: 2,
-                  ),
-                  if (errorMessage != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 10.0),
-                      child: Text(errorMessage!, style: GoogleFonts.roboto(color: ThemeColors.getColor('errorText', isDarkMode), fontSize: 11.5)),
-                    ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    Navigator.of(dialogContext).pop(null); // Return null if cancelled
-                  },
-                  child: Text(
-                    'Cancel',
-                    style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14),
-                  ),
-                ),
-                ElevatedButton(
-                  onPressed: () {
-                    Navigator.of(dialogContext).pop({
-                      'headerText': headerController.text,
-                      'footerText': footerController.text,
-                    });
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: ThemeColors.getColor('submitButton', isDarkMode),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                  ),
-                  child: Text(
-                    'Continue',
-                    style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 14),
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
+  static const double LOGO_HEIGHT = 50.0;
+  static const double LOGO_WIDTH = 150.0;
 
   static Future<void> exportBasedOnMode({
     required BuildContext context,
     required String mode,
-    required List<dynamic> tableData,
+    required List<Map<String, dynamic>> tableData,
     required String fileName,
-    Uint8List? graphImage,
-    required Map<String, dynamic>? authSettings,
+    required Uint8List? graphImage,
     required Map<int, String> channelNames,
-    required bool isDarkMode,
-    Map<int, String>? channelUnits, // Added for consistency, though currently derived in PDF/DOC exports
+    required DateTime firstTimestamp,
+    required DateTime lastTimestamp,
+    required Map<String, Channel> channelSetupData,
+    required List<String> headerLines,
+    required List<String> footerLines,
   }) async {
-    LogPage.addLog('[$_currentTime] Export initiated. Mode: $mode, File: $fileName, TableData items: ${tableData.length}, Channels: ${channelNames.length}, GraphImage: ${graphImage != null}, Units: ${channelUnits?.length ?? 0}');
-    if (tableData.isEmpty) LogPage.addLog('[$_currentTime] Warning: tableData is empty for mode $mode.');
-    if (channelNames.isEmpty) LogPage.addLog('[$_currentTime] Warning: channelNames is empty for mode $mode.');
+    final selectedFormat = await _showExportFormatDialog(context);
+    if (selectedFormat == null) return;
 
-    // Only show large dataset warning if combined/table mode and actual data exists
-    if ((mode == 'Combined' || mode == 'Table') && tableData.length > 10000) {
-      LogPage.addLog('[$_currentTime] Warning: Large dataset detected (${tableData.length} rows). PDF will be split into multiple files.');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Large dataset detected (${tableData.length} rows). PDF will be split into multiple files.', style: GoogleFonts.roboto()),
-          backgroundColor: ThemeColors.getColor('warningSnackbarBackground', isDarkMode), // Using a warning color
-        ),
-      );
-    }
-
-    // NEW: Get custom header/footer text before proceeding
-    final customTexts = await _showCustomHeaderFooterDialog(context, isDarkMode);
-    if (customTexts == null) {
-      LogPage.addLog('[$_currentTime] Export cancelled by user in custom header/footer dialog.');
-      return; // User cancelled the header/footer dialog
-    }
-    final customHeaderText = customTexts['headerText'] ?? '';
-    final customFooterText = customTexts['footerText'] ?? '';
-
-    // Now proceed with the original export dialog, passing the custom text
-    showExportDialog(
-      context: context,
-      tableData: tableData,
-      fileName: fileName,
-      graphImage: graphImage,
-      includeTable: mode == 'Combined' || mode == 'Table',
-      includeGraph: mode == 'Combined' || mode == 'Graph',
-      authSettings: authSettings,
-      channelNames: channelNames,
-      channelUnits: channelUnits,
-      isDarkMode: isDarkMode,
-      customHeaderText: customHeaderText, // Pass custom text
-      customFooterText: customFooterText, // Pass custom text
-    );
-  }
-
-  static Future<void> exportToPDF({
-    required List<dynamic> tableData,
-    required String fileName,
-    Uint8List? graphImage,
-    bool includeTable = true,
-    bool includeGraph = true,
-    required Map<String, dynamic>? authSettings,
-    required Map<int, String> channelNamesMap,
-    Map<int, String>? channelUnitsMap, // Already present but we derive it locally for PDF
-    required BuildContext context,
-    String customHeaderText = '', // NEW: Custom header text parameter
-    String customFooterText = '', // NEW: Custom footer text parameter
-  }) async {
-    LogPage.addLog('[$_currentTime] Starting PDF export. Table: $includeTable (${tableData.length} items), Graph: $includeGraph (img: ${graphImage != null}), Channels: ${channelNamesMap.length}, Units: ${channelUnitsMap?.length ?? 0}');
-
-    // FIX: Correct font loading by awaiting the ByteData
-    final ByteData regularFontData = await DefaultAssetBundle.of(context).load('assets/fonts/Roboto-Regular.ttf');
-    final regularFont = pw.Font.ttf(regularFontData);
-    final ByteData boldFontData = await DefaultAssetBundle.of(context).load('assets/fonts/Roboto-Bold.ttf');
-    final boldFont = pw.Font.ttf(boldFontData);
-
-    // Dynamic font sizes based on channel count
-    final fontSize = channelNamesMap.length > 10 ? 7.0 : 8.0;
-    final headerFontSize = channelNamesMap.length > 10 ? 8.0 : 9.0;
-    final baseStyle = pw.TextStyle(font: regularFont, fontSize: fontSize, color: PdfColors.black);
-    final boldStyle = pw.TextStyle(font: boldFont, fontWeight: pw.FontWeight.bold, fontSize: headerFontSize, color: PdfColors.black);
-
-    // 1. Pre-load Logo outside any build methods or loops for efficiency
-    pw.Image? logoImageWidget;
-    if (authSettings?['logoPath'] != null && (authSettings!['logoPath'] as String).isNotEmpty) {
-      final logoPath = authSettings['logoPath'] as String;
-      try {
-        final logoFile = File(logoPath);
-        if (await logoFile.exists()) {
-          final logoBytes = await logoFile.readAsBytes();
-          final resizedLogoBytes = await _resizeImage(logoBytes, maxHeight: 50, isLogo: true);
-          logoImageWidget = pw.Image(pw.MemoryImage(resizedLogoBytes), height: 25, fit: pw.BoxFit.contain);
-        }
-      } catch (e) {
-        LogPage.addLog('[$_currentTime] PDF: Logo pre-loading error: $e');
-      }
-    }
-
-    // Declare headers and units at a scope accessible by pw.Table.fromTextArray
-    List<String> headers = ['No.', 'Date', 'Time'];
-    List<String> units = ['#', 'YYYY-MM-DD', 'HH:MM:SS'];
-
-    // Prepare data rows
-    List<List<String>> dataRows = [];
-    if (includeTable && tableData.isNotEmpty) {
-      List<int> sortedChannelKeys = channelNamesMap.keys.toList()..sort();
-
-      final db = await DatabaseManager().database;
-      Map<int, String> updatedUnitsMap = {};
-      for (int key in sortedChannelKeys) {
-        final channelName = channelNamesMap[key] ?? 'Ch $key';
-        final result = await db.query(
-          'ChannelSetup',
-          columns: ['Unit'],
-          where: 'ChannelName = ?',
-          whereArgs: [channelName],
-          limit: 1,
-        );
-        updatedUnitsMap[key] = result.isNotEmpty && result.first['Unit'] != null ? result.first['Unit'] as String : '%';
-      }
-
-      // Populate the outer 'headers' and 'units' lists
-      for (int key in sortedChannelKeys) {
-        headers.add(channelNamesMap[key] ?? 'Ch $key');
-        units.add(updatedUnitsMap[key] ?? '%');
-      }
-      LogPage.addLog('[$_currentTime] PDF: Headers: $headers');
-      LogPage.addLog('[$_currentTime] PDF: Units: $units');
-
-      for (var dataRowMap in tableData) {
-        if (dataRowMap is! Map<String, dynamic>) {
-          LogPage.addLog('[$_currentTime] PDF: Invalid row data: $dataRowMap');
-          continue;
-        }
-        final data = dataRowMap;
-
-        String displayDate = 'N/A';
-        if (data['AbsDate'] != null && (data['AbsDate'] as String).isNotEmpty) {
-          try {
-            DateTime parsedDate = DateTime.parse(data['AbsDate'] as String);
-            displayDate = "${parsedDate.year}-${parsedDate.month.toString().padLeft(2, '0')}-${parsedDate.day.toString().padLeft(2, '0')}";
-          } catch (e) {
-            String dateStr = data['AbsDate'] as String;
-            if (dateStr.length >= 10) {
-              displayDate = dateStr.substring(0, 10);
-            }
-            LogPage.addLog('[$_currentTime] PDF: AbsDate parsing error: $e');
-          }
-        }
-
-        List<String> row = [
-          data['SNo']?.toString() ?? '-',
-          displayDate,
-          data['AbsTime']?.toString() ?? '-',
-        ];
-        for (int key in sortedChannelKeys) {
-          var val = data['AbsPer$key'];
-          row.add(val is num ? val.toStringAsFixed(2) : (val?.toString() ?? '-'));
-        }
-        dataRows.add(row);
-      }
-    }
-
-    // Table settings
-    const double rowHeight = 10.0;
-    // FIX: Limit pages per individual PDF file to avoid "too many pages" exception
-    const int maxPagesPerFile = 100; // Max pages per PDF document
-    final pageHeight = PdfPageFormat.a4.height - 50; // Total height minus standard margins
-    // Pass correct tableHeaderRowCount (2 for headers + units) to calculation
-    final rowsPerPage = _calculateRowsPerPage(pageHeight, rowHeight, 2, includeGraph);
-    final maxRowsPerChunk = maxPagesPerFile * rowsPerPage; // Max rows in one PDF file
-
-    // Split data into multiple PDFs based on maxRowsPerChunk
-    for (int fileIndex = 0; fileIndex < dataRows.length; fileIndex += maxRowsPerChunk) {
-      final pdf = pw.Document();
-      List<pw.Widget> content = []; // Reset content for each new PDF part
-
-      // **Build content for the current PDF part**
-      // Table data chunks
-      if (includeTable && dataRows.isNotEmpty) {
-        final currentFileChunk = dataRows.sublist(
-          fileIndex,
-          fileIndex + maxRowsPerChunk > dataRows.length ? dataRows.length : fileIndex + maxRowsPerChunk,
-        );
-
-        int pageCountInChunk = 0;
-        for (int i = 0; i < currentFileChunk.length; i += rowsPerPage) {
-          final pageChunk = currentFileChunk.sublist(i, i + rowsPerPage > currentFileChunk.length ? currentFileChunk.length : i + rowsPerPage);
-
-          content.add(
-            pw.Table.fromTextArray(
-              data: [
-                headers, // First header row (column names)
-                units,   // Second header row (units)
-                ...pageChunk,
-              ],
-              cellAlignment: pw.Alignment.center,
-              headerStyle: boldStyle.copyWith(color: PdfColors.white),
-              cellStyle: baseStyle,
-              border: pw.TableBorder.all(color: PdfColors.grey800, width: 0.5),
-              headerCellDecoration: const pw.BoxDecoration(color: PdfColors.blue800),
-              cellHeight: rowHeight,
-              cellPadding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-              headerCount: 2, // Tells pdf to repeat the first 2 rows of 'data' as headers
-              columnWidths: {
-                0: const pw.FixedColumnWidth(35),
-                1: const pw.FixedColumnWidth(65),
-                2: const pw.FixedColumnWidth(55),
-                for (int j = 3; j < headers.length; j++) j: pw.FlexColumnWidth(channelNamesMap.length > 10 ? 0.8 : 0.9),
-              },
-            ),
-          );
-          pageCountInChunk++;
-          LogPage.addLog('[$_currentTime] PDF: Added page $pageCountInChunk with ${pageChunk.length} rows to part ${fileIndex ~/ maxRowsPerChunk + 1}');
-          // Only add a new page if there are more rows in the current chunk
-          if (i + rowsPerPage < currentFileChunk.length) {
-            content.add(pw.NewPage());
-          }
-        }
-      } else if (includeTable) {
-        content.add(pw.Text('No tabular data available.', style: baseStyle.copyWith(color: PdfColors.red)));
-      }
-
-      // **GRAPH SECTION**
-      // Graph should only be added to the first part of the PDF, if table data is split
-      if (includeGraph && graphImage != null && fileIndex == 0) {
-        try {
-          final resizedGraphBytes = await _resizeImage(graphImage, maxWidth: 800, maxHeight: 400, isLogo: false);
-
-          // If table data was included, add a new page *before* the graph content
-          if (includeTable && dataRows.isNotEmpty) {
-            content.add(pw.NewPage());
-          }
-
-          content.add(
-              pw.Partition( // Use Partition to ensure the entire graph block moves together if it doesn't fit
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.center,
-                  mainAxisSize: pw.MainAxisSize.min, // Essential for Partition to work correctly
-                  children: [
-                    pw.SizedBox(height: 20), // Add some space from the top of the new page
-                    pw.Text('Graph: $fileName', style: boldStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 10 : 12)),
-                    pw.SizedBox(height: 8),
-                    pw.Image(pw.MemoryImage(resizedGraphBytes), fit: pw.BoxFit.contain, height: channelNamesMap.length > 10 ? 300 : 350),
-                    // REMOVED "Figure 1: Data Visualization" hardcoded text
-                  ],
-                ),
-              )
-          );
-        } catch (e) {
-          LogPage.addLog('[$_currentTime] PDF: Graph error: $e');
-          if (includeTable && dataRows.isNotEmpty) {
-            content.add(pw.NewPage());
-          }
-          content.add(
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.center,
-                children: [
-                  pw.SizedBox(height: 20),
-                  pw.Text('Error displaying graph.', style: baseStyle.copyWith(color: PdfColors.red)),
-                ],
-              )
-          );
-        }
-      } else if (includeGraph && graphImage == null && fileIndex == 0) {
-        // If graph was requested but no image available
-        if (includeTable && dataRows.isNotEmpty) {
-          content.add(pw.NewPage());
-        }
-        content.add(
-            pw.Column(
-              crossAxisAlignment: pw.CrossAxisAlignment.center,
-              children: [
-                pw.SizedBox(height: 20),
-                pw.Text('No graph image available.', style: baseStyle.copyWith(color: PdfColors.red)),
-              ],
-            )
-        );
-      }
-
-      final pageOrientation = (includeTable && tableData.isNotEmpty && (channelNamesMap.length > 8 || (includeGraph && graphImage != null)))
-          ? pw.PageOrientation.landscape
-          : pw.PageOrientation.portrait;
-
-      try {
-        pdf.addPage(
-          pw.MultiPage(
-            pageFormat: PdfPageFormat.a4,
-            orientation: pageOrientation,
-            margin: const pw.EdgeInsets.all(25),
-            build: (context) => content, // The complete content list is passed here
-            header: (context) {
-              // Header logic: detailed for first page, simple for subsequent pages
-              if (context.pageNumber == 1) { // First page of this MultiPage instance
-                return pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.center,
-                  children: [
-                    if (customHeaderText.isNotEmpty) ...[
-                      pw.SizedBox(height: 10),
-                      pw.Text(
-                        customHeaderText,
-                        style: boldStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 12 : 14),
-                        textAlign: pw.TextAlign.center,
-                      ),
-                      pw.SizedBox(height: 10),
-                    ],
-                    if (logoImageWidget != null) // Use the pre-loaded image widget
-                      pw.Container(child: logoImageWidget, alignment: pw.Alignment.center, margin: const pw.EdgeInsets.only(bottom: 8)),
-                    pw.Text(
-                      authSettings?['companyName'] ?? 'Countronics',
-                      style: boldStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 14 : 16),
-                      textAlign: pw.TextAlign.center,
-                    ),
-                    pw.Text(
-                      authSettings?['companyAddress'] ?? 'Near Crossing Republic, ABES Eng College, Ghaziabad 210209',
-                      style: baseStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 8 : 10),
-                      textAlign: pw.TextAlign.center,
-                    ),
-                    pw.Text(
-                      'Test Report: $fileName${fileIndex > 0 ? ' (Part ${fileIndex ~/ maxRowsPerChunk + 1})' : ''}',
-                      style: boldStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 12 : 14),
-                    ),
-                    pw.Text(
-                      'Generated on: $_currentTime',
-                      style: baseStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 8 : 10),
-                    ),
-                    pw.SizedBox(height: 30),
-                    pw.Divider(thickness: 0.5, color: PdfColors.blue800),
-                    pw.SizedBox(height: 8),
-                  ],
-                );
-              } else { // Subsequent pages of this MultiPage instance
-                return pw.Container(
-                  margin: const pw.EdgeInsets.only(bottom: 8),
-                  child: pw.Column(
-                    crossAxisAlignment: pw.CrossAxisAlignment.center,
-                    children: [
-                      if (customHeaderText.isNotEmpty) ...[
-                        pw.SizedBox(height: 10),
-                        pw.Text(customHeaderText, style: boldStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 10 : 12)),
-                        pw.SizedBox(height: 5),
-                      ],
-                      pw.Text(
-                        authSettings?['companyName'] ?? 'Countronics',
-                        style: boldStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 10 : 12),
-                      ),
-                      pw.Text(
-                        'Test Report: $fileName${fileIndex > 0 ? ' (Part ${fileIndex ~/ maxRowsPerChunk + 1})' : ''}',
-                        style: baseStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 8 : 10),
-                      ),
-                      pw.SizedBox(height: 8),
-                      pw.Divider(thickness: 0.5, color: PdfColors.grey800),
-                    ],
-                  ),
-                );
-              }
-            },
-            footer: (context) {
-              return pw.Container(
-                margin: const pw.EdgeInsets.only(top: 8),
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.center,
-                  children: [
-                    pw.Divider(thickness: 0.5, color: PdfColors.grey800),
-                    pw.SizedBox(height: 8),
-                    pw.Text('Page ${context.pageNumber} of ${context.pagesCount}', style: baseStyle.copyWith(color: PdfColors.grey700)),
-                    pw.Text(authSettings?['companyName'] ?? 'Countronics', style: baseStyle),
-                    // Removed company address and contact info as requested (already done, just confirming)
-                    pw.Text('Generated by Countronics Smart Logger', style: baseStyle.copyWith(fontStyle: pw.FontStyle.italic)),
-                    // NEW: Custom Footer Text
-                    if (customFooterText.isNotEmpty) ...[
-                      pw.SizedBox(height: 5),
-                      pw.Text(customFooterText, style: baseStyle.copyWith(fontSize: channelNamesMap.length > 10 ? 8 : 10)),
-                    ],
-                    pw.SizedBox(height: 30),
-                  ],
-                ),
-              );
-            },
-          ),
-        );
-
-        final directory = await getApplicationDocumentsDirectory();
-        final downloadsDir = Platform.isAndroid || Platform.isIOS ? directory : (await getDownloadsDirectory() ?? directory);
-        final sanitizedFileName = fileName.replaceAll(RegExp(r'[^\w\s.-]'), '_');
-        final filePath = '${downloadsDir.path}/$sanitizedFileName${fileIndex > 0 ? '_part${fileIndex ~/ maxRowsPerChunk + 1}' : ''}.pdf';
-        final file = File(filePath);
-        LogPage.addLog('[$_currentTime] PDF: Saving to $filePath');
-        await file.writeAsBytes(await pdf.save());
-        LogPage.addLog('[$_currentTime] PDF: Exported to $filePath');
-        if (fileIndex == 0) { // Only open the first generated PDF file
-          try {
-            await OpenFilex.open(filePath);
-          } catch (e) {
-            LogPage.addLog('[$_currentTime] PDF: Error opening PDF: $e');
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Failed to open PDF: $e', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-            );
-          }
-        }
-      } catch (e) {
-        LogPage.addLog('[$_currentTime] PDF: Error generating/saving PDF: $e');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to generate PDF: $e', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-        );
-      }
-    }
-  }
-
-  static Future<void> exportToDOC({
-    required List<dynamic> tableData,
-    required String fileName,
-    Uint8List? graphImage,
-    bool includeTable = true,
-    bool includeGraph = true,
-    required Map<String, dynamic>? authSettings,
-    required Map<int, String> channelNamesMap,
-    Map<int, String>? channelUnitsMap, // Already present but we derive it locally for DOC
-    BuildContext? context,
-    String customHeaderText = '', // NEW: Custom header text parameter
-    String customFooterText = '', // NEW: Custom footer text parameter
-  }) async {
-    LogPage.addLog('[$_currentTime] Starting DOC (HTML) export. Table: $includeTable (${tableData.length} items), Graph: ${graphImage != null}, Channels: ${channelNamesMap.length}, Units: ${channelUnitsMap?.length ?? 0}');
-    StringBuffer htmlContent = StringBuffer();
-
-    final fontSize = channelNamesMap.length > 10 ? '8pt' : '9pt';
-    final minWidth = channelNamesMap.length > 10 ? '60px' : '70px';
-
-    htmlContent.writeln('<!DOCTYPE html>');
-    htmlContent.writeln('<html lang="en">');
-    htmlContent.writeln('<head>');
-    htmlContent.writeln('<meta charset="UTF-8">');
-    htmlContent.writeln('<meta name="viewport" content="width=device-width, initial-scale=1.0">');
-    htmlContent.writeln('<title>$fileName</title>');
-    htmlContent.writeln('<style>');
-    htmlContent.writeln('body { font-family: Arial, sans-serif; margin: 25px; line-height: 1.6; color: #000; }');
-    htmlContent.writeln('table { border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: $fontSize; }');
-    htmlContent.writeln('th, td { border: 1px solid #666; padding: 6px; text-align: center; min-width: $minWidth; }');
-    htmlContent.writeln('th { background-color: #1565C0; color: white; font-weight: bold; }');
-    htmlContent.writeln('td { background-color: #fff; }');
-    htmlContent.writeln('.header-container { text-align: center; margin-bottom: 20px; padding-bottom: 8px; border-bottom: 1px solid #1565C0; }');
-    htmlContent.writeln('.header-container img.logo { max-height: 50pt; margin-bottom: 12px; }'); // INCREASED LOGO SIZE
-    htmlContent.writeln('.header-container h1.company-name { margin: 0 0 6px 0; font-size: ${channelNamesMap.length > 10 ? '14pt' : '16pt'}; }');
-    htmlContent.writeln('.header-container p.company-address { margin: 0 0 8px 0; font-size: ${channelNamesMap.length > 10 ? '8pt' : '10pt'}; }');
-    htmlContent.writeln('p.report-title { font-size: ${channelNamesMap.length > 10 ? '12pt' : '14pt'}; font-weight: bold; margin: 0 0 6px 0; }');
-    htmlContent.writeln('p.generated-date { font-size: ${channelNamesMap.length > 10 ? '8pt' : '10pt'}; margin-bottom: 8px; }');
-    htmlContent.writeln('.footer-container { text-align: center; margin-top: 20px; padding-top: 8px; border-top: 1px solid #1565C0; font-size: $fontSize; }');
-    htmlContent.writeln('.graph-container { text-align: center; margin-top: 20px; page-break-inside: avoid; }');
-    htmlContent.writeln('.graph-container h2 { font-size: ${channelNamesMap.length > 10 ? '10pt' : '12pt'}; margin-bottom: 8px; }');
-    htmlContent.writeln('.graph-container img { max-width: 800px; max-height: 400px; border: 1px solid #ccc; }');
-    htmlContent.writeln('.graph-container p.caption { font-size: $fontSize; font-style: italic; margin-top: 5px; }');
-    htmlContent.writeln('.page-break { page-break-before: always; }');
-    htmlContent.writeln('@media print { body { font-size: ${channelNamesMap.length > 10 ? '7pt' : '8pt'}; } .header-container h1.company-name { font-size: ${channelNamesMap.length > 10 ? '12pt' : '14pt'}; } p.report-title { font-size: ${channelNamesMap.length > 10 ? '10pt' : '12pt'}; } }');
-    htmlContent.writeln('</style>');
-    htmlContent.writeln('</head>');
-    htmlContent.writeln('<body>');
-
-    htmlContent.writeln('<div class="header-container">');
-    // NEW: Custom Header Text
-    if (customHeaderText.isNotEmpty) {
-      htmlContent.writeln('<div style="font-size: ${channelNamesMap.length > 10 ? '12pt' : '14pt'}; font-weight: bold; margin-bottom: 10px;">$customHeaderText</div>');
-    }
-    htmlContent.writeln('<div style="height: 10pt;"></div>'); // Add some vertical space if no custom header
-    if (authSettings != null && authSettings['logoPath'] != null && (authSettings['logoPath'] as String).isNotEmpty) {
-      final logoPath = authSettings['logoPath'] as String;
-      try {
-        final logoFile = File(logoPath);
-        if (await logoFile.exists()) {
-          final logoBytes = await logoFile.readAsBytes();
-          final resizedLogoBytes = await _resizeImage(logoBytes, maxHeight: 50, isLogo: true);
-          final base64Logo = base64Encode(resizedLogoBytes);
-          String mimeType = logoPath.toLowerCase().endsWith('.jpg') || logoPath.toLowerCase().endsWith('.jpeg') ? 'image/jpeg' : 'image/png';
-          htmlContent.writeln('<img class="logo" src="data:$mimeType;base64,$base64Logo" alt="Company Logo">');
-          LogPage.addLog('[$_currentTime] DOC: Embedded resized logo from $logoPath');
-        } else {
-          LogPage.addLog('[$_currentTime] DOC: Logo file not found at $logoPath');
-        }
-      } catch (e) {
-        LogPage.addLog('[$_currentTime] DOC: Error embedding logo: $e');
-      }
-    }
-    htmlContent.writeln('<h1 class="company-name">${authSettings?['companyName'] ?? 'Countronics'}</h1>');
-    htmlContent.writeln('<p class="company-address">${authSettings?['companyAddress'] ?? 'Near Crossing Republic, ABES Eng College, Ghaziabad 210209'}</p>');
-    htmlContent.writeln('<p class="report-title">Test Report: $fileName</p>');
-    htmlContent.writeln('<p class="generated-date">Generated on: $_currentTime</p>');
-    htmlContent.writeln('<div style="height: 30pt;"></div>');
-    htmlContent.writeln('</div>');
-
-    if (includeTable && tableData.isNotEmpty) {
-      htmlContent.writeln('<table>');
-      htmlContent.writeln('<thead>');
-      htmlContent.writeln('<tr>');
-      List<String> headers = ['No.', 'Date', 'Time'];
-      List<int> sortedChannelKeys = channelNamesMap.keys.toList()..sort();
-
-      final db = await DatabaseManager().database;
-      Map<int, String> updatedUnitsMap = {};
-      for (int key in sortedChannelKeys) {
-        final channelName = channelNamesMap[key] ?? 'Ch $key';
-        final result = await db.query(
-          'ChannelSetup',
-          columns: ['Unit'],
-          where: 'ChannelName = ?',
-          whereArgs: [channelName],
-          limit: 1,
-        );
-        updatedUnitsMap[key] = result.isNotEmpty && result.first['Unit'] != null ? result.first['Unit'] as String : '%';
-      }
-
-      for (int key in sortedChannelKeys) {
-        headers.add(channelNamesMap[key] ?? 'Ch $key');
-      }
-      for (String header in headers) {
-        htmlContent.writeln('<th>${header.padRight(channelNamesMap.length > 10 ? 15 : 20)}</th>');
-      }
-      htmlContent.writeln('</tr>');
-
-      htmlContent.writeln('<tr>');
-      List<String> units = ['#', 'YYYY-MM-DD', 'HH:MM:SS'];
-      for (int key in sortedChannelKeys) {
-        units.add(updatedUnitsMap[key] ?? '%');
-      }
-      for (String unit in units) {
-        htmlContent.writeln('<th><em>${unit.padRight(channelNamesMap.length > 10 ? 15 : 20)}</em></th>');
-      }
-      htmlContent.writeln('</tr>');
-      htmlContent.writeln('</thead>');
-      htmlContent.writeln('<tbody>');
-
-      for (var dataRowMap in tableData.take(10000)) {
-        if (dataRowMap is! Map<String, dynamic>) {
-          LogPage.addLog('[$_currentTime] DOC: Invalid row data: $dataRowMap');
-          continue;
-        }
-        final data = dataRowMap;
-
-        String displayDate = 'N/A';
-        if (data['AbsDate'] != null && (data['AbsDate'] as String).isNotEmpty) {
-          try {
-            DateTime parsedDate = DateTime.parse(data['AbsDate'] as String);
-            displayDate = "${parsedDate.year}-${parsedDate.month.toString().padLeft(2, '0')}-${parsedDate.day.toString().padLeft(2, '0')}";
-          } catch (e) {
-            String dateStr = data['AbsDate'] as String;
-            if (dateStr.length >= 10) {
-              displayDate = dateStr.substring(0, 10);
-            }
-            LogPage.addLog('[$_currentTime] DOC: AbsDate parsing error: $e');
-          }
-        }
-
-        htmlContent.writeln('<tr>');
-        htmlContent.writeln('<td>${(data['SNo']?.toString() ?? '-').padRight(channelNamesMap.length > 10 ? 15 : 20)}</td>');
-        htmlContent.writeln('<td>${displayDate.padRight(channelNamesMap.length > 10 ? 15 : 20)}</td>');
-        htmlContent.writeln('<td>${(data['AbsTime']?.toString() ?? '-').padRight(channelNamesMap.length > 10 ? 15 : 20)}</td>');
-        for (int key in sortedChannelKeys) {
-          var val = data['AbsPer$key'];
-          htmlContent.writeln('<td>${(val is num ? val.toStringAsFixed(2) : (val?.toString() ?? '-')).padRight(channelNamesMap.length > 10 ? 15 : 20)}</td>');
-        }
-        htmlContent.writeln('</tr>');
-      }
-      htmlContent.writeln('</tbody>');
-      htmlContent.writeln('</table>');
-      if (tableData.length > 10000) {
-        htmlContent.writeln('<p style="color:red;">Warning: Data truncated to 10,000 rows.</p>');
-      }
-    } else if (includeTable) {
-      htmlContent.writeln('<p>No tabular data available.</p>');
-    }
-
-    if (includeGraph && graphImage != null) {
-      // Only add page break if table data was included and had data.
-      if (includeTable && tableData.isNotEmpty) {
-        htmlContent.writeln('<div class="page-break"></div>');
-      }
-      htmlContent.writeln('<div class="graph-container">');
-      htmlContent.writeln('<h2>Graph: $fileName</h2>');
-      try {
-        final resizedGraphBytes = await _resizeImage(graphImage, maxWidth: 800, maxHeight: 400, isLogo: false);
-        String base64Image = base64Encode(resizedGraphBytes);
-        htmlContent.writeln('<img src="data:image/png;base64,$base64Image" alt="Data Graph">');
-        // REMOVED "Figure 1: Data Visualization" hardcoded text
-      } catch (e) {
-        LogPage.addLog('[$_currentTime] DOC: Error encoding graph image: $e');
-        htmlContent.writeln('<p style="color:red;">Error displaying graph.</p>');
-      }
-      htmlContent.writeln('</div>');
-    } else if (includeGraph && graphImage == null) {
-      // If graph was requested but no image available
-      if (includeTable && tableData.isNotEmpty) {
-        htmlContent.writeln('<div class="page-break"></div>');
-      }
-      htmlContent.writeln('<div class="graph-container">'); // Use graph-container for consistent layout
-      htmlContent.writeln('<p style="color:red; margin-top: 20px;">No graph image available.</p>');
-      htmlContent.writeln('</div>');
-    }
-
-    htmlContent.writeln('<div style="height: 30pt;"></div>');
-    htmlContent.writeln('<div class="footer-container">');
-    htmlContent.writeln('<p>${authSettings?['companyName'] ?? 'Countronics'}</p>');
-    // Removed company address and contact info as requested (already done, just confirming)
-    htmlContent.writeln('<p><em>Generated by PeakLoadIndicator</em></p>');
-    // NEW: Custom Footer Text
-    if (customFooterText.isNotEmpty) {
-      htmlContent.writeln('<div style="font-size: ${channelNamesMap.length > 10 ? '8pt' : '10pt'}; margin-top: 5px;">$customFooterText</div>');
-    }
-    htmlContent.writeln('<div style="height: 30pt;"></div>');
-    htmlContent.writeln('</div>');
-
-    htmlContent.writeln('</body>');
-    htmlContent.writeln('</html>');
+    _showLoadingDialog(context, 'Exporting, please wait...');
 
     try {
-      final directory = await getApplicationDocumentsDirectory();
-      final downloadsDir = Platform.isAndroid || Platform.isIOS ? directory : (await getDownloadsDirectory() ?? directory);
-      final sanitizedFileName = fileName.replaceAll(RegExp(r'[^\w\s.-]'), '_');
-      final filePath = '${downloadsDir.path}/$sanitizedFileName.doc';
-      final file = File(filePath);
-      LogPage.addLog('[$_currentTime] DOC: Saving to $filePath');
-      await file.writeAsString(htmlContent.toString());
-      LogPage.addLog('[$_currentTime] DOC: Exported to $filePath');
-      try {
-        await OpenFilex.open(filePath);
-      } catch (e) {
-        LogPage.addLog('[$_currentTime] DOC: Error opening DOC: $e');
-        if (context != null) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to open DOC: $e', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-          );
-        }
+      final authData = await DatabaseManager().getAuthSettings() ?? {};
+      final String companyName = authData['companyName'] as String? ?? 'Data Report';
+      final String companyAddress = authData['companyAddress'] as String? ?? '';
+      final String? logoPath = authData['logoPath'] as String?;
+      Uint8List? logoBytes;
+      if (logoPath != null && logoPath.isNotEmpty && await File(logoPath).exists()) {
+        logoBytes = await File(logoPath).readAsBytes();
       }
-    } catch (e) {
-      LogPage.addLog('[$_currentTime] DOC: Error saving DOC: $e');
-      if (context != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to save DOC: $e', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-        );
-      }
-    }
-  }
 
-  static Future<void> exportToExcel({
-    required List<dynamic> tableData,
-    required String fileName,
-    bool includeTable = true,
-    required Map<int, String> channelNamesMap,
-    Map<int, String>? channelUnitsMap, // Already present but we derive it locally for Excel
-    BuildContext? context,
-    String customHeaderText = '', // NEW: Custom header text parameter
-    String customFooterText = '', // NEW: Custom footer text parameter
-  }) async {
-    LogPage.addLog('[$_currentTime] Starting Excel export with Syncfusion. TableData: ${tableData.length}, Channels: ${channelNamesMap.length}, Units: ${channelUnitsMap?.length ?? 0}');
-
-    if (!includeTable || tableData.isEmpty) {
-      LogPage.addLog('[$_currentTime] Excel: No table data.');
-      if (context != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('No table data to export.', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-        );
-      }
-      return;
-    }
-
-    final xlsio.Workbook workbook = xlsio.Workbook();
-    final xlsio.Worksheet sheet = workbook.worksheets[0];
-    sheet.name = 'ReportData';
-
-    // Debug tableData
-    LogPage.addLog('[$_currentTime] Excel: TableData sample: ${tableData.isNotEmpty ? tableData.first : 'Empty'}');
-    LogPage.addLog('[$_currentTime] Excel: ChannelNamesMap: $channelNamesMap');
-
-    // Declare headers and units early so they are available
-    List<String> headers = ['No.', 'Date', 'Time'];
-    List<String> units = ['#', 'YYYY-MM-DD', 'HH:MM:SS'];
-
-    // NEW: Add custom header text
-    int currentRow = 1;
-    if (customHeaderText.isNotEmpty) {
-      sheet.getRangeByIndex(currentRow, 1).setText(customHeaderText);
-      sheet.getRangeByIndex(currentRow, 1).cellStyle
-        ..bold = true
-        ..fontSize = 12
-        ..fontColor = '#1565C0'; // Match header color
-      // Now headers.length is safely accessible because `headers` is declared
-      sheet.getRangeByIndex(currentRow, 1, currentRow, headers.length + (channelNamesMap.length)).merge(); // Merge across all columns
-      currentRow++;
-      sheet.getRangeByIndex(currentRow, 1).rowHeight = 10; // Empty row for spacing
-      currentRow++;
-    }
-
-    List<int> sortedChannelKeys = channelNamesMap.keys.toList()..sort();
-
-    // Fetch units
-    final db = await DatabaseManager().database;
-    Map<int, String> updatedUnitsMap = {};
-    for (int key in sortedChannelKeys) {
-      final channelName = channelNamesMap[key] ?? 'Ch $key';
-      final result = await db.query(
-        'ChannelSetup',
-        columns: ['Unit'],
-        where: 'ChannelName = ?',
-        whereArgs: [channelName],
-        limit: 1,
+      await _performExport(
+        context: context, format: selectedFormat, mode: mode, tableData: tableData,
+        graphImage: graphImage, fileName: fileName, companyName: companyName,
+        companyAddress: companyAddress, logoBytes: logoBytes, channelNames: channelNames,
+        firstTimestamp: firstTimestamp, lastTimestamp: lastTimestamp, channelSetupData: channelSetupData,
+        headerLines: headerLines, footerLines: footerLines,
       );
-      updatedUnitsMap[key] = result.isNotEmpty && result.first['Unit'] != null ? result.first['Unit'] as String : '%';
-    }
-
-    for (int key in sortedChannelKeys) {
-      headers.add(channelNamesMap[key] ?? 'Ch $key');
-      units.add(updatedUnitsMap[key] ?? '%');
-    }
-
-    // Write headers
-    for (int i = 0; i < headers.length; i++) {
-      sheet.getRangeByIndex(currentRow, i + 1).setText(headers[i]);
-      sheet.getRangeByIndex(currentRow, i + 1).cellStyle
-        ..bold = true
-        ..backColor = '#1565C0'
-        ..fontColor = '#FFFFFF';
-      sheet.getRangeByIndex(currentRow + 1, i + 1).setText(units[i]);
-      sheet.getRangeByIndex(currentRow + 1, i + 1).cellStyle.italic = true;
-    }
-    currentRow += 2; // Move past headers and units
-    LogPage.addLog('[$_currentTime] Excel: Headers: $headers');
-    LogPage.addLog('[$_currentTime] Excel: Units: $units');
-
-    // Dynamic column widths based on channel count
-    final baseWidth = channelNamesMap.length > 10 ? 8.0 : 12.0;
-    List<double> columnWidths = [10, 15, 15, ...List.filled(headers.length - 3, baseWidth)];
-    for (int i = 0; i < headers.length; i++) {
-      if (columnWidths[i].isNaN || columnWidths[i].isInfinite) {
-        LogPage.addLog('[$_currentTime] Excel: Invalid column width at index $i: ${columnWidths[i]}');
-        columnWidths[i] = baseWidth;
-      }
-      final widthInPixels = (columnWidths[i] * 7).round();
-      LogPage.addLog('[$_currentTime] Excel: Setting column ${i + 1} width to $widthInPixels pixels');
-      sheet.setColumnWidthInPixels(i + 1, widthInPixels);
-    }
-
-    for (var dataRowMap in tableData.take(10000)) {
-      if (dataRowMap is! Map<String, dynamic>) {
-        LogPage.addLog('[$_currentTime] Excel: Invalid row data: $dataRowMap');
-        continue;
-      }
-      final data = dataRowMap;
-      LogPage.addLog('[$_currentTime] Excel: Processing row: $data');
-
-      // Validate required fields
-      if (!data.containsKey('SNo') || !data.containsKey('AbsTime') || !data.containsKey('AbsDate')) {
-        LogPage.addLog('[$_currentTime] Excel: Missing required fields in row: $data');
-        continue;
-      }
-
-      String displayDate = 'N/A';
-      if (data['AbsDate'] != null && (data['AbsDate'] as String).isNotEmpty) {
-        try {
-          DateTime parsedDate = DateTime.parse(data['AbsDate'] as String);
-          displayDate = "${parsedDate.year}-${parsedDate.month.toString().padLeft(2, '0')}-${parsedDate.day.toString().padLeft(2, '0')}";
-        } catch (e) {
-          String dateStr = data['AbsDate'] as String;
-          if (dateStr.length >= 10) {
-            displayDate = dateStr.substring(0, 10);
-          }
-          LogPage.addLog('[$_currentTime] Excel: Date parsing error for ${data['AbsDate']}: $e');
-        }
-      }
-
-      sheet.getRangeByIndex(currentRow, 1).setText(data['SNo']?.toString() ?? '-');
-      sheet.getRangeByIndex(currentRow, 2).setText(displayDate);
-      sheet.getRangeByIndex(currentRow, 3).setText(data['AbsTime']?.toString() ?? '-');
-
-      for (int i = 0; i < sortedChannelKeys.length; i++) {
-        var val = data['AbsPer${sortedChannelKeys[i]}'];
-        if (val is num) {
-          sheet.getRangeByIndex(currentRow, i + 4).setNumber(val.toDouble());
-        } else if (val is String && double.tryParse(val) != null) {
-          sheet.getRangeByIndex(currentRow, i + 4).setNumber(double.parse(val));
-        } else {
-          sheet.getRangeByIndex(currentRow, i + 4).setText(val?.toString() ?? '-');
-          LogPage.addLog('[$_currentTime] Excel: Non-numeric value for AbsPer${sortedChannelKeys[i]}: $val');
-        }
-      }
-      currentRow++;
-    }
-    LogPage.addLog('[$_currentTime] Excel: Added ${currentRow - (customHeaderText.isNotEmpty ? 3 : 1)} rows.'); // Adjust for initial rows
-
-    // Add truncation note if necessary
-    if (tableData.length > 10000) {
-      sheet.getRangeByIndex(currentRow, 1).setText('Warning: Data truncated to 10,000 rows.');
-      sheet.getRangeByIndex(currentRow, 1).cellStyle.fontColor = '#FF0000';
-      currentRow++;
-    }
-
-    // NEW: Add custom footer text
-    if (customFooterText.isNotEmpty) {
-      sheet.getRangeByIndex(currentRow, 1).rowHeight = 10; // Empty row for spacing
-      currentRow++;
-      sheet.getRangeByIndex(currentRow, 1).setText(customFooterText);
-      sheet.getRangeByIndex(currentRow, 1).cellStyle.fontSize = 10;
-      sheet.getRangeByIndex(currentRow, 1).cellStyle.fontColor = '#666666'; // Match a subtle color
-      sheet.getRangeByIndex(currentRow, 1, currentRow, headers.length).merge(); // Merge across all columns
-    }
-
-    try {
-      final directory = await getApplicationDocumentsDirectory();
-      final downloadsDir = Platform.isAndroid || Platform.isIOS ? directory : (await getDownloadsDirectory() ?? directory);
-      final sanitizedFileName = fileName.replaceAll(RegExp(r'[^\w\s.-]'), '_');
-      final filePath = '${downloadsDir.path}/$sanitizedFileName.xlsx';
-      final file = File(filePath);
-      LogPage.addLog('[$_currentTime] Excel: Saving to $filePath');
-      await file.writeAsBytes(workbook.saveAsStream());
-      LogPage.addLog('[$_currentTime] Excel: Exported to $filePath');
-      try {
-        await OpenFilex.open(filePath);
-      } catch (e) {
-        LogPage.addLog('[$_currentTime] Excel: Error opening Excel: $e');
-        if (context != null) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to open Excel: $e', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-          );
-        }
-      }
-    } catch (e) {
-      LogPage.addLog('[$_currentTime] Excel: Error saving Excel: $e');
-      if (context != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to save Excel: $e', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-        );
+    } catch (e, s) {
+      LogPage.addLog('[EXPORT_ERROR] Failed to export in mode "$mode": $e\n$s');
+      if (context.mounted) {
+        MessageUtils.showMessage(context, 'Export failed: $e', isError: true);
       }
     } finally {
-      workbook.dispose();
+      if (context.mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
     }
   }
 
-  static Future<void> exportToCSV({
-    required List<dynamic> tableData,
-    required String fileName,
-    bool includeTable = true,
-    required Map<int, String> channelNamesMap,
-    Map<int, String>? channelUnitsMap, // Already present but we derive it locally for CSV
-    BuildContext? context,
-    String customHeaderText = '', // NEW: Custom header text parameter
-    String customFooterText = '', // NEW: Custom footer text parameter
+  static Future<void> _performExport({
+    required BuildContext context, required ExportFormat format, required String mode,
+    required List<Map<String, dynamic>> tableData, required String fileName, required Uint8List? graphImage,
+    required String companyName, required String companyAddress, required Uint8List? logoBytes,
+    required Map<int, String> channelNames, required DateTime firstTimestamp, required DateTime lastTimestamp,
+    required Map<String, Channel> channelSetupData, required List<String> headerLines, required List<String> footerLines,
   }) async {
-    LogPage.addLog('[$_currentTime] Starting CSV export. TableData: ${tableData.length}, Channels: ${channelNamesMap.length}, Units: ${channelUnitsMap?.length ?? 0}');
-    if (!includeTable || tableData.isEmpty) {
-      LogPage.addLog('[$_currentTime] CSV: No table data.');
-      if (context != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('No table data to export.', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-        );
-      }
-      return;
-    }
+    if ((mode == 'Table' || mode == 'Combined') && tableData.isEmpty) { MessageUtils.showMessage(context, 'No table data to export.', isError: true); return; }
+    if ((mode == 'Graph' || mode == 'Combined') && graphImage == null) { MessageUtils.showMessage(context, 'No graph image to export.', isError: true); return; }
 
-    List<List<String>> csvRows = [];
-
-    // NEW: Add custom header text
-    if (customHeaderText.isNotEmpty) {
-      csvRows.add([customHeaderText]);
-      csvRows.add([]); // Empty row for spacing
-    }
-
-    List<String> headers = ['No.', 'Date', 'Time'];
-    List<String> units = ['#', 'YYYY-MM-DD', 'HH:MM:SS'];
-    List<int> sortedChannelKeys = channelNamesMap.keys.toList()..sort();
-
-    // Fetch units
-    final db = await DatabaseManager().database;
-    Map<int, String> updatedUnitsMap = {};
-    for (int key in sortedChannelKeys) {
-      final channelName = channelNamesMap[key] ?? 'Ch $key';
-      final result = await db.query(
-        'ChannelSetup',
-        columns: ['Unit'],
-        where: 'ChannelName = ?',
-        whereArgs: [channelName],
-        limit: 1,
-      );
-      updatedUnitsMap[key] = result.isNotEmpty && result.first['Unit'] != null ? result.first['Unit'] as String : '%';
-    }
-
-    for (int key in sortedChannelKeys) {
-      headers.add(channelNamesMap[key] ?? 'Ch $key');
-      units.add(updatedUnitsMap[key] ?? '%');
-    }
-    csvRows.add(headers.map((h) => h.padRight(channelNamesMap.length > 10 ? 15 : 20)).toList());
-    csvRows.add(units.map((u) => u.padRight(channelNamesMap.length > 10 ? 15 : 20)).toList());
-    LogPage.addLog('[$_currentTime] CSV: Headers: $headers');
-    LogPage.addLog('[$_currentTime] CSV: Units: $units');
-
-    for (var dataRowMap in tableData.take(10000)) {
-      if (dataRowMap is! Map<String, dynamic>) {
-        LogPage.addLog('[$_currentTime] CSV: Invalid row data: $dataRowMap');
-        continue;
-      }
-      final data = dataRowMap;
-      LogPage.addLog('[$_currentTime] CSV: Processing row: $data');
-
-      String displayDate = 'N/A';
-      if (data['AbsDate'] != null && (data['AbsDate'] as String).isNotEmpty) {
-        try {
-          DateTime parsedDate = DateTime.parse(data['AbsDate'] as String);
-          displayDate = "${parsedDate.year}-${parsedDate.month.toString().padLeft(2, '0')}-${parsedDate.day.toString().padLeft(2, '0')}";
-        } catch (e) {
-          String dateStr = data['AbsDate'] as String;
-          if (dateStr.length >= 10) {
-            displayDate = dateStr.substring(0, 10);
-          }
-          LogPage.addLog('[$_currentTime] CSV: AbsDate parsing error: $e');
-        }
-      }
-
-      List<String> row = [
-        (data['SNo']?.toString() ?? '-').padRight(channelNamesMap.length > 10 ? 15 : 20),
-        displayDate.padRight(channelNamesMap.length > 10 ? 15 : 20),
-        (data['AbsTime']?.toString() ?? '-').padRight(channelNamesMap.length > 10 ? 15 : 20),
-      ];
-      for (int key in sortedChannelKeys) {
-        var val = data['AbsPer$key'];
-        row.add((val is num ? val.toStringAsFixed(2) : (val?.toString() ?? '-')).padRight(channelNamesMap.length > 10 ? 15 : 20));
-        if (!(val is num) && !(val is String && double.tryParse(val) != null)) {
-          LogPage.addLog('[$_currentTime] CSV: Non-numeric value for AbsPer$key: $val');
-        }
-      }
-      csvRows.add(row);
-    }
-    LogPage.addLog('[$_currentTime] CSV: Added ${csvRows.length - (customHeaderText.isNotEmpty ? 2 : 0)} rows.'); // Adjust for initial rows
-
-    // Add truncation note
-    if (tableData.length > 10000) {
-      csvRows.add(['Warning: Data truncated to 10,000 rows.']);
-    }
-
-    // NEW: Add custom footer text
-    if (customFooterText.isNotEmpty) {
-      csvRows.add([]); // Empty row for spacing
-      csvRows.add([customFooterText]);
-    }
-
-    String csvString = const ListToCsvConverter().convert(csvRows);
-
-    try {
-      final directory = await getApplicationDocumentsDirectory();
-      final downloadsDir = Platform.isAndroid || Platform.isIOS ? directory : (await getDownloadsDirectory() ?? directory);
-      final sanitizedFileName = fileName.replaceAll(RegExp(r'[^\w\s.-]'), '_');
-      final file = File('${downloadsDir.path}/$sanitizedFileName.csv');
-      LogPage.addLog('[$_currentTime] CSV: Saving to ${file.path}');
-      await file.writeAsString(csvString);
-      LogPage.addLog('[$_currentTime] CSV: Exported to ${file.path}');
-      try {
-        await OpenFilex.open(file.path);
-      } catch (e) {
-        LogPage.addLog('[$_currentTime] CSV: Error opening CSV: $e');
-        if (context != null) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to open CSV: $e', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-          );
-        }
-      }
-    } catch (e) {
-      LogPage.addLog('[$_currentTime] CSV: Error saving CSV: $e');
-      if (context != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to save CSV: $e', style: GoogleFonts.roboto()), backgroundColor: Colors.red),
-        );
-      }
+    switch (format) {
+      case ExportFormat.excel: await _exportToExcel(context: context, mode: mode, tableData: tableData, graphImage: graphImage, fileName: fileName, companyName: companyName, companyAddress: companyAddress, logoBytes: logoBytes, channelNames: channelNames, firstTimestamp: firstTimestamp, lastTimestamp: lastTimestamp, channelSetupData: channelSetupData, headerLines: headerLines, footerLines: footerLines); break;
+      case ExportFormat.pdf: await _exportToPdf(context: context, mode: mode, tableData: tableData, graphImage: graphImage, fileName: fileName, companyName: companyName, companyAddress: companyAddress, logoBytes: logoBytes, channelNames: channelNames, firstTimestamp: firstTimestamp, lastTimestamp: lastTimestamp, channelSetupData: channelSetupData, headerLines: headerLines, footerLines: footerLines); break;
+      case ExportFormat.csv: if (mode == 'Graph') { MessageUtils.showMessage(context, 'CSV export is not available for "Graph only" mode.', isError: true); return; } await _exportTableToCsv(context: context, tableData: tableData, fileName: fileName, channelNames: channelNames, channelSetupData: channelSetupData); break;
+      case ExportFormat.docx: await _exportToHtmlForWord(context: context, mode: mode, tableData: tableData, graphImage: graphImage, fileName: fileName, companyName: companyName, companyAddress: companyAddress, logoBytes: logoBytes, channelNames: channelNames, firstTimestamp: firstTimestamp, lastTimestamp: lastTimestamp, channelSetupData: channelSetupData, headerLines: headerLines, footerLines: footerLines); break;
     }
   }
 
-  static void showExportDialog({
+  static Future<void> _exportToExcel({ required BuildContext context, required String mode, required List<Map<String, dynamic>> tableData, required Uint8List? graphImage, required String fileName, required String companyName, required String companyAddress, required Uint8List? logoBytes, required Map<int, String> channelNames, required DateTime firstTimestamp, required DateTime lastTimestamp, required Map<String, Channel> channelSetupData, required List<String> headerLines, required List<String> footerLines}) async {
+    final xlsio.Workbook workbook = xlsio.Workbook();
+    final xlsio.Worksheet sheet = workbook.worksheets[0];
+    sheet.name = 'Report';
+    final xlsio.Style centerHeaderStyle = workbook.styles.add('CenterHeaderStyle')..fontName='Arial'..fontSize=18..bold=true..hAlign=xlsio.HAlignType.center..vAlign=xlsio.VAlignType.center;
+    final xlsio.Style centerSubHeaderStyle = workbook.styles.add('CenterSubHeaderStyle')..fontName='Arial'..fontSize=12..hAlign=xlsio.HAlignType.center..vAlign=xlsio.VAlignType.center;
+    final xlsio.Style infoStyle = workbook.styles.add('InfoStyle')..fontName='Arial'..fontSize=11..bold=true;
+    final xlsio.Style userHeaderStyle = workbook.styles.add('UserHeaderStyle')..fontName='Arial'..fontSize=10..bold=true;
+    final xlsio.Style userFooterStyle = workbook.styles.add('UserFooterStyle')..fontName='Arial'..fontSize=10..italic=true;
+    final xlsio.Style tableHeaderStyle = workbook.styles.add('TableHeaderStyle')..fontName='Arial'..fontSize=10..bold=true..backColor='#D9E1F2'..hAlign=xlsio.HAlignType.center..vAlign=xlsio.VAlignType.center..borders.all.lineStyle=xlsio.LineStyle.thin;
+    final Map<String, xlsio.Style> numberStyles = _createNumberStyles(workbook);
+    int currentRow = 1;
+    if (logoBytes != null) {
+      sheet.getRangeByName('A1:C4').merge();
+      final xlsio.Picture picture = sheet.pictures.addStream(1, 1, logoBytes);
+      picture.height = LOGO_HEIGHT.toInt(); picture.width = LOGO_WIDTH.toInt();
+      sheet.getRangeByName('D1:J2')..merge()..setText(companyName)..cellStyle = centerHeaderStyle;
+      sheet.getRangeByName('D3:J4')..merge()..setText(companyAddress)..cellStyle = centerSubHeaderStyle;
+      currentRow += 5;
+    } else {
+      sheet.getRangeByName('A1:J2')..merge()..setText(companyName)..cellStyle = centerHeaderStyle;
+      sheet.getRangeByName('A3:J4')..merge()..setText(companyAddress)..cellStyle = centerSubHeaderStyle;
+      currentRow += 5;
+    }
+    final metadata = { 'File Name:': fileName, 'Report Period:': '${DateFormat('dd-MMM-yyyy HH:mm').format(firstTimestamp)} to ${DateFormat('dd-MMM-yyyy HH:mm').format(lastTimestamp)}' };
+    metadata.forEach((key, value) { sheet.getRangeByIndex(currentRow, 1)..setText(key)..cellStyle = infoStyle; sheet.getRangeByName('B$currentRow:E$currentRow')..merge()..setText(value); currentRow++; });
+    currentRow++;
+    headerLines.where((l) => l.isNotEmpty).forEach((line) { sheet.getRangeByIndex(currentRow++, 1)..setText(line)..cellStyle = userHeaderStyle; });
+    currentRow++;
+    final List<String> headers = ['S.No', 'Date', 'Time', ...channelNames.values.map((name) => '$name (${channelSetupData[name]?.unit ?? ""})')];
+    if (mode == 'Table' || mode == 'Combined') {
+      final dataTableStartRow = currentRow;
+      sheet.importList(headers, dataTableStartRow, 1, false);
+      sheet.getRangeByIndex(dataTableStartRow, 1, dataTableStartRow, headers.length).cellStyle = tableHeaderStyle;
+      sheet.setRowHeightInPixels(dataTableStartRow, 25);
+      for (var i = 0; i < tableData.length; i++) { _writeExcelDataRow(sheet, i, dataTableStartRow, tableData[i], channelNames, channelSetupData, numberStyles); }
+      currentRow += tableData.length + 2;
+    }
+    if ((mode == 'Graph' || mode == 'Combined') && graphImage != null) {
+      sheet.pictures.addStream(currentRow, 2, graphImage);
+      currentRow += 25;
+      currentRow++;
+    }
+    footerLines.where((l) => l.isNotEmpty).forEach((line) { sheet.getRangeByIndex(currentRow++, 1)..setText(line)..cellStyle = userFooterStyle; });
+    for (int i = 1; i <= headers.length; i++) { sheet.autoFitColumn(i); }
+    await _saveFile(context, workbook.saveAsStream(), fileName, 'xlsx');
+    workbook.dispose();
+  }
+
+  static Future<void> _exportToPdf({
     required BuildContext context,
-    required List<dynamic> tableData,
+    required String mode,
+    required List<Map<String, dynamic>> tableData,
+    required Uint8List? graphImage,
     required String fileName,
-    Uint8List? graphImage,
-    bool includeTable = true,
-    bool includeGraph = true,
-    required Map<String, dynamic>? authSettings,
+    required String companyName,
+    required String companyAddress,
+    required Uint8List? logoBytes,
     required Map<int, String> channelNames,
-    Map<int, String>? channelUnits,
-    required bool isDarkMode,
-    String customHeaderText = '', // NEW: Custom header text parameter
-    String customFooterText = '', // NEW: Custom footer text parameter
-  }) {
-    LogPage.addLog('[$_currentTime] Showing export format dialog. Table: $includeTable, Graph: $includeGraph, Items: ${tableData.length}');
+    required DateTime firstTimestamp,
+    required DateTime lastTimestamp,
+    required Map<String, Channel> channelSetupData,
+    required List<String> headerLines,
+    required List<String> footerLines,
+  }) async {
+    final PdfDocument document = PdfDocument();
+    document.pageSettings.orientation = PdfPageOrientation.landscape;
+    document.pageSettings.margins.all = 30;
 
-    showDialog(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: Text(
-          'Export Options',
-          style: GoogleFonts.roboto(
-            color: ThemeColors.getColor('dialogText', isDarkMode),
-            fontWeight: FontWeight.bold,
-            fontSize: 18,
-          ),
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (includeTable || includeGraph) ...[
-                _buildExportOption(
-                  context: dialogContext,
-                  title: 'Export as PDF',
-                  icon: Icons.picture_as_pdf_rounded,
-                  iconColor: Colors.red.shade700,
-                  isDarkMode: isDarkMode,
-                  onTap: () async {
-                    Navigator.pop(dialogContext);
-                    LogPage.addLog('[$_currentTime] PDF export selected.');
-                    await exportToPDF(
-                      tableData: tableData,
-                      fileName: fileName,
-                      graphImage: graphImage,
-                      includeTable: includeTable,
-                      includeGraph: includeGraph,
-                      authSettings: authSettings,
-                      channelNamesMap: channelNames,
-                      channelUnitsMap: channelUnits,
-                      context: dialogContext, // Pass dialogContext here
-                      customHeaderText: customHeaderText, // Pass custom text
-                      customFooterText: customFooterText, // Pass custom text
-                    );
-                  },
-                ),
-                const SizedBox(height: 10),
-                _buildExportOption(
-                  context: dialogContext,
-                  title: 'Export as DOC',
-                  icon: Icons.description_rounded,
-                  iconColor: Colors.blue.shade700,
-                  isDarkMode: isDarkMode,
-                  onTap: () async {
-                    Navigator.pop(dialogContext);
-                    LogPage.addLog('[$_currentTime] DOC export selected.');
-                    await exportToDOC(
-                      tableData: tableData,
-                      fileName: fileName,
-                      graphImage: graphImage,
-                      includeTable: includeTable,
-                      includeGraph: includeGraph,
-                      authSettings: authSettings,
-                      channelNamesMap: channelNames,
-                      channelUnitsMap: channelUnits,
-                      context: dialogContext, // Pass dialogContext here
-                      customHeaderText: customHeaderText, // Pass custom text
-                      customFooterText: customFooterText, // Pass custom text
-                    );
-                  },
-                ),
-                const SizedBox(height: 10),
-              ],
-              if (includeTable) ...[
-                _buildExportOption(
-                  context: dialogContext,
-                  title: 'Export as Excel (XLSX)',
-                  icon: Icons.table_chart_rounded,
-                  iconColor: Colors.green.shade700,
-                  isDarkMode: isDarkMode,
-                  onTap: () async {
-                    Navigator.pop(dialogContext);
-                    LogPage.addLog('[$_currentTime] Excel export selected.');
-                    await exportToExcel(
-                      tableData: tableData,
-                      fileName: fileName,
-                      includeTable: includeTable,
-                      channelNamesMap: channelNames,
-                      channelUnitsMap: channelUnits,
-                      context: dialogContext, // Pass dialogContext here
-                      customHeaderText: customHeaderText, // Pass custom text
-                      customFooterText: customFooterText, // Pass custom text
-                    );
-                  },
-                ),
-                const SizedBox(height: 10),
-                _buildExportOption(
-                  context: dialogContext,
-                  title: 'Export as CSV',
-                  icon: Icons.description_rounded,
-                  iconColor: Colors.blue.shade700,
-                  isDarkMode: isDarkMode,
-                  onTap: () async {
-                    Navigator.pop(dialogContext);
-                    LogPage.addLog('[$_currentTime] CSV export selected.');
-                    await exportToCSV(
-                      tableData: tableData,
-                      fileName: fileName,
-                      includeTable: includeTable,
-                      channelNamesMap: channelNames,
-                      channelUnitsMap: channelUnits,
-                      context: dialogContext, // Pass dialogContext here
-                      customHeaderText: customHeaderText, // Pass custom text
-                      customFooterText: customFooterText, // Pass custom text
-                    );
-                  },
-                ),
-              ],
-              if (!includeTable && !includeGraph)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 20.0),
-                  child: Text(
-                    'No data or graph available.',
-                    textAlign: TextAlign.center,
-                    style: GoogleFonts.roboto(
-                      color: ThemeColors.getColor('dialogSubText', isDarkMode),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-        actionsPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(dialogContext);
-              LogPage.addLog('[$_currentTime] Export dialog cancelled.');
-            },
-            child: Text(
-              'Cancel',
-              style: GoogleFonts.roboto(
-                color: ThemeColors.getColor('dialogSubText', isDarkMode),
-                fontWeight: FontWeight.w500,
-                fontSize: 14,
-              ),
-            ),
-          ),
+    final Size pageSize = document.pageSettings.size;
+    final Rect headerBounds = Rect.fromLTWH(0, 0, pageSize.width, 120);
+    document.template.top = _buildPdfHeader(
+      headerBounds,
+      companyName,
+      companyAddress,
+      logoBytes,
+      fileName,
+      firstTimestamp,
+      lastTimestamp,
+      headerLines,
+    );
+
+    final Rect footerBounds = Rect.fromLTWH(0, 0, pageSize.width, 80);
+    document.template.bottom = _buildPdfFooter(footerBounds, footerLines);
+
+    PdfPage? currentPage;
+    if (mode == 'Table' || mode == 'Combined') {
+      currentPage = document.pages.add();
+      final PdfGrid grid = _createPdfGrid(tableData, channelNames, channelSetupData);
+      grid.draw(
+        page: currentPage,
+        bounds: Rect.fromLTWH(0, 0, currentPage.getClientSize().width, currentPage.getClientSize().height),
+      );
+    }
+    if ((mode == 'Graph' || mode == 'Combined') && graphImage != null) {
+      currentPage = document.pages.add();
+      final PdfBitmap pdfImage = PdfBitmap(graphImage);
+      final Size clientSize = currentPage.getClientSize();
+      final double imageAspectRatio = pdfImage.width / pdfImage.height;
+      double finalWidth = clientSize.width;
+      double finalHeight = finalWidth / imageAspectRatio;
+      if (finalHeight > clientSize.height) {
+        finalHeight = clientSize.height;
+        finalWidth = finalHeight * imageAspectRatio;
+      }
+      final double x = (clientSize.width - finalWidth) / 2;
+      final double y = (clientSize.height - finalHeight) / 2;
+      final Rect imageBounds = Rect.fromLTWH(x, y, finalWidth, finalHeight);
+      currentPage.graphics.drawImage(pdfImage, imageBounds);
+    }
+
+    final List<int> bytes = await document.save();
+    document.dispose();
+    await _saveFile(context, bytes, fileName, 'pdf');
+  }
+
+  static Future<void> _exportTableToCsv({ required BuildContext context, required List<Map<String, dynamic>> tableData, required String fileName, required Map<int, String> channelNames, required Map<String, Channel> channelSetupData}) async {
+    final StringBuffer csvBuffer = StringBuffer();
+    final headers = ['S.No', 'Date', 'Time', ...channelNames.values.map((name) => '$name (${channelSetupData[name]?.unit ?? ""})')];
+    csvBuffer.writeln(headers.map((h) => '"$h"').join(','));
+    for (final row in tableData) {
+      final List<String> rowValues = [(row['SNo'] ?? '').toString(), _parseDate(row['AbsDate']), row['AbsTime'] as String? ?? ''];
+      for (int channelId in channelNames.keys) { rowValues.add(row['AbsPer$channelId']?.toString() ?? ''); }
+      csvBuffer.writeln(rowValues.map((v) => '"$v"').join(','));
+    }
+    await _saveFile(context, utf8.encode(csvBuffer.toString()), fileName, 'csv');
+  }
+
+  static Future<void> _exportToHtmlForWord({ required BuildContext context, required String mode, required List<Map<String, dynamic>> tableData, required Uint8List? graphImage, required String fileName, required String companyName, required String companyAddress, required Uint8List? logoBytes, required Map<int, String> channelNames, required DateTime firstTimestamp, required DateTime lastTimestamp, required Map<String, Channel> channelSetupData, required List<String> headerLines, required List<String> footerLines}) async {
+    final StringBuffer html = StringBuffer();
+    html.writeln(_getHtmlBoilerplate());
+    html.writeln('<body><div class="header">');
+    if (logoBytes != null) { html.writeln('<img src="data:image/png;base64,${base64Encode(logoBytes)}" alt="Company Logo" style="height: ${LOGO_HEIGHT}px; max-width: ${LOGO_WIDTH}px; width: auto;"/>'); }
+    html.writeln('<h1>$companyName</h1><h3>$companyAddress</h3></div><hr><p><b>File Name:</b> $fileName</p><p><b>Report Period:</b> ${DateFormat('dd-MMM-yyyy HH:mm').format(firstTimestamp)} to ${DateFormat('dd-MMM-yyyy HH:mm').format(lastTimestamp)}</p>');
+    headerLines.where((l) => l.isNotEmpty).forEach((line) => html.writeln('<p><b>$line</b></p>'));
+    if (mode == 'Table' || mode == 'Combined') {
+      html.writeln('<h2>Data Table</h2><table>');
+      final headers = ['S.No', 'Date', 'Time', ...channelNames.values.map((name) => '$name (${channelSetupData[name]?.unit ?? ""})')];
+      html.writeln('<thead><tr>${headers.map((h) => '<th>$h</th>').join()}</tr></thead><tbody>');
+      for (final row in tableData) {
+        html.writeln('<tr><td>${row['SNo'] ?? ''}</td><td>${_parseDate(row['AbsDate'])}</td><td>${row['AbsTime'] as String? ?? ''}</td>');
+        for (int channelId in channelNames.keys) { html.writeln('<td>${(row['AbsPer$channelId'] as num?)?.toStringAsFixed(channelSetupData[channelNames[channelId]]?.decimalPlaces ?? 2) ?? '-'}</td>'); }
+        html.writeln('</tr>');
+      }
+      html.writeln('</tbody></table>');
+    }
+    if ((mode == 'Graph' || mode == 'Combined') && graphImage != null) {
+      html.writeln('<h2>Graph</h2><img src="data:image/png;base64,${base64Encode(graphImage)}" alt="Report Graph" style="max-width: 100%; height: auto;"/>');
+    }
+    footerLines.where((l) => l.isNotEmpty).forEach((line) => html.writeln('<p><i>$line</i></p>'));
+    html.writeln('</body></html>');
+    await _saveFile(context, utf8.encode(html.toString()), fileName, 'doc');
+  }
+
+  static Future<ExportFormat?> _showExportFormatDialog(BuildContext context) async {
+    return showDialog<ExportFormat>(
+      context: context, builder: (ctx) => AlertDialog(
+      backgroundColor: Colors.white,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15.0)),
+      title: const Text('Select Export Format', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.bold)),
+      content: SizedBox(width: 320, child: GridView.count(crossAxisCount: 2, shrinkWrap: true, mainAxisSpacing: 15, crossAxisSpacing: 15, childAspectRatio: 1.1,
+        children: [
+          _buildFormatOption(ctx, Icons.grid_on_rounded, 'Excel', '(.xlsx)', ExportFormat.excel, Colors.green),
+          _buildFormatOption(ctx, Icons.picture_as_pdf_rounded, 'PDF', '(.pdf)', ExportFormat.pdf, Colors.red),
+          _buildFormatOption(ctx, Icons.view_list_rounded, 'CSV', '(.csv)', ExportFormat.csv, Colors.orange),
+          _buildFormatOption(ctx, Icons.description_rounded, 'Word', '(.doc)', ExportFormat.docx, Colors.blue),
         ],
+      ),
+      ),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('CANCEL'))],
+    ),
+    );
+  }
+
+  static Widget _buildFormatOption(BuildContext context, IconData icon, String title, String subtitle, ExportFormat format, Color color) {
+    return Material(
+      color: color.withOpacity(0.05),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        splashColor: color.withOpacity(0.2),
+        onTap: () => Navigator.pop(context, format),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 40, color: color), const SizedBox(height: 10),
+            Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            Text(subtitle, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          ],
+        ),
       ),
     );
   }
 
-  static Widget _buildExportOption({
-    required BuildContext context,
-    required String title,
-    required IconData icon,
-    required Color iconColor,
-    required bool isDarkMode,
-    required VoidCallback onTap,
-  }) {
-    return ElevatedButton(
-      onPressed: onTap,
-      style: ElevatedButton.styleFrom(
-        foregroundColor: iconColor.withOpacity(0.2),
-        backgroundColor: ThemeColors.getColor('cardBackground', isDarkMode),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-          side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 0.8),
-        ),
-        elevation: (ThemeColors.getColor('cardElevation', isDarkMode) is num
-            ? (ThemeColors.getColor('cardElevation', isDarkMode) as num).toDouble() * 0.5
-            : 2.0),
-        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: iconColor, size: 22),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Text(
-              title,
-              style: GoogleFonts.roboto(
-                color: ThemeColors.getColor('dialogText', isDarkMode),
-                fontSize: 15,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          Icon(Icons.chevron_right, color: ThemeColors.getColor('dialogSubText', isDarkMode), size: 20),
-        ],
-      ),
+  static Future<void> _saveFile(BuildContext context, List<int> bytes, String baseFileName, String extension) async {
+    final cleanFileName = baseFileName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
+    String? directoryPath = await FilePicker.platform.getDirectoryPath(dialogTitle: 'Select Folder to Save Report');
+    if (directoryPath == null) return;
+
+    File file = File(p.join(directoryPath, '$cleanFileName.$extension'));
+    int i = 1;
+    while (await file.exists()) {
+      file = File(p.join(directoryPath, '$cleanFileName($i).$extension'));
+      i++;
+    }
+
+    await file.writeAsBytes(bytes, flush: true);
+    MessageUtils.showMessage(context, 'File saved successfully to ${file.path}');
+  }
+
+  static void _showLoadingDialog(BuildContext context, String message) {
+    showDialog(context: context, barrierDismissible: false, builder: (ctx) => AlertDialog(content: Row(children: [const CircularProgressIndicator(), const SizedBox(width: 24), Text(message)])));
+  }
+
+  static String _parseDate(String? dateStr, [String? timeStr]) {
+    if (dateStr == null) return '';
+    try {
+      final fullDateTimeStr = (timeStr != null) ? '$dateStr $timeStr' : dateStr;
+      final dt = DateTime.parse(fullDateTimeStr);
+      final format = (timeStr != null) ? DateFormat('dd-MM-yyyy HH:mm:ss') : DateFormat('dd-MM-yyyy');
+      return format.format(dt);
+    } catch (e) {
+      return dateStr.split(' ').first;
+    }
+  }
+
+  /// ---- [FULLY CORRECTED] PDF Header Builder ----
+  static PdfPageTemplateElement _buildPdfHeader(
+      Rect bounds,
+      String companyName,
+      String companyAddress,
+      Uint8List? logoBytes,
+      String fileName,
+      DateTime firstTimestamp,
+      DateTime lastTimestamp,
+      List<String> headerLines,
+      ) {
+    final PdfPageTemplateElement headerElement = PdfPageTemplateElement(bounds);
+    final PdfFont titleFont = PdfStandardFont(PdfFontFamily.helvetica, 14, style: PdfFontStyle.bold);
+    final PdfFont bodyFont = PdfStandardFont(PdfFontFamily.helvetica, 10);
+    final PdfFont smallBoldFont = PdfStandardFont(PdfFontFamily.helvetica, 10, style: PdfFontStyle.bold);
+    final PdfPen linePen = PdfPen(PdfColor(128, 128, 128), width: 0.7);
+    final DateFormat timestampFormat = DateFormat('dd-MMM-yyyy HH:mm');
+
+    double currentY = 0;
+    double leftPaneX = 0;
+
+    // --- Section 1: Logo and Company Info ---
+    if (logoBytes != null) {
+      final PdfBitmap logo = PdfBitmap(logoBytes);
+      final double logoHeight = 45.0;
+      final double logoWidth = logo.width * (logoHeight / logo.height);
+      headerElement.graphics.drawImage(
+        logo,
+        Rect.fromLTWH(0, currentY, logoWidth, logoHeight),
+      );
+      leftPaneX = logoWidth + 15;
+    }
+
+    final double textWidth = bounds.width - leftPaneX;
+    // FIX: Use PdfStringFormat with drawString, not PdfTextElement
+    final PdfStringFormat companyNameFormat = PdfStringFormat(
+        alignment: leftPaneX > 0 ? PdfTextAlignment.left : PdfTextAlignment.center,
+        lineAlignment: PdfVerticalAlignment.middle
     );
+
+    // FIX: Draw directly to graphics, not via PdfTextElement.draw
+    headerElement.graphics.drawString(
+        companyName,
+        titleFont,
+        brush: PdfBrushes.black,
+        bounds: Rect.fromLTWH(leftPaneX, currentY, textWidth, 25),
+        format: companyNameFormat
+    );
+    currentY += 25;
+
+    headerElement.graphics.drawString(
+        companyAddress,
+        bodyFont,
+        brush: PdfBrushes.darkGray,
+        bounds: Rect.fromLTWH(leftPaneX, currentY, textWidth, 20),
+        format: companyNameFormat
+    );
+
+    currentY = 55;
+
+    // --- Section 2: Separator Line ---
+    headerElement.graphics.drawLine(linePen, Offset(0, currentY), Offset(bounds.width, currentY));
+    currentY += 10;
+
+    // --- Section 3: Report Details ---
+    headerElement.graphics.drawString(
+      'Report for file: $fileName',
+      smallBoldFont,
+      bounds: Rect.fromLTWH(0, currentY, bounds.width, 15),
+    );
+
+    final PdfStringFormat rightAlign = PdfStringFormat(alignment: PdfTextAlignment.right);
+    headerElement.graphics.drawString(
+      'Period: ${timestampFormat.format(firstTimestamp)} to ${timestampFormat.format(lastTimestamp)}',
+      bodyFont,
+      bounds: Rect.fromLTWH(0, currentY, bounds.width, 15),
+      format: rightAlign,
+    );
+    currentY += 18;
+
+    // --- Section 4: Custom Header Lines ---
+    for (String line in headerLines.where((l) => l.isNotEmpty)) {
+      headerElement.graphics.drawString(
+        line,
+        smallBoldFont,
+        bounds: Rect.fromLTWH(0, currentY, bounds.width, 15),
+      );
+      currentY += 15;
+    }
+
+    return headerElement;
+  }
+
+  static PdfPageTemplateElement _buildPdfFooter(Rect bounds, List<String> footerLines) {
+    final PdfPageTemplateElement footer = PdfPageTemplateElement(bounds);
+    double yPos = 0;
+    footer.graphics.drawLine(PdfPen(PdfColor(0, 0, 0)), Offset(0, yPos), Offset(bounds.width, yPos));
+    yPos += 5;
+    for (final line in footerLines.where((l) => l.isNotEmpty)) {
+      footer.graphics.drawString(line, PdfStandardFont(PdfFontFamily.helvetica, 9, style: PdfFontStyle.italic), bounds: Rect.fromLTWH(0, yPos, bounds.width, 15));
+      yPos += 15;
+    }
+    yPos += 5;
+    footer.graphics.drawString('Exported on: ${DateFormat('dd-MMM-yyyy HH:mm').format(DateTime.now())}', PdfStandardFont(PdfFontFamily.helvetica, 8), bounds: Rect.fromLTWH(0, yPos, 200, 15));
+    final PdfCompositeField pageNumberField = PdfCompositeField(font: PdfStandardFont(PdfFontFamily.helvetica, 8), brush: PdfBrushes.black, text: 'Page {0} of {1}', fields: [PdfPageNumberField(), PdfPageCountField()]);
+    pageNumberField.draw(footer.graphics, Offset(bounds.width - 60, yPos));
+    return footer;
+  }
+
+  static PdfGrid _createPdfGrid(
+      List<Map<String, dynamic>> tableData,
+      Map<int, String> channelNames,
+      Map<String, Channel> channelSetupData,
+      ) {
+    final PdfGrid grid = PdfGrid();
+    final DateFormat dateFormat = DateFormat('yyyy-MM-dd');
+    final DateFormat timeFormat = DateFormat('HH:mm:ss');
+    final List<int> sortedChannelKeys = channelNames.keys.toList()..sort();
+
+    grid.columns.add(count: 3 + sortedChannelKeys.length);
+    final PdfGridRow header = grid.headers.add(1)[0];
+    header.style = PdfGridCellStyle(
+      backgroundBrush: PdfBrushes.lightSlateGray,
+      textBrush: PdfBrushes.white,
+      font: PdfStandardFont(PdfFontFamily.helvetica, 8, style: PdfFontStyle.bold),
+    );
+
+    header.cells[0].value = 'S.No';
+    header.cells[1].value = 'Date (YYYY-MM-DD)';
+    header.cells[2].value = 'Time (HH:mm:ss)';
+
+    for (int i = 0; i < sortedChannelKeys.length; i++) {
+      final int channelId = sortedChannelKeys[i];
+      final String name = channelNames[channelId]!;
+      final String unit = channelSetupData[name]?.unit ?? "";
+      header.cells[i + 3].value = '$name ($unit)';
+    }
+
+    for (final Map<String, dynamic> rowData in tableData) {
+      final PdfGridRow row = grid.rows.add();
+      row.cells[0].value = (rowData['SNo'] ?? '').toString();
+
+      final String? dateStr = rowData['AbsDate'];
+      final String? timeStr = rowData['AbsTime'];
+      if (dateStr != null && timeStr != null && dateStr.isNotEmpty && timeStr.isNotEmpty) {
+        try {
+          final DateTime timestamp = DateTime.parse('$dateStr $timeStr');
+          row.cells[1].value = dateFormat.format(timestamp);
+          row.cells[2].value = timeFormat.format(timestamp);
+        } catch (e) {
+          row.cells[1].value = dateStr;
+          row.cells[2].value = timeStr;
+        }
+      } else {
+        row.cells[1].value = dateStr ?? '';
+        row.cells[2].value = timeStr ?? '';
+      }
+
+      for (int i = 0; i < sortedChannelKeys.length; i++) {
+        final int channelId = sortedChannelKeys[i];
+        final String channelName = channelNames[channelId]!;
+        final num? value = rowData['AbsPer$channelId'] as num?;
+        final int decimalPlaces = channelSetupData[channelName]?.decimalPlaces ?? 2;
+        row.cells[i + 3].value = value?.toStringAsFixed(decimalPlaces) ?? '-';
+      }
+    }
+
+    grid.applyBuiltInStyle(PdfGridBuiltInStyle.listTable4Accent5);
+    grid.style.font = PdfStandardFont(PdfFontFamily.helvetica, 7);
+
+    // FIX: Removed the erroneous call to grid.columns[i].autoFit().
+    // The built-in style will handle column widths automatically.
+
+    return grid;
+  }
+
+  static Map<String, xlsio.Style> _createNumberStyles(xlsio.Workbook workbook) {
+    final Map<String, xlsio.Style> styles = {};
+    styles['normal_base'] = workbook.styles.add('normal_base')..fontName='Arial'..fontSize=10..borders.all.lineStyle=xlsio.LineStyle.thin;
+    styles['alt_base'] = workbook.styles.add('alt_base')..fontName='Arial'..fontSize=10..backColor='#F2F2F2'..borders.all.lineStyle=xlsio.LineStyle.thin;
+    for (int i = 0; i <= 10; i++) {
+      final numFormat = '0${i > 0 ? '.' : ''}${'0' * i}';
+      styles['normal_$numFormat'] = workbook.styles.add('normal_$numFormat')..numberFormat=numFormat..fontName='Arial'..fontSize=10..borders.all.lineStyle=xlsio.LineStyle.thin;
+      styles['alt_$numFormat'] = workbook.styles.add('alt_$numFormat')..numberFormat=numFormat..fontName='Arial'..fontSize=10..backColor='#F2F2F2'..borders.all.lineStyle=xlsio.LineStyle.thin;
+    }
+    return styles;
+  }
+
+  static void _writeExcelDataRow(xlsio.Worksheet sheet, int rowIndex, int startRow, Map<String, dynamic> rowData, Map<int, String> channelNames, Map<String, Channel> channelSetupData, Map<String, xlsio.Style> numberStyles) {
+    final excelRowIndex = startRow + 1 + rowIndex;
+    final isAltRow = rowIndex % 2 != 0;
+    final baseStyle = isAltRow ? numberStyles['alt_base']! : numberStyles['normal_base']!;
+    sheet.getRangeByIndex(excelRowIndex, 1)..setNumber((rowData['SNo'] ?? (rowIndex + 1)).toDouble())..cellStyle = baseStyle;
+    sheet.getRangeByIndex(excelRowIndex, 2)..setText(_parseDate(rowData['AbsDate']))..cellStyle = baseStyle;
+    sheet.getRangeByIndex(excelRowIndex, 3)..setText(rowData['AbsTime'] as String? ?? '')..cellStyle = baseStyle;
+    int colIndex = 4;
+    for (int channelId in channelNames.keys) {
+      double? value = (rowData['AbsPer$channelId'] as num?)?.toDouble();
+      final cell = sheet.getRangeByIndex(excelRowIndex, colIndex);
+      if (value != null) {
+        final decimalPlaces = channelSetupData[channelNames[channelId]]?.decimalPlaces ?? 2;
+        final format = '0${decimalPlaces > 0 ? '.' : ''}${'0' * decimalPlaces}';
+        final styleKey = isAltRow ? 'alt_$format' : 'normal_$format';
+        cell..setNumber(value)..cellStyle = numberStyles[styleKey] ?? baseStyle;
+      } else {
+        cell..setText('-')..cellStyle = baseStyle;
+      }
+      colIndex++;
+    }
+  }
+
+  static String _getHtmlBoilerplate() {
+    return '''<!DOCTYPE html><html><head><title>Report</title><style>
+    body { font-family: Arial, sans-serif; }
+    .header { text-align: center; margin-bottom: 20px; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+    th, td { border: 1px solid #dddddd; text-align: left; padding: 8px; }
+    thead tr { background-color: #f2f2f2; }
+    tbody tr:nth-child(even) { background-color: #f9f9f9; }
+    h1, h2, h3 { color: #333; }
+    h1 { font-size: 24px; } h3 { font-size: 16px; }
+    </style></head>''';
   }
 }

@@ -38,13 +38,13 @@ class DatabaseManager {
           // REMOVED: password: Security.encryptionKey, // No password parameter here
           onCreate: (db, version) async {
             print('[DatabaseManager] Creating database version $version');
-            LogPage.addLog('[${_currentTime}] Creating database version $version');
+            print('[${_currentTime}] Creating database version $version');
             await _initializeDatabase(db);
             SessionDatabaseManager().addManagedDatabase(dbPath, db);
           },
           onUpgrade: (db, oldVersion, newVersion) async {
             print('[DatabaseManager] Upgrading database from $oldVersion to $newVersion');
-            LogPage.addLog('[${_currentTime}] Upgrading database from $oldVersion to $newVersion');
+            print('[${_currentTime}] Upgrading database from $oldVersion to $newVersion');
 
             // REMOVED: All PRAGMA rekey logic for SQLCipher
             // If oldVersion < _dbVersion && newVersion == _dbVersion,
@@ -71,7 +71,7 @@ class DatabaseManager {
                   DecimalPlaces INTEGER
                 )
               ''');
-              LogPage.addLog('[${_currentTime}] Added AuthSettings and ChannelSetup tables');
+              print('[${_currentTime}] Added AuthSettings and ChannelSetup tables');
             }
             if (oldVersion < 3) {
               await addColumnIfNotExists(db, 'AuthSettings', 'companyName', 'TEXT');
@@ -96,7 +96,7 @@ class DatabaseManager {
               ''');
               await db.execute('DROP TABLE ChannelSetup');
               await db.execute('ALTER TABLE ChannelSetup_New RENAME TO ChannelSetup');
-              LogPage.addLog('[${_currentTime}] Updated ChannelSetup table schema (v4)');
+              print('[${_currentTime}] Updated ChannelSetup table schema (v4)');
             }
             if (oldVersion < 5) {
               await db.execute('''
@@ -142,7 +142,7 @@ class DatabaseManager {
               ''');
               await db.execute('DROP TABLE ChannelSetup');
               await db.execute('ALTER TABLE ChannelSetup_New RENAME TO ChannelSetup');
-              LogPage.addLog('[${_currentTime}] Updated ChannelSetup table schema (v5)');
+              print('[${_currentTime}] Updated ChannelSetup table schema (v5)');
             }
             if (oldVersion < 6) {
               await db.execute('''
@@ -155,12 +155,12 @@ class DatabaseManager {
                   stopBits INTEGER
                 )
               ''');
-              LogPage.addLog('[${_currentTime}] Added ComPort table');
+              print('[${_currentTime}] Added ComPort table');
             }
             // This is the last schema change before v7, so it's good place to put it
             if (oldVersion < 7) {
               await addColumnIfNotExists(db, 'Test', 'TestDurationSS', 'REAL');
-              LogPage.addLog('[${_currentTime}] Added TestDurationSS column to Test table');
+              print('[${_currentTime}] Added TestDurationSS column to Test table');
             }
             // Add columns for Test1 and Test2 up to 100 channels during upgrade if necessary
             if (oldVersion < _dbVersion) { // This condition assumes _dbVersion means all schema up to 100 channels is included
@@ -171,7 +171,7 @@ class DatabaseManager {
           },
           onOpen: (db) async {
             print('[DatabaseManager] Opening database');
-            LogPage.addLog('[${_currentTime}] Opening database');
+            print('[${_currentTime}] Opening database');
             SessionDatabaseManager().addManagedDatabase(dbPath, db);
           },
         ),
@@ -180,7 +180,7 @@ class DatabaseManager {
     } catch (e) {
       // Critical error: Database failed to open (e.g., corruption).
       print('[DatabaseManager] CRITICAL ERROR opening database $dbPath: $e');
-      LogPage.addLog('[${_currentTime}] CRITICAL ERROR opening database $dbPath: $e');
+      print('[${_currentTime}] CRITICAL ERROR opening database $dbPath: $e');
       _database = null; // Clear the reference on failure
       rethrow; // Re-throw to inform the calling code
     }
@@ -191,16 +191,16 @@ class DatabaseManager {
     final columnNames = columns.map((col) => col['name'] as String).toList();
     if (!columnNames.contains(column)) {
       await db.execute('ALTER TABLE $table ADD COLUMN $column $type');
-      LogPage.addLog('[${_currentTime}] Added $column to $table');
+      print('[${_currentTime}] Added $column to $table');
     } else {
-      LogPage.addLog('[${_currentTime}] $column already exists in $table');
+      print('[${_currentTime}] $column already exists in $table');
     }
   }
 
   // New helper to add columns for Test1 and Test2 up to 100 channels
   Future<void> _addTest1AndTest2Columns(Database db) async {
     print('[DatabaseManager] Ensuring Test1 and Test2 tables have 100 channels...');
-    LogPage.addLog('[${_currentTime}] Ensuring Test1 and Test2 tables have 100 channels...');
+    print('[${_currentTime}] Ensuring Test1 and Test2 tables have 100 channels...');
 
     // For Test1 (AbsPer columns)
     final test1Columns = await db.rawQuery('PRAGMA table_info(Test1)');
@@ -209,7 +209,7 @@ class DatabaseManager {
       final columnName = 'AbsPer$i';
       if (!test1ColumnNames.contains(columnName)) {
         await db.execute('ALTER TABLE Test1 ADD COLUMN $columnName REAL');
-        LogPage.addLog('[${_currentTime}] Added $columnName to Test1');
+        print('[${_currentTime}] Added $columnName to Test1');
       }
     }
 
@@ -220,16 +220,16 @@ class DatabaseManager {
       final columnName = 'ChannelName$i';
       if (!test2ColumnNames.contains(columnName)) {
         await db.execute('ALTER TABLE Test2 ADD COLUMN $columnName TEXT');
-        LogPage.addLog('[${_currentTime}] Added $columnName to Test2');
+        print('[${_currentTime}] Added $columnName to Test2');
       }
     }
     print('[DatabaseManager] Test1 and Test2 tables updated for 100 channels.');
-    LogPage.addLog('[${_currentTime}] Test1 and Test2 tables updated for 100 channels.');
+    print('[${_currentTime}] Test1 and Test2 tables updated for 100 channels.');
   }
 
   Future<void> _initializeDatabase(Database db) async {
     print('[DatabaseManager] Initializing database schema');
-    LogPage.addLog('[${_currentTime}] Initializing database schema');
+    print('[${_currentTime}] Initializing database schema');
     // Schema creation for a brand new database.
     await db.execute('''
       CREATE TABLE IF NOT EXISTS Test (
@@ -289,7 +289,7 @@ class DatabaseManager {
       )
     ''');
     print('[DatabaseManager] Database schema initialized');
-    LogPage.addLog('[${_currentTime}] Database schema initialized');
+    print('[${_currentTime}] Database schema initialized');
   }
 
   // --- Your existing data access methods (getAutoStartData, getSelectedChannels, etc.) ---
@@ -299,15 +299,15 @@ class DatabaseManager {
     try {
       final result = await db.query('AutoStart', limit: 1, orderBy: 'ROWID DESC');
       if (result.isNotEmpty) {
-        LogPage.addLog('[${_currentTime}] Fetched AutoStart data');
+        print('[${_currentTime}] Fetched AutoStart data');
         return result.first;
       }
       print('[DatabaseManager] AutoStart table is empty');
-      LogPage.addLog('[${_currentTime}] AutoStart table is empty');
+      print('[${_currentTime}] AutoStart table is empty');
       return null;
     } catch (e) {
       print('[DatabaseManager] Error querying AutoStart table: $e');
-      LogPage.addLog('[${_currentTime}] Error querying AutoStart table: $e');
+      print('[${_currentTime}] Error querying AutoStart table: $e');
       return null;
     }
   }
@@ -318,14 +318,51 @@ class DatabaseManager {
       final result = await db.query('SelectChannel');
       final channels = result.map((row) => Channel.fromJson(row)).toList();
       print('[DatabaseManager] Fetched ${channels.length} channels from SelectChannel');
-      LogPage.addLog('[${_currentTime}] Fetched ${channels.length} channels from SelectChannel');
+      print('[${_currentTime}] Fetched ${channels.length} channels from SelectChannel');
       return channels;
     } catch (e) {
       print('[DatabaseManager] Error querying SelectChannel table: $e');
-      LogPage.addLog('[${_currentTime}] Error querying SelectChannel table: $e');
+      print('[${_currentTime}] Error querying SelectChannel table: $e');
       return [];
     }
   }
+
+  Future<List<Channel>> getFullChannelDetails() async {
+    final db = await database;
+    try {
+      // चरण 1: SelectChannel से चयनित चैनलों के नाम प्राप्त करें।
+      final selectedChannelNamesResult = await db.query('SelectChannel', columns: ['ChannelName']);
+      if (selectedChannelNamesResult.isEmpty) {
+        print('[DatabaseManager] No channels found in SelectChannel.');
+        print('[${_currentTime}] No channels found in SelectChannel.');
+        return [];
+      }
+
+      final List<String> selectedChannelNames = selectedChannelNamesResult
+          .map((row) => row['ChannelName'] as String)
+          .toList();
+
+      // चरण 2: उन नामों का उपयोग करके ChannelSetup से पूरा विवरण प्राप्त करें।
+      // हम 'IN' क्लॉज का उपयोग करके एक ही क्वेरी में सभी चैनलों को प्राप्त कर सकते हैं।
+      final placeholders = List.filled(selectedChannelNames.length, '?').join(',');
+      final fullDetailsResult = await db.query(
+        'ChannelSetup',
+        where: 'ChannelName IN ($placeholders)',
+        whereArgs: selectedChannelNames,
+      );
+
+      final channels = fullDetailsResult.map((row) => Channel.fromJson(row)).toList();
+      print('[DatabaseManager] Fetched full details for ${channels.length} channels from ChannelSetup.');
+      print('[${_currentTime}] Fetched full details for ${channels.length} channels from ChannelSetup.');
+      return channels;
+
+    } catch (e) {
+      print('[DatabaseManager] Error getting full channel details: $e');
+      print('[${_currentTime}] Error getting full channel details: $e');
+      return [];
+    }
+  }
+
 
   Future<bool> isAuthRequired() async {
     final db = await database;
@@ -333,14 +370,14 @@ class DatabaseManager {
       final authData = await db.query('AuthSettings', limit: 1);
       if (authData.isNotEmpty) {
         final isAuthEnabled = authData.first['isAuthEnabled'];
-        LogPage.addLog('[${_currentTime}] Checked isAuthRequired: $isAuthEnabled');
+        print('[${_currentTime}] Checked isAuthRequired: $isAuthEnabled');
         return isAuthEnabled == 1; // Assuming it's stored as INTEGER 0 or 1
       }
-      LogPage.addLog('[${_currentTime}] No auth settings found');
+      print('[${_currentTime}] No auth settings found');
       return false;
     } catch (e) {
       print('[DatabaseManager] Error checking auth settings: $e');
-      LogPage.addLog('[${_currentTime}] Error checking auth settings: $e');
+      print('[${_currentTime}] Error checking auth settings: $e');
       return false;
     }
   }
@@ -356,11 +393,11 @@ class DatabaseManager {
         return result;
       }
       print('[DatabaseManager] No auth settings found');
-      LogPage.addLog('[${_currentTime}] No auth settings found');
+      print('[${_currentTime}] No auth settings found');
       return null;
     } catch (e) {
       print('[DatabaseManager] Error fetching auth settings: $e');
-      LogPage.addLog('[${_currentTime}] Error fetching auth settings: $e');
+      print('[${_currentTime}] Error fetching auth settings: $e');
       return null;
     }
   }
@@ -389,10 +426,10 @@ class DatabaseManager {
         'autoSaveIntervalSeconds': autoSaveIntervalSeconds ?? 30,
       });
       print('[DatabaseManager] Auth settings saved');
-      LogPage.addLog('[${_currentTime}] Auth settings saved');
+      print('[${_currentTime}] Auth settings saved');
     } catch (e) {
       print('[DatabaseManager] Error saving auth settings: $e');
-      LogPage.addLog('[${_currentTime}] Error saving auth settings: $e');
+      print('[${_currentTime}] Error saving auth settings: $e');
       throw e;
     }
   }
@@ -410,10 +447,10 @@ class DatabaseManager {
         'stopBits': stopBits,
       });
       print('[DatabaseManager] ComPort settings saved: $port');
-      LogPage.addLog('[${_currentTime}] ComPort settings saved: $port');
+      print('[${_currentTime}] ComPort settings saved: $port');
     } catch (e) {
       print('[DatabaseManager] Error saving ComPort settings: $e');
-      LogPage.addLog('[${_currentTime}] Error saving ComPort settings: $e');
+      print('[${_currentTime}] Error saving ComPort settings: $e');
       throw e;
     }
   }
@@ -424,15 +461,15 @@ class DatabaseManager {
       final result = await db.query('ComPort', limit: 1);
       if (result.isNotEmpty) {
         print('[DatabaseManager] Fetched ComPort settings: ${result.first}');
-        LogPage.addLog('[${_currentTime}] Fetched ComPort settings');
+        print('[${_currentTime}] Fetched ComPort settings');
         return result.first;
       }
       print('[DatabaseManager] ComPort table is empty');
-      LogPage.addLog('[${_currentTime}] ComPort table is empty');
+      print('[${_currentTime}] ComPort table is empty');
       return null;
     } catch (e) {
       print('[DatabaseManager] Error querying ComPort table: $e');
-      LogPage.addLog('[${_currentTime}] Error querying ComPort table: $e');
+      print('[${_currentTime}] Error querying ComPort table: $e');
       return null;
     }
   }
@@ -443,7 +480,7 @@ class DatabaseManager {
       await _database!.close();
       _database = null;
       print('[DatabaseManager] Main database connection (Countronics.db) closed.');
-      LogPage.addLog('[${_currentTime}] Main database closed');
+      print('[${_currentTime}] Main database closed');
     } else {
       print('[DatabaseManager] Main database connection was already closed or null.');
     }

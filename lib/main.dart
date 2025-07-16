@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import 'Pages/LoginPage/loginpage.dart';
 import 'Pages/homepage.dart';
+import 'Pages/logScreen/log.dart';
 import 'SplashScreen.dart';
 import 'constants/database_manager.dart';
 import 'constants/global.dart';

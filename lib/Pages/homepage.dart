@@ -21,8 +21,6 @@ import 'logScreen/log.dart';
 import 'setup/channel_setup_screen.dart';
 import 'package:file_picker/file_picker.dart';
 
-
-
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -55,7 +53,11 @@ class _HomePageState extends State<HomePage>
     // Define the list of pages that can be displayed in the main content area
     _pages = [
       _originalNewTestPage,      // 0: New Test (or SerialPortScreen dynamically)
-      const Placeholder(),       // 1: Open File (handled by dialog first, then OpenFilePage)
+      OpenFilePage( // <-- I replaced the Placeholder with this
+        key: const ValueKey('initial_placeholder'),
+        fileName: '',
+        onExit: _resetToDashboard,
+      ),
       const Placeholder(),       // 2: Select Mode (handled by dialog)
       const ChannelSetupScreen(),// 3: Setup (direct navigation)
       const Placeholder(),       // 4: Backup (handled by dialog)
@@ -105,6 +107,10 @@ class _HomePageState extends State<HomePage>
     }
   }
 
+// _HomePageState क्लास के अंदर...
+
+  // HomePage.dart के _HomePageState क्लास के अंदर
+
   void _startAutoStartCheck() {
     _autoStartTimer?.cancel();
     _autoStartTimer = Timer.periodic(const Duration(seconds: 30), (timer) async {
@@ -114,7 +120,6 @@ class _HomePageState extends State<HomePage>
       }
       final autoStartData = await DatabaseManager().getAutoStartData();
       if (autoStartData == null) {
-        print('[HomePage] No AutoStart data found, stopping timer');
         timer.cancel();
         return;
       }
@@ -122,40 +127,57 @@ class _HomePageState extends State<HomePage>
       final startTimeMin = (autoStartData['StartTimeMin'] as num?)?.toDouble() ?? 0.0;
       final endTimeHr = (autoStartData['EndTimeHr'] as num?)?.toDouble() ?? 0.0;
       final endTimeMin = (autoStartData['EndTimeMin'] as num?)?.toDouble() ?? 0.0;
-      final scanTimeSec = (autoStartData['ScanTimeSec'] as num?)?.toDouble() ?? 0.0;
+      final scanTimeSec = (autoStartData['ScanTimeSec'] as num?)?.toDouble() ?? 1.0;
 
       final now = DateTime.now();
       final currentHr = now.hour.toDouble();
       final currentMin = now.minute.toDouble();
 
       if (currentHr == startTimeHr.floor() && currentMin == startTimeMin.floor()) {
-        print('[HomePage] Time match found for AutoStart, fetching channels');
-        final channels = await DatabaseManager().getSelectedChannels();
+        LogPage.addLog('[HomePage] Time match found for AutoStart, fetching channels');
+
+        // **बदलाव 1: getSelectedChannels के बजाय getFullChannelDetails का उपयोग करें**
+        final channels = await DatabaseManager().getFullChannelDetails();
+
         if (channels.isEmpty) {
-          print('[HomePage] No channels found for AutoStart, skipping.');
+          LogPage.addLog('[HomePage] No channels found for AutoStart, skipping.');
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(
-                  'AutoStart: No channels selected. Please configure channels.',
+                  'No channels found for AutoStart.',
                   style: GoogleFonts.poppins(color: ThemeColors.getColor('sidebarText', Global.isDarkMode.value)),
                 ),
-                backgroundColor: Colors.orange,
+                backgroundColor: Colors.redAccent,
               ),
             );
           }
           return;
         }
 
-        print('[HomePage] AutoStart triggered: Switching to AutoStartScreen');
+        // **बदलाव 2: testDuration की गणना करें**
+        final startTime = DateTime(now.year, now.month, now.day, startTimeHr.toInt(), startTimeMin.toInt());
+        var endTime = DateTime(now.year, now.month, now.day, endTimeHr.toInt(), endTimeMin.toInt());
+
+        // यदि अंत समय अगले दिन है
+        if (endTime.isBefore(startTime)) {
+          endTime = endTime.add(const Duration(days: 1));
+        }
+
+        final testDuration = endTime.difference(startTime);
+
+        LogPage.addLog('[HomePage] AutoStart triggered: Switching to AutoStartScreen with duration: $testDuration');
         timer.cancel();
         if (mounted) {
           setState(() {
             _pages[0] = AutoStartScreen(
               selectedChannels: channels,
-              endTimeHr: endTimeHr,
+              endTimeHr: endTimeHr, // यह अभी भी ऑटो-स्टॉप के लिए उपयोगी हो सकता है
               endTimeMin: endTimeMin,
               scanTimeSec: scanTimeSec,
+              testDuration: testDuration, // **<-- नया पैरामीटर यहाँ पास करें**
+              onBack: _resetToNewTestPage,
+              onOpenFile: _handleOpenFile,
             );
             _selectedIndex = 0;
           });
@@ -165,24 +187,47 @@ class _HomePageState extends State<HomePage>
     });
   }
 
-  // >>> THE FIX IS HERE <<<
-  // This function is now corrected to provide the required 'onBack' parameter.
+// In _HomePageState inside the _handleOpenFile method
+
+  void _handleOpenFile(String fileName) {
+    setState(() {
+      _pages[1] = OpenFilePage(
+        key: ValueKey(fileName), // <-- THIS IS THE CRITICAL FIX
+        fileName: fileName,
+        onExit: _resetToDashboard,
+      );
+      _selectedIndex = 1;
+    });
+    _animationController.forward(from: 0.0);
+    _logActivity('Navigated to Open File page for: $fileName');
+  }
+  // In _HomePageState
+
+  void _resetToDashboard() {
+    setState(() {
+      _selectedIndex = -1;
+    });
+  }
+
+
+
+  // --- CHANGE 2: Update this function to provide the required 'onOpenFile' parameter ---
   void _handleNewTestSubmit(List<dynamic> selectedChannels) {
     setState(() {
       _pages[0] = SerialPortScreen(
         selectedChannels: selectedChannels.cast<Channel>(),
-        onBack: _resetToNewTestPage, // FIX: Provided the required 'onBack' function.
+        onBack: _resetToNewTestPage,
+        onOpenFile: _handleOpenFile, // FIX: Pass the new handler function here.
       );
       _selectedIndex = 0;
     });
     _logActivity('New Test started with ${selectedChannels.length} channels');
   }
 
-  // This function is required by the fix above. It handles the back action.
   void _resetToNewTestPage() {
     setState(() {
       _pages[0] = _originalNewTestPage;
-      _selectedIndex = 0;
+      _selectedIndex = -1; // Or -1 if you want to go back to the dashboard
     });
     _logActivity('Reset to New Test page');
   }
@@ -344,38 +389,19 @@ class _HomePageState extends State<HomePage>
     _logActivity('Setup dialog opened');
   }
 
-
+  // --- CHANGE 3: Update this function to use the new centralized handler ---
   void _showOpenFileDialog(BuildContext context) {
     showDialog(
       context: context,
-      // We pass the builder's context (`dialogContext`) to the dialog
-      // so it can be closed from within the callback.
       builder: (BuildContext dialogContext) {
         return FileSelectionDialog(
           controller: _fileNameController,
-          // *** THIS IS THE KEY CHANGE ***
-          // We provide a custom function for the "Open" button.
           onOpenPressed: () {
-            // 1. Check if a file has been selected.
             if (_fileNameController.text.isNotEmpty) {
-
-              // 2. Close the FileSelectionDialog.
-              // We use the `dialogContext` from the `showDialog` builder.
+              // Close the selection dialog
               Navigator.of(dialogContext).pop();
-
-              // 3. Update the HomePage's state to show the OpenFilePage.
-              setState(() {
-                // Replace the placeholder at index 1 with the actual OpenFilePage
-                _pages[1] = OpenFilePage(fileName: _fileNameController.text, onExit: () {  },);
-
-                // Set the selected index to 1 to show the OpenFilePage
-                _selectedIndex = 1;
-              });
-
-              // Optional: Trigger animations and log the activity
-              _animationController.forward(from: 0.0);
-              _logActivity('Navigated to Open File page for: ${_fileNameController.text}');
-
+              // Use the centralized handler to switch the page
+              _handleOpenFile(_fileNameController.text);
             } else {
               // If no file is selected, show an error message.
               ScaffoldMessenger.of(context).showSnackBar(
@@ -396,10 +422,11 @@ class _HomePageState extends State<HomePage>
 
   @override
   Widget build(BuildContext context) {
+    // ... The rest of your build method and other helper widgets remain unchanged ...
     return ValueListenableBuilder<bool>(
       valueListenable: Global.isDarkMode,
       builder: (context, isDarkMode, child) {
-        print('[HomePage] Building with isDarkMode: $isDarkMode');
+        LogPage.addLog('[HomePage] Building with isDarkMode: $isDarkMode');
 
         final bool shouldHideSidebar = (_selectedIndex == 0 &&
             (_pages[0] is SerialPortScreen || _pages[0] is AutoStartScreen));

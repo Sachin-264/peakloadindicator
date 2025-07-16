@@ -425,7 +425,7 @@ isDarkMode: isDarkMode,
 ),
 _buildSubSection(
 title: 'Test Report',
-description: 'Create a report with channel details, headers, and footers. Print using the Print button.',
+description: 'Create a report with channel details, headers, and footers. print using the print button.',
 isDarkMode: isDarkMode,
 ),
 _buildSubSection(

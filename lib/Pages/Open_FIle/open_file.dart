@@ -1,146 +1,172 @@
+import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
-import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:fl_chart/fl_chart.dart';
+import 'package:intl/intl.dart';
+import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:syncfusion_flutter_charts/charts.dart';
+
 import '../../constants/database_manager.dart';
 import '../../constants/export.dart';
 import '../../constants/global.dart';
-import '../../constants/theme.dart';
+import '../../constants/message_utils.dart';
 import '../../constants/sessionmanager.dart';
+import '../../constants/theme.dart';
 import '../NavPages/channel.dart';
 import '../Secondary_window/save_secondary_window.dart';
-import 'package:flutter/rendering.dart';
-import 'package:flutter_colorpicker/flutter_colorpicker.dart';
-import 'package:path/path.dart' as path;
 import '../homepage.dart';
 import '../logScreen/log.dart';
 
+// Helper class for Syncfusion Chart data points, consistent with SerialPortScreen
+class ChartData {
+  final DateTime time;
+  final double? value;
+  ChartData(this.time, this.value);
+}
+
 class OpenFilePage extends StatefulWidget {
   final String fileName;
-  final VoidCallback onExit; // <-- ADDED: Callback to exit the page
+  final VoidCallback onExit;
 
   const OpenFilePage({
     super.key,
     required this.fileName,
-    required this.onExit, // <-- ADDED: Required in constructor
+    required this.onExit,
   });
 
   @override
   State<OpenFilePage> createState() => _OpenFilePageState();
 }
 
-
-class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderStateMixin {
+class _OpenFilePageState extends State<OpenFilePage> {
+  // --- STATE VARIABLES ---
   final _fileNameController = TextEditingController();
   final _operatorController = TextEditingController();
-  final _scanRateHrController = TextEditingController(text: '0');
-  final _scanRateMinController = TextEditingController(text: '0');
-  final _scanRateSecController = TextEditingController(text: '1');
-  final _testDurationDayController = TextEditingController(text: '0');
-  final _testDurationHrController = TextEditingController(text: '0');
-  final _testDurationMinController = TextEditingController(text: '0');
-  final _testDurationSecController = TextEditingController(text: '0');
-  final _graphVisibleHrController = TextEditingController(text: '0');
-  final _graphVisibleMinController = TextEditingController(text: '60');
-  final ScrollController _tableHorizontalScrollController = ScrollController();
-  final ScrollController _tableVerticalScrollController = ScrollController();
   final GlobalKey _graphKey = GlobalKey();
 
-  final List<OverlayEntry> _windowEntries = [];
-  bool isDisplaying = false;
-  String? selectedChannel;
-  List<Map<String, dynamic>> tableData = [];
-  Map<int, String> channelNames = {};
-  Map<int, Color> graphLineColour = {};
-  Map<String, Channel> _channelSetupData = {};
+  // Controllers for fetched metadata display
+  final _scanRateHrController = TextEditingController();
+  final _scanRateMinController = TextEditingController();
+  final _scanRateSecController = TextEditingController();
+  final _testDurationDayController = TextEditingController();
+  final _testDurationHrController = TextEditingController();
+  final _testDurationMinController = TextEditingController();
+  final _testDurationSecController = TextEditingController();
+  final _graphVisibleHrController = TextEditingController();
+  final _graphVisibleMinController = TextEditingController();
 
-  int currentSegment = 0;
-  int totalSegments = 1;
-  double minYValue = 0;
-  double maxYValue = 1000;
-  late AnimationController _animationController;
-  late Animation<double> _fadeAnimation;
-  Map<int, double?> maxLoadValues = {};
-  double startTimeSeconds = 0;
-  bool showDataPoints = false;
-  double zoomLevel = 1.0;
-  bool showPeak = false;
-  late Database _database; // This will hold the reference to the session-specific DB
+  final ScrollController _tableVerticalScrollController = ScrollController();
+  final ScrollController _tableHeaderHorizontalScrollController = ScrollController();
+  final ScrollController _tableBodyHorizontalScrollController = ScrollController();
+
+  // Database & Data Fetching
+  late Database _database;
   bool _isDatabaseInitialized = false;
   bool _isLoading = true;
   String? _fetchError;
   String get _currentTime => DateTime.now().toIso8601String().substring(0, 19);
 
+  // Data & Business Logic
+  List<Map<String, dynamic>> _tableData = [];
+  Map<int, String> _channelNames = {};
+  Map<int, Color> _graphLineColours = {};
+  Map<String, Channel> _channelSetupData = {};
+  DateTime? _firstDataTimestamp;
+  DateTime? _lastDataTimestamp;
+  final Map<int, List<ChartData>> _graphData = {};
+  final Map<int, ChartData> _globalPeakValues = {};
+
+  // Graph & UI State
+  late TrackballBehavior _trackballBehavior;
+  late ZoomPanBehavior _zoomPanBehavior;
+  late Set<int> _visibleGraphChannels;
+  bool _showDataPoints = false;
+  bool _showPeakValue = false;
+  Duration _graphTimeWindow = const Duration(minutes: 60);
+
+  // Segment and Graph Axis logic
+  int _currentSegment = 1;
+  int _maxSegments = 1;
+  DateTime? _chartVisibleMin;
+  DateTime? _chartVisibleMax;
+
+  // Multi-Window Management
+  final List<OverlayEntry> _windowEntries = [];
+  int _windowCounter = 0;
+
 
   @override
   void initState() {
     super.initState();
-    _initializeControllers();
-    _animationController = AnimationController(vsync: this, duration: const Duration(milliseconds: 500));
-    _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(_animationController);
-    _graphVisibleMinController.addListener(_updateGraphSegments);
+    _trackballBehavior = TrackballBehavior(
+        enable: true,
+        activationMode: ActivationMode.singleTap,
+        tooltipDisplayMode: TrackballDisplayMode.groupAllPoints,
+        tooltipSettings: const InteractiveTooltip(enable: true, format: 'series.name : point.y'),
+        shouldAlwaysShow: false
+    );
+    _zoomPanBehavior = ZoomPanBehavior(
+        enablePinching: true,
+        enablePanning: true,
+        zoomMode: ZoomMode.x
+    );
 
-    Global.selectedRecNo?.addListener(_onRecNoChanged);
-    Global.selectedFileName.addListener(_onGlobalChanged);
-    Global.selectedDBName.addListener(_onGlobalChanged);
-    Global.operatorName.addListener(_onGlobalChanged);
-    Global.scanningRateHH.addListener(_onGlobalChanged);
-    Global.scanningRateMM.addListener(_onGlobalChanged);
-    Global.scanningRateSS.addListener(_onGlobalChanged);
-    Global.testDurationDD?.addListener(_onGlobalChanged);
-    Global.testDurationHH.addListener(_onGlobalChanged);
-    Global.testDurationMM.addListener(_onGlobalChanged);
-    Global.testDurationSS.addListener(_onGlobalChanged);
-    Global.isDarkMode.addListener(_onThemeChanged);
+    _tableHeaderHorizontalScrollController.addListener(() {
+      if (_tableHeaderHorizontalScrollController.hasClients &&
+          _tableBodyHorizontalScrollController.hasClients &&
+          _tableHeaderHorizontalScrollController.offset != _tableBodyHorizontalScrollController.offset) {
+        _tableBodyHorizontalScrollController.jumpTo(_tableHeaderHorizontalScrollController.offset);
+      }
+    });
 
+    _tableBodyHorizontalScrollController.addListener(() {
+      if (_tableBodyHorizontalScrollController.hasClients &&
+          _tableHeaderHorizontalScrollController.hasClients &&
+          _tableBodyHorizontalScrollController.offset != _tableHeaderHorizontalScrollController.offset) {
+        _tableHeaderHorizontalScrollController.jumpTo(_tableBodyHorizontalScrollController.offset);
+      }
+    });
+
+    _initializeListeners();
     _initializeAndFetchData();
     LogPage.addLog('[$_currentTime] [INIT_STATE] Initialized OpenFilePage with fileName: ${widget.fileName}');
   }
 
-  void _onThemeChanged() {
-    if (mounted) {
-      setState(() {
-        LogPage.addLog('[$_currentTime] Theme changed. DarkMode: ${Global.isDarkMode.value}');
-      });
-    }
+  void _initializeListeners() {
+    Global.selectedRecNo?.addListener(_onRecNoChanged);
+    Global.isDarkMode.addListener(() => setState(() {}));
   }
 
   Future<void> _initializeAndFetchData() async {
-    setState(() {
-      _isLoading = true;
-      _fetchError = null;
-    });
+    setState(() { _isLoading = true; _fetchError = null; });
     try {
       await _initializeDatabase();
       await _fetchChannelSetupData();
-      setState(() {
-        _isDatabaseInitialized = true;
-      });
-      await fetchData(showFull: true);
-    } catch (e) {
-      LogPage.addLog('[$_currentTime] Error during initialization or initial fetch: $e');
-      setState(() {
-        _fetchError = 'Error initializing: $e';
-        _isLoading = false;
-      });
+      setState(() { _isDatabaseInitialized = true; });
+      await fetchData();
+    } catch (e, s) {
+      LogPage.addLog('[$_currentTime] Error during initialization or initial fetch: $e\n$s');
+      if (mounted) {
+        setState(() { _fetchError = 'Error initializing: $e'; _isLoading = false; });
+      }
     }
   }
 
   Future<void> _initializeDatabase() async {
-    final appDocumentsDir = await getApplicationSupportDirectory();
-    final dataDirPath = path.join(appDocumentsDir.path, 'CountronicsData');
-    await Directory(dataDirPath).create(recursive: true);
-
     final dbName = Global.selectedDBName.value;
     if (dbName == null || dbName.isEmpty) {
-      throw Exception("Database name (DBName) not provided in Global.selectedDBName. Cannot open session database.");
+      throw Exception("Database name (DBName) not provided. Cannot open session database.");
     }
     _database = await SessionDatabaseManager().openSessionDatabase(dbName);
-    LogPage.addLog('[$_currentTime] [INITIALIZE_DATABASE] Session database opened and tracked: $dbName');
+    LogPage.addLog('[$_currentTime] [DB_INIT] Session database opened: $dbName');
   }
 
   Future<void> _fetchChannelSetupData() async {
@@ -160,1154 +186,215 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     }
   }
 
-  Future<void> fetchData({bool showFull = false}) async {
+  Future<void> fetchData() async {
     if (!_isDatabaseInitialized || Global.selectedRecNo?.value == null) {
-      LogPage.addLog('[$_currentTime] [FETCH_DATA] Skipping fetch: database not initialized or RecNo is null');
-      setState(() {
-        _isLoading = false;
-        _fetchError = Global.selectedRecNo?.value == null ? "No record selected to fetch data." : "Database not ready.";
-      });
+      if (mounted) setState(() { _isLoading = false; _fetchError = "No record selected to fetch data."; });
       return;
     }
     setState(() { _isLoading = true; _fetchError = null; });
+
     try {
-      LogPage.addLog('[$_currentTime] [FETCH_DATA] Fetching data for RecNo: ${Global.selectedRecNo!.value}');
-      final test1Data = await _database.query('Test1', where: 'RecNo = ?', whereArgs: [Global.selectedRecNo!.value]);
-      final test2Data = await _database.query('Test2', where: 'RecNo = ?', whereArgs: [Global.selectedRecNo!.value]);
+      LogPage.addLog('[$_currentTime] Fetching data for RecNo: ${Global.selectedRecNo!.value}');
 
-      setState(() {
-        tableData = test1Data.map((row) {
-          final newRow = Map<String, dynamic>.from(row);
-          for (int i = 1; i <= 100; i++) {
-            if (newRow.containsKey('AbsPer$i')) newRow['AbsPer$i'] = (newRow['AbsPer$i'] as num?)?.toDouble();
-          }
-          return newRow;
-        }).toList();
+      final results = await Future.wait([
+        _database.query('Test', where: 'RecNo = ?', whereArgs: [Global.selectedRecNo!.value]),
+        _database.query('Test1', where: 'RecNo = ?', whereArgs: [Global.selectedRecNo!.value], orderBy: 'SNo ASC'),
+        _database.query('Test2', where: 'RecNo = ?', whereArgs: [Global.selectedRecNo!.value]),
+      ]);
 
-        final test2Row = test2Data.isNotEmpty ? test2Data[0] : {};
-        channelNames.clear(); graphLineColour.clear(); maxLoadValues.clear();
+      final testData = results[0];
+      final test1Data = results[1] as List<Map<String, dynamic>>;
+      final test2Data = results[2];
 
-        for (int i = 1; i <= 100; i++) {
-          String? name = test2Row['ChannelName$i']?.toString().trim();
-          if (name != null && name.isNotEmpty && name != 'null') {
-            channelNames[i] = name;
-            final setupChannel = _channelSetupData[name];
-            graphLineColour[i] = (setupChannel != null && setupChannel.graphLineColour != 0 && setupChannel.graphLineColour != const Color(0xFF000000).value)
-                ? Color(setupChannel.graphLineColour)
-                : _getDefaultColor(i);
+      _processTestMetadata(testData);
+      _processChannelMetadata(test2Data);
+      _processDataRows(test1Data);
 
-            if (tableData.isNotEmpty) {
-              var values = tableData.map((row) => (row['AbsPer$i'] as num?)?.toDouble()).where((v) => v != null).cast<double>().toList();
-              if (values.isNotEmpty) maxLoadValues[i] = values.reduce((a, b) => a > b ? a : b);
-            }
-          } else {
-            break;
-          }
-        }
-        selectedChannel = channelNames.isNotEmpty ? 'All' : null;
-        _calculateGraphSegments(); _calculateYRange(); _initializeControllers();
-      });
-      LogPage.addLog('[$_currentTime] [FETCH_DATA] Data fetched successfully.');
-    } catch (e) {
-      LogPage.addLog('[$_currentTime] [FETCH_DATA] Error fetching data: $e');
-      setState(() { _fetchError = 'Error fetching data: $e'; });
+      _calculateGlobalPeakValues();
+      _calculateAndSetSegments();
+      _setSegment(1);
+
+    } catch (e, s) {
+      LogPage.addLog('[$_currentTime] Error fetching data: $e\n$s');
+      if (mounted) setState(() { _fetchError = 'Error fetching data: $e'; });
     } finally {
-      setState(() { _isLoading = false; });
+      if (mounted) setState(() { _isLoading = false; });
     }
   }
 
-  void _initializeControllers() {
-    _fileNameController.text = Global.selectedFileName.value ?? widget.fileName;
-    _operatorController.text = Global.operatorName.value ?? '';
-    _scanRateHrController.text = Global.scanningRateHH.value?.toString() ?? '0';
-    _scanRateMinController.text = Global.scanningRateMM.value?.toString() ?? '0';
-    _scanRateSecController.text = Global.scanningRateSS.value?.toString() ?? '1';
-    _testDurationDayController.text = Global.testDurationDD?.value?.toString() ?? '0';
-    _testDurationHrController.text = Global.testDurationHH.value?.toString() ?? '0';
-    _testDurationMinController.text = Global.testDurationMM.value?.toString() ?? '0';
-    _testDurationSecController.text = Global.testDurationSS.value?.toString() ?? '0';
-  }
-
-  void _onRecNoChanged() {
-    if (!mounted) return;
-    LogPage.addLog('[$_currentTime] [ON_REC_NO_CHANGED] RecNo changed to ${Global.selectedRecNo?.value}, fetching new data');
-    fetchData(showFull: true);
-  }
-
-  void _onGlobalChanged() {
-    if (!mounted) return;
-    setState(() {
-      _initializeControllers();
-    });
-  }
-
-  Color _getDefaultColor(int index) {
-    final bool isDarkMode = Global.isDarkMode.value;
-    const List<Color> lightModeColors = [
-      Color(0xFF0288D1), Color(0xFFD81B60), Color(0xFF388E3C), Color(0xFFF57C00),
-      Color(0xFF5E35B1), Color(0xFF00897B), Color(0xFFE53935), Color(0xFF3949AB),
-      Color(0xFF7CB342), Color(0xFFC0CA33), Color(0xFF8E24AA), Color(0xFFFB8C00),
-      Color(0xFF43A047), Color(0xFF1E88E5), Color(0xFF6D4C41),
-    ];
-    const List<Color> darkModeColors = [
-      Color(0xFF90CAF9), Color(0xFFF48FB1), Color(0xFFA5D6A7), Color(0xFFFFCC80),
-      Color(0xFFB39DDB), Color(0xFF80CBC4), Color(0xFFEF9A9A), Color(0xFF9FA8DA),
-      Color(0xFFC5E1A5), Color(0xFFE6EE9C), Color(0xFFCE93D8), Color(0xFFFFE082),
-      Color(0xFF4DB6AC), Color(0xFF64B5F6), Color(0xFFA1887F),
-    ];
-    return isDarkMode
-        ? darkModeColors[(index - 1) % darkModeColors.length]
-        : lightModeColors[(index - 1) % lightModeColors.length];
-  }
-
-  void _showColorPicker(int channelIndex, bool isDarkMode) {
-    Color currentColor = graphLineColour[channelIndex] ?? _getDefaultColor(channelIndex);
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
-        title: Text(
-          'Select Color for ${channelNames[channelIndex]}',
-          style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode)),
-        ),
-        content: SingleChildScrollView(
-          child: ColorPicker(
-            pickerColor: currentColor,
-            onColorChanged: (Color color) {
-              currentColor = color;
-            },
-            colorPickerWidth: 300.0,
-            pickerAreaHeightPercent: 0.7,
-            enableAlpha: true,
-            displayThumbColor: true,
-            labelTypes: const [ColorLabelType.hex],
-            pickerAreaBorderRadius: const BorderRadius.all(Radius.circular(8.0)),
-            hexInputBar: true,
-            colorHistory: [],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              setState(() {
-                graphLineColour[channelIndex] = currentColor;
-              });
-              Navigator.of(context).pop();
-            },
-            child: Text(
-              'Done',
-              style: GoogleFonts.roboto(color: ThemeColors.getColor('submitButton', isDarkMode)),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text(
-              'Cancel',
-              style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _updateGraphSegments() {
-    setState(() {
-      Global.graphVisibleArea.value = '${_graphVisibleHrController.text}:${_graphVisibleMinController.text}';
-      _calculateGraphSegments();
-    });
-  }
-
-  void _calculateGraphSegments() {
-    if (tableData.isEmpty) {
-      startTimeSeconds = 0;
-      totalSegments = 1;
-      currentSegment = 0;
+  void _processTestMetadata(List<Map<String, dynamic>> testData) {
+    if (testData.isEmpty) {
+      LogPage.addLog('[$_currentTime] No metadata found in Test table.');
       return;
     }
-    List<double> timeSecondsList = tableData.map((row) {
-      try {
-        List<String> timeParts = (row['AbsTime'] as String).split(':');
-        return int.parse(timeParts[0]) * 3600 + int.parse(timeParts[1]) * 60 + double.parse(timeParts[2]);
-      } catch (e) { return 0.0; }
-    }).toList();
+    final testRow = testData.first;
 
-    final validTimeSecondsList = timeSecondsList.where((t) => t > 0.0 || !tableData[timeSecondsList.indexOf(t)]['AbsTime'].isEmpty).toList();
-    if (validTimeSecondsList.isEmpty) {
-      startTimeSeconds = 0; totalSegments = 1; currentSegment = 0; return;
-    }
+    _fileNameController.text = (testRow['FName'] as String?) ?? widget.fileName;
+    _operatorController.text = (testRow['OperatorName'] as String?) ?? '';
 
-    startTimeSeconds = validTimeSecondsList.reduce((a, b) => a < b ? a : b);
-    double endTimeSeconds = validTimeSecondsList.reduce((a, b) => a > b ? a : b);
-    double totalTimeSeconds = endTimeSeconds - startTimeSeconds;
-    if (totalTimeSeconds < 0) totalTimeSeconds = 0;
+    _scanRateHrController.text = ((testRow['ScanningRateHH'] as num?)?.toInt() ?? 0).toString();
+    _scanRateMinController.text = ((testRow['ScanningRateMM'] as num?)?.toInt() ?? 0).toString();
+    _scanRateSecController.text = ((testRow['ScanningRateSS'] as num?)?.toInt() ?? 1).toString();
 
-    int segmentHours = int.tryParse(_graphVisibleHrController.text) ?? 0;
-    int segmentMinutes = int.tryParse(_graphVisibleMinController.text) ?? 60;
-    double segmentSeconds = (segmentHours * 3600) + (segmentMinutes * 60);
-    if (segmentSeconds <= 0) segmentSeconds = 3600;
+    _testDurationDayController.text = ((testRow['TestDurationDD'] as num?)?.toInt() ?? 0).toString();
+    _testDurationHrController.text = ((testRow['TestDurationHH'] as num?)?.toInt() ?? 0).toString();
+    _testDurationMinController.text = ((testRow['TestDurationMM'] as num?)?.toInt() ?? 0).toString();
+    _testDurationSecController.text = ((testRow['TestDurationSS'] as num?)?.toInt() ?? 0).toString();
 
-    totalSegments = totalTimeSeconds > 0 && segmentSeconds > 0 ? (totalTimeSeconds / segmentSeconds).ceil() : 1;
-    if (totalSegments < 1) totalSegments = 1;
-    if (currentSegment >= totalSegments) currentSegment = totalSegments > 0 ? totalSegments - 1 : 0;
+    final visibleSeconds = (testRow['GraphVisibleArea'] as num?)?.toInt() ?? 3600;
+    _graphTimeWindow = Duration(seconds: visibleSeconds > 0 ? visibleSeconds : 3600);
+
+    _graphVisibleHrController.text = _graphTimeWindow.inHours.toString();
+    _graphVisibleMinController.text = _graphTimeWindow.inMinutes.remainder(60).toString();
   }
 
-  void _calculateYRange({List<Map<String, dynamic>>? data}) {
-    final dataToUse = data ?? tableData;
-    if (dataToUse.isEmpty || selectedChannel == null || channelNames.isEmpty) {
-      minYValue = 0; maxYValue = 1000; return;
-    }
 
-    List<double> allValues = [];
-    if (selectedChannel == 'All') {
-      for (int channelIndex in channelNames.keys) {
-        if (channelNames.containsKey(channelIndex)) {
-          var values = dataToUse
-              .map((row) => (row['AbsPer$channelIndex'] as num?)?.toDouble())
-              .where((value) => value != null)
-              .cast<double>().toList();
-          allValues.addAll(values);
+  void _processChannelMetadata(List<Map<String, dynamic>> test2Data) {
+    _channelNames.clear();
+    _graphLineColours.clear();
+    final test2Row = test2Data.isNotEmpty ? test2Data[0] : {};
+
+    for (int i = 1; i <= 100; i++) {
+      String? name = test2Row['ChannelName$i']?.toString().trim();
+      if (name != null && name.isNotEmpty && name != 'null') {
+        _channelNames[i] = name;
+        final setupChannel = _channelSetupData[name];
+        Color color = _getDefaultColor(i);
+        if (setupChannel != null) {
+          try {
+            final dbValue = setupChannel.graphLineColour;
+            if (dbValue is int && dbValue != 0) {
+              color = Color(dbValue);
+            } else if (dbValue is String && dbValue.toString().isNotEmpty) {
+              final colorString = dbValue.toString().replaceAll('#', '');
+              if (colorString.length >= 6) {
+                color = Color(int.parse('FF${colorString.substring(0,6)}', radix: 16));
+              }
+            }
+          } catch(e) {
+            LogPage.addLog('[$_currentTime] Could not parse color for channel $name. Value: ${setupChannel.graphLineColour}. Error: $e');
+          }
         }
-      }
-    } else {
-      if (int.tryParse(selectedChannel!) != null) {
-        int channelIndex = int.parse(selectedChannel!);
-        if (channelNames.containsKey(channelIndex)) {
-          allValues = dataToUse
-              .map((row) => (row['AbsPer$channelIndex'] as num?)?.toDouble())
-              .where((value) => value != null)
-              .cast<double>().toList();
-        }
+        _graphLineColours[i] = color;
+      } else {
+        break;
       }
     }
-
-    if (allValues.isEmpty) {
-      minYValue = 0; maxYValue = 1000; return;
-    }
-    allValues.sort();
-    minYValue = allValues.first; maxYValue = allValues.last;
-
-    double padding = (maxYValue - minYValue) * 0.1 * zoomLevel;
-    if (padding == 0 && maxYValue == minYValue) padding = 10 * zoomLevel;
-
-    minYValue -= padding; maxYValue += padding;
-    if (minYValue >= maxYValue) minYValue = maxYValue - (2 * padding > 0 ? 2 * padding : 20);
-    if (minYValue == maxYValue) { minYValue -=10; maxYValue +=10; }
+    _visibleGraphChannels = _channelNames.keys.toSet();
   }
 
-  Future<Uint8List?> _captureGraph({List<Map<String, dynamic>>? filteredData, required bool isDarkMode}) async {
+  void _processDataRows(List<Map<String, dynamic>> test1Data) {
+    _tableData = test1Data.map((row) => Map<String, dynamic>.from(row)).toList();
+    _graphData.clear();
+    _firstDataTimestamp = null;
+    _lastDataTimestamp = null;
+
+    if (_tableData.isEmpty) return;
+
+    for (var row in _tableData) {
+      DateTime? timestamp = _parseTimestamp(row['AbsDate'] as String?, row['AbsTime'] as String?);
+      if (timestamp == null) continue;
+
+      _firstDataTimestamp ??= timestamp;
+      _lastDataTimestamp = timestamp;
+
+      for (int channelIndex in _channelNames.keys) {
+        final value = (row['AbsPer$channelIndex'] as num?)?.toDouble();
+        _graphData.putIfAbsent(channelIndex, () => []).add(ChartData(timestamp, value));
+      }
+    }
+  }
+
+  DateTime? _parseTimestamp(String? dateStr, String? timeStr) {
+    if (dateStr == null || timeStr == null || dateStr.isEmpty || timeStr.isEmpty) {
+      return null;
+    }
     try {
-      final originalTableData = List<Map<String, dynamic>>.from(tableData);
-      final originalSegment = currentSegment;
-      final originalMinY = minYValue;
-      final originalMaxY = maxYValue;
-
-      if (filteredData != null && filteredData.isNotEmpty) {
-        setState(() {
-          tableData = filteredData;
-          currentSegment = 0;
-          _calculateYRange(data: filteredData);
-        });
-        await Future.delayed(const Duration(milliseconds: 300));
-      }
-
-      RenderRepaintBoundary? boundary = _graphKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
-      if (boundary == null) {
-        if (filteredData != null) {
-          setState(() {
-            tableData = originalTableData; currentSegment = originalSegment;
-            minYValue = originalMinY; maxYValue = originalMaxY;
-            _calculateYRange();
-          });
-        }
-        return null;
-      }
-
-      ui.Image image = await boundary.toImage(pixelRatio: 3.0);
-      ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-
-      if (filteredData != null) {
-        setState(() {
-          tableData = originalTableData; currentSegment = originalSegment;
-          minYValue = originalMinY; maxYValue = originalMaxY;
-          _calculateYRange();
-        });
-      }
-      return byteData?.buffer.asUint8List();
+      final fullDateTimeStr = '$dateStr $timeStr';
+      return DateTime.parse(fullDateTimeStr);
     } catch (e) {
-      LogPage.addLog('[$_currentTime] [CAPTURE_GRAPH] Error capturing graph: $e');
+      LogPage.addLog('[$_currentTime] Failed to parse timestamp: Date="$dateStr", Time="$timeStr". Error: $e');
       return null;
     }
   }
 
-  void _highlightPeakOnGraph() { /* Placeholder */ }
-
-  String _getUnitForChannel(String channelName) {
-    final setupChannel = _channelSetupData[channelName];
-    if (setupChannel != null && setupChannel.unit.isNotEmpty) return setupChannel.unit;
-    if (channelName.toLowerCase().contains('load')) return 'kN';
-    if (channelName.toLowerCase() == 'mixed') return '-';
-    return '%';
-  }
-
-  // --- NEW WIDGET FOR THE EXIT BUTTON ---
-  Widget _buildExitButton(bool isDarkMode) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: TextButton.icon(
-        icon: Icon(Icons.arrow_back_ios_new, size: 16, color: ThemeColors.getColor('resetButton', isDarkMode)),
-        label: Text(
-          "Exit to Dashboard",
-          style: GoogleFonts.roboto(
-            color: ThemeColors.getColor('resetButton', isDarkMode),
-            fontWeight: FontWeight.w600,
-            fontSize: 14,
-          ),
-        ),
-        // --- MODIFICATION IS HERE ---
-        onPressed: () {
-          // Navigate to HomePage and remove all previous routes
-          Navigator.pushAndRemoveUntil(
-            context,
-            MaterialPageRoute(builder: (context) => const HomePage()), // Assuming HomePage() is correct
-                (Route<dynamic> route) => false,
-          );
-        },
-        // --- END OF MODIFICATION ---
-        style: TextButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-            side: BorderSide(color: ThemeColors.getColor('resetButton', isDarkMode).withOpacity(0.5)),
-          ),
-          backgroundColor: ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.5),
-        ),
-      ),
-    );
-  }
-  // --- END OF NEW WIDGET ---
-
-  Widget _buildGraphNavigation(bool isDarkMode) {
-    Color iconColor = ThemeColors.getColor('dialogText', isDarkMode);
-    Color textColor = ThemeColors.getColor('dialogSubText', isDarkMode);
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    icon: Icon(Icons.zoom_in, size: 24, color: iconColor),
-                    onPressed: () => setState(() { zoomLevel *= 1.2; _animationController.forward(from: 0); _calculateYRange(); }),
-                    tooltip: 'Zoom In', splashRadius: 22,
-                  ),
-                  IconButton(
-                    icon: Icon(Icons.zoom_out, size: 24, color: iconColor),
-                    onPressed: () => setState(() { zoomLevel /= 1.2; if (zoomLevel < 0.1) zoomLevel = 0.1; _animationController.forward(from: 0); _calculateYRange(); }),
-                    tooltip: 'Zoom Out', splashRadius: 22,
-                  ),
-                ],
-              ),
-              Expanded(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    IconButton(
-                      icon: Icon(Icons.chevron_left, size: 24, color: currentSegment > 0 ? iconColor : Colors.grey.withOpacity(0.7)),
-                      onPressed: currentSegment > 0 ? () => setState(() => currentSegment--) : null,
-                      tooltip: 'Previous Segment', splashRadius: 22,
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8.0),
-                      child: Text(
-                        'Segment ${currentSegment + 1}/$totalSegments',
-                        style: GoogleFonts.roboto(color: textColor, fontWeight: FontWeight.w500, fontSize: 13),
-                      ),
-                    ),
-                    IconButton(
-                      icon: Icon(Icons.chevron_right, size: 24, color: currentSegment < totalSegments - 1 ? iconColor : Colors.grey.withOpacity(0.7)),
-                      onPressed: currentSegment < totalSegments - 1 ? () => setState(() => currentSegment++) : null,
-                      tooltip: 'Next Segment', splashRadius: 22,
-                    ),
-                  ],
-                ),
-              ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    icon: Icon(Icons.analytics_outlined, color: showPeak ? ThemeColors.getColor('errorText', isDarkMode) : iconColor, size: 24),
-                    onPressed: () {
-                      setState(() => showPeak = !showPeak);
-                    },
-                    tooltip: 'Show Peak Value', splashRadius: 22,
-                  ),
-                  IconButton(
-                    icon: Icon(showDataPoints ? Icons.scatter_plot_outlined : Icons.show_chart_outlined, color: iconColor, size: 24),
-                    onPressed: () => setState(() => showDataPoints = !showDataPoints),
-                    tooltip: 'Toggle Data Points', splashRadius: 22,
-                  ),
-                ],
-              )
-            ],
-          ),
-          const SizedBox(height: 10),
-          _buildChannelLegend(isDarkMode),
-        ],
-      ),
-    );
-  }
-  Widget _buildChannelLegend(bool isDarkMode) {
-    if (channelNames.isEmpty) return const SizedBox.shrink();
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4.0),
-      child: Wrap(
-        spacing: 10.0,
-        runSpacing: 6.0,
-        alignment: WrapAlignment.center,
-        children: channelNames.entries.map((entry) {
-          int channelIndex = entry.key;
-          String channelName = entry.value;
-          return MouseRegion(
-            cursor: SystemMouseCursors.click,
-            child: GestureDetector(
-              onTap: () => _showColorPicker(channelIndex, isDarkMode),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.6),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: (graphLineColour[channelIndex] ?? _getDefaultColor(channelIndex)).withOpacity(0.7), width: 1.5),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 10, height: 10,
-                      decoration: BoxDecoration(
-                          color: graphLineColour[channelIndex] ?? _getDefaultColor(channelIndex),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: ThemeColors.getColor('dialogText', isDarkMode).withOpacity(0.3), width: 0.5)
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      channelName,
-                      style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 12, fontWeight: FontWeight.w500),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        }).toList(),
-      ),
-    );
-  }
-  Widget _buildGraph({List<Map<String, dynamic>>? filteredData, required bool isDarkMode}) {
-    final dataToUse = filteredData ?? tableData;
-
-    if (_isLoading && dataToUse.isEmpty) return Center(child: CircularProgressIndicator(color: ThemeColors.getColor('submitButton', isDarkMode)));
-    if (_fetchError != null) return Center(child: Text(_fetchError!, style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('errorText', isDarkMode)), textAlign: TextAlign.center));
-    if (dataToUse.isEmpty) return Center(child: Text('No data available for graph.', style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogSubText', isDarkMode)), textAlign: TextAlign.center));
-    if (channelNames.isEmpty || selectedChannel == null) return Center(child: Text('No channels selected or data missing.', style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogSubText', isDarkMode)), textAlign: TextAlign.center));
-
-    int segmentHours = int.tryParse(_graphVisibleHrController.text) ?? 0;
-    int segmentMinutes = int.tryParse(_graphVisibleMinController.text) ?? 60;
-    if (segmentHours == 0 && segmentMinutes == 0) segmentMinutes = 1;
-    double segmentDurationSeconds = (segmentHours * 3600) + (segmentMinutes * 60);
-    if (segmentDurationSeconds <=0) segmentDurationSeconds = 60;
-
-    double segmentStartTimeSeconds = startTimeSeconds + (currentSegment * segmentDurationSeconds);
-    double segmentEndTimeSeconds = segmentStartTimeSeconds + segmentDurationSeconds;
-
-    List<Map<String, dynamic>> segmentData = dataToUse.where((row) {
-      try {
-        String? timeStr = row['AbsTime'] as String?;
-        if (timeStr == null || !timeStr.contains(':')) return false;
-        List<String> timeParts = timeStr.split(':');
-        if (timeParts.length != 3) return false;
-        double timeSeconds = int.parse(timeParts[0]) * 3600 + int.parse(timeParts[1]) * 60 + double.parse(timeParts[2].split('.').first);
-        return timeSeconds >= segmentStartTimeSeconds && timeSeconds < segmentEndTimeSeconds;
-      } catch (e) { return false; }
-    }).toList();
-
-    List<LineChartBarData> lineBarsData = [];
-    List<int> channelsToPlot = selectedChannel == 'All'
-        ? channelNames.keys.toList()
-        : (int.tryParse(selectedChannel!) != null ? [int.parse(selectedChannel!)] : []);
-    Map<double, String> timeToLabel = {};
-    List<FlSpot> allSpotsInView = [];
-
-    for (int channelIndex in channelsToPlot) {
-      if (!channelNames.containsKey(channelIndex)) continue;
-      List<FlSpot> spots = [];
-      for (int i = 0; i < segmentData.length; i++) {
-        var row = segmentData[i];
-        try {
-          String absTime = row['AbsTime'] as String;
-          if (!absTime.contains(RegExp(r'^\d{1,2}:\d{2}:\d{2}(\.\d+)?$'))) continue;
-          List<String> timeParts = absTime.split(':');
-          double timeSeconds = int.parse(timeParts[0]) * 3600 + int.parse(timeParts[1]) * 60 + double.parse(timeParts[2].split('.').first);
-          double xValue = timeSeconds - segmentStartTimeSeconds;
-          timeToLabel[xValue] = absTime;
-          double? loadValue = (row['AbsPer$channelIndex'] as num?)?.toDouble();
-          if (loadValue != null) {
-            FlSpot spot = FlSpot(xValue, loadValue);
-            spots.add(spot); allSpotsInView.add(spot);
-          }
-        } catch (e) { continue; }
+  void _calculateGlobalPeakValues() {
+    _globalPeakValues.clear();
+    _graphData.forEach((channelIndex, dataList) {
+      final validData = dataList.where((d) => d.value != null).toList();
+      if (validData.isNotEmpty) {
+        _globalPeakValues[channelIndex] = validData.reduce((curr, next) => curr.value! > next.value! ? curr : next);
       }
-      if (spots.isNotEmpty) {
-        lineBarsData.add(LineChartBarData(
-          spots: spots, isCurved: true, barWidth: 2.2,
-          color: graphLineColour[channelIndex] ?? _getDefaultColor(channelIndex),
-          dotData: FlDotData(
-            show: showDataPoints || (showPeak && selectedChannel != 'All' && maxLoadValues[channelIndex] != null && selectedChannel == channelIndex.toString()),
-            getDotPainter: (spot, percent, barData, index) {
-              if (showPeak && selectedChannel == channelIndex.toString() && spot.y == maxLoadValues[channelIndex]) {
-                return FlDotCirclePainter(radius: 5, color: ThemeColors.getColor('errorText', isDarkMode), strokeWidth: 1.5, strokeColor: ThemeColors.getColor('cardBackground', isDarkMode));
-              }
-              return FlDotCirclePainter(radius: 2.5, color: barData.color ?? _getDefaultColor(channelIndex), strokeWidth: 0.5, strokeColor: ThemeColors.getColor('cardBackground', isDarkMode));
-            },
-          ),
-          belowBarData: BarAreaData(
-            show:false,
-          ),
-        ));
-      }
+    });
+  }
+
+  void _calculateAndSetSegments() {
+    if (_firstDataTimestamp == null || _lastDataTimestamp == null) {
+      _maxSegments = 1;
+      return;
     }
 
-    if (lineBarsData.isEmpty) return Center(child: Text('No data for current graph segment.', style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogSubText', isDarkMode)), textAlign: TextAlign.center));
-
-    double minX = 0;
-    double maxX = allSpotsInView.isNotEmpty ? allSpotsInView.map((spot) => spot.x).reduce((a, b) => a > b ? a : b) : segmentDurationSeconds;
-    if (maxX <= minX) maxX = minX + 60;
-    double yAxisInterval = (maxYValue - minYValue) / 5;
-    if (yAxisInterval <= 0) yAxisInterval = (maxYValue.abs() + minYValue.abs() + 20) / 5;
-    double xAxisInterval = maxX / 5;
-    if (xAxisInterval <= 0) xAxisInterval = (maxX + 60) / 5;
-
-    return Column(
-      children: [
-        _buildGraphNavigation(isDarkMode),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.only(top: 0, left: 4.0, right: 8.0, bottom: 8.0),
-            child: RepaintBoundary(
-              key: _graphKey,
-              child: Container(
-                color: ThemeColors.getColor('cardBackground', isDarkMode),
-                padding: const EdgeInsets.only(left: 8.0, right: 16.0, top: 12.0, bottom: 8.0),
-                child: LineChart(
-                  LineChartData(
-                    lineTouchData: LineTouchData(
-                      touchTooltipData: LineTouchTooltipData(
-                        getTooltipColor: (spot) => ThemeColors.getColor('dialogBackground', isDarkMode).withOpacity(0.95),
-                        tooltipRoundedRadius: 6,
-                        tooltipPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        getTooltipItems: (touchedSpots) => touchedSpots.map((spot) {
-                          int actualChannelIndex = channelsToPlot[spot.barIndex];
-                          String xText = timeToLabel[spot.x] ?? 'Time: ${spot.x.toStringAsFixed(0)}s';
-                          String unit = _getUnitForChannel(channelNames[actualChannelIndex]!);
-                          return LineTooltipItem(
-                            '${channelNames[actualChannelIndex]}: ${spot.y.toStringAsFixed(Global.selectedMode.value == 'Graph' ? 2:1)} $unit\n$xText',
-                            GoogleFonts.roboto(color: graphLineColour[actualChannelIndex] ?? _getDefaultColor(actualChannelIndex), fontWeight: FontWeight.bold, fontSize: 10),
-                          );
-                        }).toList(),
-                      ),
-                      handleBuiltInTouches: true,
-                    ),
-                    gridData: FlGridData(
-                      show: true, drawHorizontalLine: true, drawVerticalLine: true,
-                      horizontalInterval: yAxisInterval > 0 ? yAxisInterval : null,
-                      verticalInterval: xAxisInterval > 0 ? xAxisInterval : null,
-                      getDrawingHorizontalLine: (value) => FlLine(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.15), strokeWidth: 0.6),
-                      getDrawingVerticalLine: (value) => FlLine(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.15), strokeWidth: 0.6),
-                    ),
-                    titlesData: FlTitlesData(
-                      show: true,
-                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      leftTitles: AxisTitles(
-                        axisNameWidget: Text(
-                          _getUnitForChannel(selectedChannel == 'All' ? 'Mixed' : channelNames[int.tryParse(selectedChannel!) ?? channelsToPlot.first]!),
-                          style: GoogleFonts.roboto(fontSize: 9, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode)),
-                        ),
-                        axisNameSize: 18,
-                        sideTitles: SideTitles(
-                          showTitles: true, reservedSize: 42, interval: yAxisInterval > 0 ? yAxisInterval : null,
-                          getTitlesWidget: (value, meta) => Text(value.toStringAsFixed((maxYValue - minYValue) < 10 ? 1:0), style: GoogleFonts.roboto(fontSize: 8, color: ThemeColors.getColor('dialogSubText', isDarkMode))),
-                        ),
-                      ),
-                      bottomTitles: AxisTitles(
-                        axisNameWidget: Text(
-                          'Time (Segment Relative)',
-                          style: GoogleFonts.roboto(fontSize: 9, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode)),
-                        ),
-                        axisNameSize: 18,
-                        sideTitles: SideTitles(
-                          showTitles: true, reservedSize: 28, interval: xAxisInterval > 0 ? xAxisInterval : null,
-                          getTitlesWidget: (value, meta) {
-                            int totalSeconds = value.toInt(); int h = totalSeconds ~/ 3600; int m = (totalSeconds % 3600) ~/ 60; int s = totalSeconds % 60;
-                            String label = h > 0 ? '${h.toString().padLeft(2,'0')}:${m.toString().padLeft(2,'0')}:${s.toString().padLeft(2,'0')}' : '${m.toString().padLeft(2,'0')}:${s.toString().padLeft(2,'0')}';
-                            return Text(label, style: GoogleFonts.roboto(fontSize: 8, color: ThemeColors.getColor('dialogSubText', isDarkMode)));
-                          },
-                        ),
-                      ),
-                    ),
-                    borderData: FlBorderData(show: true, border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.3), width: 0.8)),
-                    minX: minX, maxX: maxX, minY: minYValue, maxY: maxYValue,
-                    lineBarsData: lineBarsData,
-                    clipData: const FlClipData.all(),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-  Widget _buildDataTable(bool isDarkMode) {
-    if (_isLoading && tableData.isEmpty) return Center(child: CircularProgressIndicator(color: ThemeColors.getColor('submitButton', isDarkMode)));
-    if (_fetchError != null && tableData.isEmpty) return Center(child: Text(_fetchError!, style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('errorText', isDarkMode))));
-    if (tableData.isEmpty) return Center(child: Text('No tabular data available.', style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogSubText', isDarkMode))));
-
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.8)),
-        color: ThemeColors.getColor('cardBackground', isDarkMode),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(11),
-        child: Column(
-          children: [
-            Expanded(
-              child: Scrollbar(
-                thumbVisibility: true, controller: _tableVerticalScrollController,
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.vertical, controller: _tableVerticalScrollController,
-                  child: Scrollbar(
-                    thumbVisibility: true, controller: _tableHorizontalScrollController,
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal, controller: _tableHorizontalScrollController,
-                      child: DataTable(
-                        headingRowColor: MaterialStateProperty.resolveWith((states) => ThemeColors.getColor('tableHeaderBackground', isDarkMode)),
-                        headingTextStyle: GoogleFonts.roboto(fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13),
-                        dataRowMinHeight: 38, dataRowMaxHeight: 44,
-                        columnSpacing: 35,
-                        border: TableBorder.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5), width: 0.5),
-                        columns: [
-                          DataColumn(label: Text('No'), numeric: true),
-                          DataColumn(label: Text('Time')),
-                          DataColumn(label: Text('Date')),
-                          ...channelNames.entries.map((entry) => DataColumn(label: Text(entry.value), numeric: true)),
-                        ],
-                        rows: tableData.map((data) {
-                          String displayDate = 'N/A';
-                          try {
-                            if (data['AbsDate'] is String && (data['AbsDate'] as String).isNotEmpty) {
-                              DateTime parsedDate = DateTime.parse(data['AbsDate']);
-                              displayDate = "${parsedDate.year.toString().padLeft(4, '0')}-${parsedDate.month.toString().padLeft(2, '0')}-${parsedDate.day.toString().padLeft(2, '0')}";
-                            }
-                          } catch (e) { /* Error parsing */ }
-                          return DataRow(
-                            cells: [
-                              DataCell(Text('${data['SNo'] ?? ''}', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12))),
-                              DataCell(Text(data['AbsTime'] ?? '', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12))),
-                              DataCell(Text(displayDate, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12))),
-                              ...channelNames.keys.map((channelIndex) {
-                                double? value = (data['AbsPer$channelIndex'] as num?)?.toDouble();
-                                String displayValue = value == null ? '-' : value.toStringAsFixed(2);
-                                return DataCell(Text(displayValue, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), textAlign: TextAlign.right));
-                              }),
-                            ],
-                          );
-                        }).toList(),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-  Widget _buildTimeInputField(TextEditingController controller, String label, {bool compact = false, required bool isDarkMode}) {
-    double fieldWidth = compact ? 55 : 70;
-    double fontSize = compact ? 11 : 13;
-    EdgeInsets contentPadding = compact
-        ? const EdgeInsets.symmetric(horizontal: 8, vertical: 10)
-        : const EdgeInsets.symmetric(horizontal: 10, vertical: 14);
-
-    return SizedBox(
-      width: fieldWidth,
-      child: TextField(
-        controller: controller,
-        keyboardType: TextInputType.number,
-        textAlign: TextAlign.center,
-        decoration: InputDecoration(
-          labelText: label,
-          labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: fontSize),
-          filled: true,
-          fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none),
-          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5))),
-          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 1.2)),
-          contentPadding: contentPadding,
-          isDense: true,
-        ),
-        style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: fontSize),
-        onChanged: (value) {
-          int? intValue = int.tryParse(value);
-          switch (label) {
-            case 'Day': if (controller == _testDurationDayController) Global.testDurationDD?.value = intValue; break;
-            case 'Hr':
-              if (controller == _scanRateHrController) Global.scanningRateHH.value = intValue;
-              if (controller == _testDurationHrController) Global.testDurationHH.value = intValue;
-              if (controller == _graphVisibleHrController) _updateGraphSegments();
-              break;
-            case 'Min':
-              if (controller == _scanRateMinController) Global.scanningRateMM.value = intValue;
-              if (controller == _testDurationMinController) Global.testDurationMM.value = intValue;
-              if (controller == _graphVisibleMinController) _updateGraphSegments();
-              break;
-            case 'Sec':
-              if (controller == _scanRateSecController) Global.scanningRateSS.value = intValue;
-              if (controller == _testDurationSecController) Global.testDurationSS.value = intValue;
-              break;
-          }
-        },
-      ),
-    );
-  }
-  Widget _buildControlButton(String text, VoidCallback onPressed, {Color? explicitColor, bool? disabled, required bool isDarkMode, IconData? icon}) {
-    return ElevatedButton.icon(
-      icon: icon != null ? Icon(icon, size: 20, color: Colors.white) : const SizedBox.shrink(),
-      label: Text(text, style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 14)),
-      onPressed: disabled == true ? null : onPressed,
-      style: ElevatedButton.styleFrom(
-        backgroundColor: explicitColor ?? ThemeColors.getColor('submitButton', isDarkMode),
-        padding: EdgeInsets.symmetric(horizontal: icon != null ? 16 : 20, vertical: 12),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        elevation: 1,
-        shadowColor: Colors.black.withOpacity(0.15),
-      ),
-    );
-  }
-  Future<Map<String, String>?> _showTimeRangeDialog(bool isDarkMode) async {
-    final fromController = TextEditingController();
-    final toController = TextEditingController();
-    String? errorMessage;
-    fromController.text = '00:00:00'; toController.text = '23:59:59';
-
-    return showDialog<Map<String, String>>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-          backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
-          titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 10),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
-          actionsPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          title: Row(children: [
-            Icon(Icons.filter_list_alt, color: ThemeColors.getColor('submitButton', isDarkMode), size: 22),
-            const SizedBox(width: 10),
-            Text('Filter by Time Range', style: GoogleFonts.roboto(fontSize: 18, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode))),
-          ]),
-          content: SizedBox(
-            width: 320,
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              TextField(
-                controller: fromController,
-                decoration: InputDecoration(
-                  labelText: 'From Time (HH:mm:ss)', hintText: '00:00:00',
-                  labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 13),
-                  hintStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.5), fontSize: 13),
-                  filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                  prefixIcon: Icon(Icons.schedule_outlined, color: ThemeColors.getColor('submitButton', isDarkMode), size: 18),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10), isDense: true,
-                ),
-                keyboardType: TextInputType.datetime, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: toController,
-                decoration: InputDecoration(
-                  labelText: 'To Time (HH:mm:ss)', hintText: '23:59:59',
-                  labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 13),
-                  hintStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.5), fontSize: 13),
-                  filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                  prefixIcon: Icon(Icons.update_outlined, color: ThemeColors.getColor('submitButton', isDarkMode), size: 18),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10), isDense: true,
-                ),
-                keyboardType: TextInputType.datetime, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14),
-              ),
-              if (errorMessage != null) Padding(padding: const EdgeInsets.only(top: 10.0), child: Text(errorMessage!, style: GoogleFonts.roboto(color: ThemeColors.getColor('errorText', isDarkMode), fontSize: 11.5))),
-            ]),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(null),
-              child: Text('Cancel', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 13)),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                final timeFormat = RegExp(r'^\d{2}:\d{2}:\d{2}$');
-                if (!timeFormat.hasMatch(fromController.text) || !timeFormat.hasMatch(toController.text)) {
-                  setDialogState(() => errorMessage = 'Use HH:mm:ss format'); return;
-                }
-                try {
-                  List<String> fromP = fromController.text.split(':'), toP = toController.text.split(':');
-                  double fromS = int.parse(fromP[0])*3600 + int.parse(fromP[1])*60 + double.parse(fromP[2]);
-                  double toS = int.parse(toP[0])*3600 + int.parse(toP[1])*60 + double.parse(toP[2]);
-                  if (fromS >= toS) { setDialogState(() => errorMessage = 'From time must be earlier'); return; }
-                  Navigator.of(context).pop({'from': fromController.text, 'to': toController.text});
-                } catch (e) { setDialogState(() => errorMessage = 'Invalid time format'); }
-              },
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: ThemeColors.getColor('submitButton', isDarkMode),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10)),
-              child: Text('Apply Filter', style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 13)),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-  List<Map<String, dynamic>> _filterDataByTimeRange(String fromTime, String toTime) {
-    try {
-      List<String> fromP = fromTime.split(':'), toP = toTime.split(':');
-      double fromS = int.parse(fromP[0])*3600 + int.parse(fromP[1])*60 + double.parse(fromP[2]);
-      double toS = int.parse(toP[0])*3600 + int.parse(toP[1])*60 + double.parse(toP[2]);
-      var filteredData = tableData.where((row) {
-        try {
-          List<String> timeP = (row['AbsTime'] as String).split(':');
-          double timeS = int.parse(timeP[0])*3600 + int.parse(timeP[1])*60 + double.parse(timeP[2]);
-          return timeS >= fromS && timeS <= toS;
-        } catch (e) { return false; }
-      }).toList();
-      LogPage.addLog('[$_currentTime] [FILTER_DATA] Filtered data count: ${filteredData.length} for range $fromTime - $toTime');
-      return filteredData;
-    } catch (e) {
-      LogPage.addLog('[$_currentTime] [FILTER_DATA] Error filtering data: $e');
-      return tableData;
+    final totalDuration = _lastDataTimestamp!.difference(_firstDataTimestamp!);
+    if (totalDuration.inSeconds <= 0 || _graphTimeWindow.inSeconds <= 0) {
+      _maxSegments = 1;
+    } else {
+      _maxSegments = (totalDuration.inSeconds / _graphTimeWindow.inSeconds).ceil();
     }
+    if (_maxSegments < 1) _maxSegments = 1;
+    if (_currentSegment > _maxSegments) _currentSegment = _maxSegments;
   }
-  Widget _buildChannelSelector(bool isDarkMode) {
-    return Container(
-      height: 42,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
-      decoration: BoxDecoration(
-        color: ThemeColors.getColor('textFieldBackground', isDarkMode),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.6)),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: selectedChannel,
-          isDense: true,
-          style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14, fontWeight: FontWeight.w500),
-          dropdownColor: ThemeColors.getColor('dropdownBackground', isDarkMode),
-          icon: Icon(Icons.arrow_drop_down_rounded, color: ThemeColors.getColor('dialogText', isDarkMode), size: 24),
-          onChanged: (String? newValue) {
-            if (newValue != null) {
-              setState(() { selectedChannel = newValue; _calculateYRange(); if (showPeak && selectedChannel != 'All') _highlightPeakOnGraph(); });
-            }
-          },
-          items: [
-            DropdownMenuItem<String>(value: 'All', child: Text('All Channels')),
-            ...channelNames.entries.map<DropdownMenuItem<String>>((entry) => DropdownMenuItem<String>(value: entry.key.toString(), child: Text(entry.value))),
-          ].map((item) => DropdownMenuItem<String>(
-            value: item.value,
-            child: Text(
-              (item.child as Text).data!,
-              style: GoogleFonts.roboto(
-                  color: ThemeColors.getColor('dialogText', isDarkMode),
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500
-              ),
-            ),
-          )).toList(),
-        ),
-      ),
-    );
-  }
-  void _openFloatingGraphWindow(bool isDarkMode) {
-    late OverlayEntry entry;
-    Offset position = const Offset(100, 100);
 
-    Map<String, List<Map<String, dynamic>>> dataByChannel = {};
-    for (var channelIndex in channelNames.keys) {
-      List<Map<String, dynamic>> channelDataPoints = [];
-      for (var row in tableData) {
-        String timeStr = row['AbsTime'] as String? ?? "00:00:00";
-        DateTime? parsedTime; try { List<String> parts = timeStr.split(':'); if (parts.length == 3) { parsedTime = DateTime.now().copyWith(hour: int.parse(parts[0]), minute: int.parse(parts[1]), second: int.parse(parts[2].split('.').first), millisecond: 0, microsecond: 0); } } catch (e) { /* ignore */ }
-        channelDataPoints.add({'time': timeStr, 'value': (row['AbsPer$channelIndex'] as num?)?.toDouble() ?? 0.0, 'Timestamp': (parsedTime ?? DateTime.now()).millisecondsSinceEpoch.toDouble()});
-      }
-      dataByChannel[channelIndex.toString()] = channelDataPoints;
+  void _setSegment(int segment) {
+    if (_firstDataTimestamp == null) return;
+    setState(() {
+      _currentSegment = segment.clamp(1, _maxSegments);
+      final segmentStartTime = _firstDataTimestamp!.add(Duration(seconds: (_currentSegment - 1) * _graphTimeWindow.inSeconds));
+      _chartVisibleMin = segmentStartTime;
+      _chartVisibleMax = segmentStartTime.add(_graphTimeWindow);
+    });
+  }
+
+  void _onRecNoChanged() {
+
+    if (ModalRoute.of(context)?.isCurrent == false) {
+      LogPage.addLog('[OpenFilePage] Listener fired but ignored because a dialog is active.');
+      return;
     }
 
-    Map<String, Channel> channelConfigs = {};
-    for (var entry in channelNames.entries) {
-      final setupChannel = _channelSetupData[entry.value];
-      channelConfigs[entry.key.toString()] = Channel(
-        recNo: (Global.selectedRecNo?.value ?? 0).toDouble(), channelName: entry.value, startingCharacter: setupChannel?.startingCharacter ?? '', dataLength: setupChannel?.dataLength ?? 7, decimalPlaces: setupChannel?.decimalPlaces ?? 2, unit: setupChannel?.unit ?? _getUnitForChannel(entry.value), chartMaximumValue: setupChannel?.chartMaximumValue ?? maxLoadValues[entry.key]?.toDouble() ?? 1000.0, chartMinimumValue: setupChannel?.chartMinimumValue ?? 0.0, targetAlarmMax: setupChannel?.targetAlarmMax ?? 0.0, targetAlarmMin: setupChannel?.targetAlarmMin ?? 0.0, graphLineColour: graphLineColour[entry.key]?.value ?? _getDefaultColor(entry.key).value, targetAlarmColour: setupChannel?.targetAlarmColour ?? Colors.red.value,
-      );
-    }
-    Map<String, Color> convertedgraphLineColour = { for (var entry in graphLineColour.entries) entry.key.toString(): entry.value };
+    if (!mounted) return;
+    LogPage.addLog('[$_currentTime] RecNo changed to ${Global.selectedRecNo?.value}, fetching new data');
+    fetchData();
+  }
 
-    entry = OverlayEntry(builder: (context) => Positioned(
-      left: position.dx, top: position.dy,
-      child: SaveMultiWindowGraph(
-        windowId: 'window_${_windowEntries.length}', initialData: dataByChannel, channelColors: convertedgraphLineColour, channelConfigs: channelConfigs, entry: entry,
-        // onPositionUpdate: (newPosition) => position = newPosition,
-        onClose: (closedEntry) { if (mounted) setState(() { _windowEntries.remove(closedEntry); closedEntry.remove(); }); },
-      ),
-    ));
-    Overlay.of(context).insert(entry);
-    if (mounted) setState(() => _windowEntries.add(entry));
-  }
-  Widget _buildStyledAddButton(bool isDarkMode) {
-    return SizedBox(
-      height: 42,
-      child: ElevatedButton.icon(
-        icon: const Icon(Icons.add_chart_outlined, color: Colors.white, size: 20),
-        label: Text('Add Window', style: GoogleFonts.roboto(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13.5)),
-        onPressed: () => _openFloatingGraphWindow(isDarkMode),
-        style: ElevatedButton.styleFrom(
-          backgroundColor: ThemeColors.getColor('submitButton', isDarkMode),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-          elevation: 1.5,
-          shadowColor: ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.3),
-        ),
-      ),
-    );
-  }
-  Widget _buildFullInputSection(bool isDarkMode) {
-    return Card(
-      elevation: 0,
-      color: ThemeColors.getColor('cardBackground', isDarkMode),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          children: [
-            Row(
-              children: [
-                Expanded(child: TextField(
-                  controller: _fileNameController,
-                  decoration: InputDecoration(
-                    labelText: 'File Name', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 14),
-                    filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5))),
-                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 1.2)),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-                    isDense: true,
-                  ),
-                  style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 15),
-                  onChanged: (value) => Global.selectedFileName.value = value,
-                )),
-                const SizedBox(width: 12),
-                Expanded(child: TextField(
-                  controller: _operatorController,
-                  decoration: InputDecoration(
-                    labelText: 'Operator', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 14),
-                    filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5))),
-                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 1.2)),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-                    isDense: true,
-                  ),
-                  style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 15),
-                  onChanged: (value) => Global.operatorName.value = value,
-                )),
-              ],
-            ),
-            const SizedBox(height: 12),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  Row(mainAxisSize: MainAxisSize.min, children: [
-                    Text('Scan Rate:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6),
-                    _buildTimeInputField(_scanRateHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
-                    _buildTimeInputField(_scanRateMinController, 'Min', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
-                    _buildTimeInputField(_scanRateSecController, 'Sec', compact: true, isDarkMode: isDarkMode),
-                  ]),
-                  const SizedBox(width: 16),
-                  Row(mainAxisSize: MainAxisSize.min, children: [
-                    Text('Test Duration:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6),
-                    _buildTimeInputField(_testDurationDayController, 'Day', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
-                    _buildTimeInputField(_testDurationHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
-                    _buildTimeInputField(_testDurationMinController, 'Min', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
-                    _buildTimeInputField(_testDurationSecController, 'Sec', compact: true, isDarkMode: isDarkMode),
-                  ]),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-  Widget _buildLeftSection(bool isDarkMode) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildFullInputSection(isDarkMode),
-        const SizedBox(height: 12),
-        if (Global.selectedMode.value == 'Table' || Global.selectedMode.value == 'Combined')
-          Expanded(
-            child: Card(
-              elevation: 0,
-              margin: EdgeInsets.zero,
-              color: ThemeColors.getColor('cardBackground', isDarkMode),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
-                side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7)),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Column(
-                  children: [
-                    Expanded(child: _buildDataTable(isDarkMode)),
-                    const SizedBox(height: 12),
-                    if (Global.selectedMode.value == 'Table' || Global.selectedMode.value == 'Combined')
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          if (Global.selectedMode.value == 'Table')
-                            _buildControlButton('Export Table', () async {
-                              final timeRange = await _showTimeRangeDialog(isDarkMode);
-                              List<Map<String, dynamic>> data = timeRange != null ? _filterDataByTimeRange(timeRange['from']!, timeRange['to']!) : tableData;
-                              ExportUtils.exportBasedOnMode(context: context, mode: 'Table', tableData: data, fileName: _fileNameController.text, graphImage: null, authSettings: await DatabaseManager().getAuthSettings(), channelNames: channelNames, isDarkMode: isDarkMode);
-                            }, isDarkMode: isDarkMode, icon: Icons.table_chart_outlined),
-                          if (Global.selectedMode.value == 'Combined')
-                            _buildControlButton('Export All', () async {
-                              final timeRange = await _showTimeRangeDialog(isDarkMode);
-                              List<Map<String, dynamic>> data = timeRange != null ? _filterDataByTimeRange(timeRange['from']!, timeRange['to']!) : tableData;
-                              Uint8List? graphImg = await _captureGraph(filteredData: timeRange != null ? data : null, isDarkMode: isDarkMode);
-                              ExportUtils.exportBasedOnMode(context: context, mode: 'Combined', tableData: data, fileName: _fileNameController.text, graphImage: graphImg, authSettings: await DatabaseManager().getAuthSettings(), channelNames: channelNames, isDarkMode: isDarkMode);
-                            }, isDarkMode: isDarkMode, icon: Icons.summarize_outlined),
-                        ],
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-  Widget _buildRightSection(bool isDarkMode) {
-    double graphCardElevation = (selectedChannel == 'All') ? 0.0 : 2.0;
+  @override
+  void dispose() {
+    _fileNameController.dispose();
+    _operatorController.dispose();
+    _scanRateHrController.dispose();
+    _scanRateMinController.dispose();
+    _scanRateSecController.dispose();
+    _testDurationDayController.dispose();
+    _testDurationHrController.dispose();
+    _testDurationMinController.dispose();
+    _testDurationSecController.dispose();
+    _graphVisibleHrController.dispose();
+    _graphVisibleMinController.dispose();
 
-    if (Global.selectedMode.value == 'Graph') {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Card(
-            elevation: 0,
-            color: ThemeColors.getColor('cardBackground', isDarkMode),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 8.0),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    SizedBox(width: 130, child: TextField(
-                      controller: _fileNameController, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500),
-                      decoration: InputDecoration(labelText: 'File', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none), contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), isDense: true),
-                      onChanged: (v) => Global.selectedFileName.value = v,
-                    )),
-                    SizedBox(width: 110, child: TextField(
-                      controller: _operatorController, style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500),
-                      decoration: InputDecoration(labelText: 'Operator', labelStyle: GoogleFonts.roboto(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12), filled: true, fillColor: ThemeColors.getColor('textFieldBackground', isDarkMode), border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none), contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10), isDense: true),
-                      onChanged: (v) => Global.operatorName.value = v,
-                    )),
-                    Row(mainAxisSize: MainAxisSize.min, children: [
-                      Text('Seg:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 13)), const SizedBox(width: 4),
-                      _buildTimeInputField(_graphVisibleHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 2), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 2),
-                      _buildTimeInputField(_graphVisibleMinController, 'Min', compact: true, isDarkMode: isDarkMode),
-                    ]),
-                    _buildChannelSelector(isDarkMode),
-                    _buildStyledAddButton(isDarkMode),
-                  ].expand((w) => [w, const SizedBox(width: 8)]).toList()..removeLast(),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Expanded(
-            child: Card(
-              elevation: graphCardElevation,
-              margin: EdgeInsets.zero,
-              color: ThemeColors.getColor('cardBackground', isDarkMode),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
-              child: _buildGraph(isDarkMode: isDarkMode),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            _buildControlButton('Export Graph', () async {
-              final timeRange = await _showTimeRangeDialog(isDarkMode);
-              List<Map<String, dynamic>> data = timeRange != null ? _filterDataByTimeRange(timeRange['from']!, timeRange['to']!) : tableData;
-              Uint8List? graphImg = await _captureGraph(filteredData: timeRange != null ? data : null, isDarkMode: isDarkMode);
-              ExportUtils.exportBasedOnMode(context: context, mode: 'Graph', tableData: [], fileName: _fileNameController.text, graphImage: graphImg, authSettings: await DatabaseManager().getAuthSettings(), channelNames: channelNames, isDarkMode: isDarkMode);
-            }, isDarkMode: isDarkMode, icon: Icons.image_search_outlined),
-          ]),
-        ],
-      );
-    } else { // Combined View - Right Side (Graph)
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                Text('Graph Seg:', style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500, fontSize: 14)), const SizedBox(width: 6),
-                _buildTimeInputField(_graphVisibleHrController, 'Hr', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 3), Text(":", style: GoogleFonts.roboto(color: ThemeColors.getColor('dialogText', isDarkMode))), const SizedBox(width: 3),
-                _buildTimeInputField(_graphVisibleMinController, 'Min', compact: true, isDarkMode: isDarkMode), const SizedBox(width: 12),
-                _buildChannelSelector(isDarkMode), const SizedBox(width: 12),
-                _buildStyledAddButton(isDarkMode),
-              ],
-            ),
-          ),
-          Expanded(
-            child: Card(
-              elevation: graphCardElevation,
-              margin: EdgeInsets.zero,
-              color: ThemeColors.getColor('cardBackground', isDarkMode),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
-              child: _buildGraph(isDarkMode: isDarkMode),
-            ),
-          ),
-        ],
-      );
+    _tableHeaderHorizontalScrollController.dispose();
+    _tableBodyHorizontalScrollController.dispose();
+    _tableVerticalScrollController.dispose();
+
+    Global.selectedRecNo?.removeListener(_onRecNoChanged);
+    Global.isDarkMode.removeListener(() {});
+
+    for (var entry in _windowEntries) {
+      entry.remove();
     }
+
+    if (_isDatabaseInitialized && _database.isOpen) {
+      _database.close();
+    }
+    super.dispose();
   }
 
   @override
@@ -1318,24 +405,8 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
         if (_isLoading && !_isDatabaseInitialized) {
           return Scaffold(backgroundColor: ThemeColors.getColor('appBackground', isDarkMode), body: Center(child: CircularProgressIndicator(color: ThemeColors.getColor('submitButton', isDarkMode))));
         }
-        if ((_fetchError != null && tableData.isEmpty && channelNames.isEmpty) || (Global.selectedRecNo?.value == null && !_isLoading)) {
-          return Scaffold(
-            backgroundColor: ThemeColors.getColor('appBackground', isDarkMode),
-            body: SafeArea(child: Center(child: Padding(
-              padding: const EdgeInsets.all(20.0),
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.error_outline_rounded, color: ThemeColors.getColor('errorText', isDarkMode), size: 44), const SizedBox(height: 12),
-                Text(_fetchError ?? "No data record selected or an error occurred.", textAlign: TextAlign.center, style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500)),
-                const SizedBox(height: 18),
-                ElevatedButton.icon(
-                  icon: Icon(Icons.refresh_rounded, color: Colors.white, size: 18),
-                  label: Text("Retry / Re-initialize", style: GoogleFonts.roboto(color: Colors.white, fontSize: 13)),
-                  style: ElevatedButton.styleFrom(backgroundColor: ThemeColors.getColor('submitButton', isDarkMode), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)),
-                  onPressed: () => _initializeAndFetchData(),
-                )
-              ]),
-            ))),
-          );
+        if ((_fetchError != null && _tableData.isEmpty) || (Global.selectedRecNo?.value == null && !_isLoading)) {
+          return _buildErrorState(isDarkMode);
         }
 
         return Scaffold(
@@ -1343,26 +414,19 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
           body: SafeArea(
             child: Padding(
               padding: const EdgeInsets.all(12.0),
-              // --- START OF LAYOUT CHANGE ---
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 1. ADD THE EXIT BUTTON AT THE TOP
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12.0),
-                    child: _buildExitButton(isDarkMode),
-                  ),
-                  // 2. WRAP THE ORIGINAL CONTENT IN AN EXPANDED WIDGET
+                  _buildHeader(isDarkMode),
+                  const SizedBox(height: 12),
                   Expanded(
                     child: ValueListenableBuilder<String>(
                       valueListenable: Global.selectedMode,
                       builder: (context, mode, _) {
                         bool showLeft = mode == 'Table' || mode == 'Combined';
                         bool showRight = mode == 'Graph' || mode == 'Combined';
-                        int leftFlex = mode == 'Combined' ? 1 : (mode == 'Table' ? 1 : 0);
-                        int rightFlex = mode == 'Combined' ? (showLeft ? 1 : 2) : (mode == 'Graph' ? 1 : 0);
-                        if (mode == 'Table') rightFlex = 0;
-                        if (mode == 'Graph') leftFlex = 0;
+                        int leftFlex = mode == 'Combined' ? 5 : 1;
+                        int rightFlex = mode == 'Combined' ? 7 : 1;
 
                         return Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1377,7 +441,6 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
                   ),
                 ],
               ),
-              // --- END OF LAYOUT CHANGE ---
             ),
           ),
         );
@@ -1385,35 +448,939 @@ class _OpenFilePageState extends State<OpenFilePage> with SingleTickerProviderSt
     );
   }
 
-  @override
-  void dispose() {
-    // Dispose of all controllers and listeners
-    _fileNameController.dispose(); _operatorController.dispose();
-    _scanRateHrController.dispose(); _scanRateMinController.dispose(); _scanRateSecController.dispose();
-    _testDurationDayController.dispose(); _testDurationHrController.dispose(); _testDurationMinController.dispose(); _testDurationSecController.dispose();
-    _graphVisibleHrController.dispose(); _graphVisibleMinController.removeListener(_updateGraphSegments); _graphVisibleMinController.dispose();
-    _tableHorizontalScrollController.dispose(); _tableVerticalScrollController.dispose();
-    _animationController.dispose();
+  Widget _buildHeader(bool isDarkMode) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: ThemeColors.getColor('cardBackground', isDarkMode),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7)),
+      ),
+      child: Row(
+        children: [
+          _buildExitButton(isDarkMode),
+          const SizedBox(width: 16),
+          _buildHeaderTextField('File Name', _fileNameController, isDarkMode, width: 200),
+          const SizedBox(width: 12),
+          _buildHeaderTextField('Operator', _operatorController, isDarkMode, width: 150),
+          const Spacer(),
+          _buildInfoDisplay('Scan Rate', [_scanRateHrController, _scanRateMinController, _scanRateSecController], ['h', 'm', 's'], isDarkMode),
+          const SizedBox(width: 16),
+          _buildInfoDisplay('Test Duration', [_testDurationDayController, _testDurationHrController, _testDurationMinController, _testDurationSecController], ['d', 'h', 'm', 's'], isDarkMode),
+          const SizedBox(width: 16),
+          _buildInfoDisplay('Graph Window', [_graphVisibleHrController, _graphVisibleMinController], ['h', 'm'], isDarkMode),
+          const SizedBox(width: 24),
+          _buildHeaderActionButton(
+            isDarkMode,
+            'Export',
+            Icons.download_for_offline_outlined,
+                () async {
+              if (_tableData.isEmpty || _firstDataTimestamp == null || _lastDataTimestamp == null) {
+                MessageUtils.showMessage(context, "No data available to export.", isError: true);
+                return;
+              }
+              // This is the starting point of the export flow.
+              _showExportDateRangePicker(context, isDarkMode, _firstDataTimestamp!, _lastDataTimestamp!);
+            },
+          ),
+          const SizedBox(width: 8),
+          _buildHeaderActionButton(isDarkMode, 'Add Window', Icons.add_chart_outlined, () => _openFloatingGraphWindow(isDarkMode)),
+        ],
+      ),
+    );
+  }
 
-    Global.selectedRecNo?.removeListener(_onRecNoChanged);
-    Global.selectedFileName.removeListener(_onGlobalChanged); Global.selectedDBName.removeListener(_onGlobalChanged);
-    Global.operatorName.removeListener(_onGlobalChanged);
-    Global.scanningRateHH.removeListener(_onGlobalChanged); Global.scanningRateMM.removeListener(_onGlobalChanged); Global.scanningRateSS.removeListener(_onGlobalChanged);
-    Global.testDurationDD?.removeListener(_onGlobalChanged); Global.testDurationHH.removeListener(_onGlobalChanged); Global.testDurationMM.removeListener(_onGlobalChanged); Global.testDurationSS.removeListener(_onGlobalChanged);
-    Global.isDarkMode.removeListener(_onThemeChanged);
+  // --- EXPORT DIALOGS ---
+  // --- EXPORT DIALOGS (MODIFIED PORTION) ---
 
-    // Close the session-specific database opened by this page
-    if (_isDatabaseInitialized && _database.isOpen) {
-      try {
-        _database.close();
-        LogPage.addLog('[$_currentTime] [DISPOSE] Session database for OpenFilePage explicitly closed.');
-      } catch (e) {
-        LogPage.addLog('[$_currentTime] [DISPOSE] Error closing session database for OpenFilePage: $e');
+  /// Step 1 of Export: Show Date Picker with Editable Time Fields.
+  /// On success, it calls Step 2: _showExportOptionsDialog.
+  Future<void> _showExportDateRangePicker(BuildContext context, bool isDarkMode, DateTime initialStart, DateTime initialEnd) async {
+    DateTime selectedStartDate = initialStart;
+    DateTime selectedEndDate = initialEnd;
+
+    // Controllers for editable time fields
+    final startHhController = TextEditingController(text: DateFormat('HH').format(initialStart));
+    final startMmController = TextEditingController(text: DateFormat('mm').format(initialStart));
+    final startSsController = TextEditingController(text: DateFormat('ss').format(initialStart));
+    final endHhController = TextEditingController(text: DateFormat('HH').format(initialEnd));
+    final endMmController = TextEditingController(text: DateFormat('mm').format(initialEnd));
+    final endSsController = TextEditingController(text: DateFormat('ss').format(initialEnd));
+
+    final range = await showDialog<Map<String, DateTime>>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+              title: Text('Select Export Range', style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode))),
+              content: SizedBox(
+                width: MediaQuery.of(context).size.width * 0.35, // Adjust width for better layout
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('From', style: GoogleFonts.roboto(fontWeight: FontWeight.bold, fontSize: 16, color: ThemeColors.getColor('dialogText', isDarkMode))),
+                    const SizedBox(height: 8),
+                    // START DATE AND TIME ROW
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        // Date Picker (uses your existing helper)
+                        Expanded(
+                          flex: 3,
+                          child: _buildDateTimePickerField(
+                            label: 'Start Date', icon: Icons.calendar_today_outlined, isDarkMode: isDarkMode,
+                            value: DateFormat('dd MMM yyyy').format(selectedStartDate),
+                            onTap: () async {
+                              final pickedDate = await showDatePicker(context: context, initialDate: selectedStartDate, firstDate: initialStart.subtract(const Duration(days: 3650)), lastDate: initialEnd.add(const Duration(days: 3650)));
+                              if (pickedDate != null) {
+                                // Update only the date part, preserving time from controllers
+                                setDialogState(() => selectedStartDate = DateTime(pickedDate.year, pickedDate.month, pickedDate.day));
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        // Editable Time Fields
+                        Expanded(
+                          flex: 2,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text("Start Time (HH:MM:SS)", style: TextStyle(fontSize: 12, color: ThemeColors.getColor('dialogSubText', isDarkMode), fontWeight: FontWeight.w500)),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  _buildTimeTextField(startHhController, 'HH', isDarkMode),
+                                  Padding(padding: const EdgeInsets.symmetric(horizontal: 4.0), child: Text(":", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: ThemeColors.getColor('dialogSubText', isDarkMode)))),
+                                  _buildTimeTextField(startMmController, 'MM', isDarkMode),
+                                  Padding(padding: const EdgeInsets.symmetric(horizontal: 4.0), child: Text(":", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: ThemeColors.getColor('dialogSubText', isDarkMode)))),
+                                  _buildTimeTextField(startSsController, 'SS', isDarkMode),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    Text('To', style: GoogleFonts.roboto(fontWeight: FontWeight.bold, fontSize: 16, color: ThemeColors.getColor('dialogText', isDarkMode))),
+                    const SizedBox(height: 8),
+                    // END DATE AND TIME ROW
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        // Date Picker
+                        Expanded(
+                          flex: 3,
+                          child: _buildDateTimePickerField(
+                            label: 'End Date', icon: Icons.calendar_today_outlined, isDarkMode: isDarkMode,
+                            value: DateFormat('dd MMM yyyy').format(selectedEndDate),
+                            onTap: () async {
+                              final pickedDate = await showDatePicker(context: context, initialDate: selectedEndDate, firstDate: initialStart.subtract(const Duration(days: 3650)), lastDate: initialEnd.add(const Duration(days: 3650)));
+                              if (pickedDate != null) {
+                                setDialogState(() => selectedEndDate = DateTime(pickedDate.year, pickedDate.month, pickedDate.day));
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        // Editable Time Fields
+                        Expanded(
+                          flex: 2,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text("End Time (HH:MM:SS)", style: TextStyle(fontSize: 12, color: ThemeColors.getColor('dialogSubText', isDarkMode), fontWeight: FontWeight.w500)),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  _buildTimeTextField(endHhController, 'HH', isDarkMode),
+                                  Padding(padding: const EdgeInsets.symmetric(horizontal: 4.0), child: Text(":", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: ThemeColors.getColor('dialogSubText', isDarkMode)))),
+                                  _buildTimeTextField(endMmController, 'MM', isDarkMode),
+                                  Padding(padding: const EdgeInsets.symmetric(horizontal: 4.0), child: Text(":", style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: ThemeColors.getColor('dialogSubText', isDarkMode)))),
+                                  _buildTimeTextField(endSsController, 'SS', isDarkMode),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
+                TextButton(
+                  child: Text('Next', style: TextStyle(color: ThemeColors.getColor('submitButton', isDarkMode), fontWeight: FontWeight.bold)),
+                  onPressed: () {
+                    try {
+                      // Parse time from controllers, default to 0 if empty or invalid
+                      final startH = int.tryParse(startHhController.text) ?? 0;
+                      final startM = int.tryParse(startMmController.text) ?? 0;
+                      final startS = int.tryParse(startSsController.text) ?? 0;
+
+                      final endH = int.tryParse(endHhController.text) ?? 0;
+                      final endM = int.tryParse(endMmController.text) ?? 0;
+                      final endS = int.tryParse(endSsController.text) ?? 0;
+
+                      // Basic validation for time values
+                      if (startH < 0 || startH > 23 || startM < 0 || startM > 59 || startS < 0 || startS > 59 ||
+                          endH < 0 || endH > 23 || endM < 0 || endM > 59 || endS < 0 || endS > 59) {
+                        MessageUtils.showMessage(context, "Invalid time format. Please use HH (0-23), MM (0-59), SS (0-59).", isError: true);
+                        return;
+                      }
+
+                      // Combine selected date with parsed time
+                      final finalStartDate = DateTime(selectedStartDate.year, selectedStartDate.month, selectedStartDate.day, startH, startM, startS);
+                      final finalEndDate = DateTime(selectedEndDate.year, selectedEndDate.month, selectedEndDate.day, endH, endM, endS);
+
+                      if (finalEndDate.isBefore(finalStartDate)) {
+                        MessageUtils.showMessage(context, "End date/time cannot be before start date/time.", isError: true);
+                        return;
+                      }
+                      Navigator.of(dialogContext).pop({'start': finalStartDate, 'end': finalEndDate});
+                    } catch (e) {
+                      MessageUtils.showMessage(context, "Failed to parse time. Please check your input.", isError: true);
+                    }
+                  },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    ).whenComplete(() {
+      // IMPORTANT: Dispose controllers to prevent memory leaks
+      startHhController.dispose();
+      startMmController.dispose();
+      startSsController.dispose();
+      endHhController.dispose();
+      endMmController.dispose();
+      endSsController.dispose();
+    });
+
+    // If user cancelled the dialog, stop.
+    if (range == null) return;
+
+    // Proceed to the next dialog for header/footer options
+    _showExportOptionsDialog(context, isDarkMode, range['start']!, range['end']!);
+  }
+
+  /// NEW HELPER WIDGET for creating a single time input field (HH, MM, or SS).
+  Widget _buildTimeTextField(TextEditingController controller, String hint, bool isDarkMode) {
+    return SizedBox(
+      width: 55, // Fixed width for each time segment
+      child: TextField(
+        controller: controller,
+        textAlign: TextAlign.center,
+        keyboardType: TextInputType.number,
+        inputFormatters: [
+          FilteringTextInputFormatter.digitsOnly,
+          LengthLimitingTextInputFormatter(2),
+        ],
+        style: GoogleFonts.firaCode(fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode)),
+        decoration: InputDecoration(
+          hintText: hint,
+          hintStyle: TextStyle(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.7), fontSize: 12),
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.8)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: BorderSide(color: Theme.of(context).primaryColor),
+          ),
+        ),
+      ),
+    );
+  }
+
+
+  Future<void> _showExportOptionsDialog(BuildContext context, bool isDarkMode, DateTime selectedStart, DateTime selectedEnd) async {
+    // Create controllers specifically for this dialog instance
+    final headerLine1Controller = TextEditingController();
+    final headerLine2Controller = TextEditingController();
+    final headerLine3Controller = TextEditingController();
+    final headerLine4Controller = TextEditingController();
+    final footerLine1Controller = TextEditingController();
+    final footerLine2Controller = TextEditingController();
+    final footerLine3Controller = TextEditingController();
+    final footerLine4Controller = TextEditingController();
+
+    final options = await showDialog<Map<String, List<String>>>(
+      context: context,
+      barrierDismissible: false, // User must choose an action
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+          title: Text('Add Export Details', style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode))),
+          content: SingleChildScrollView(
+            child: SizedBox(
+              width: MediaQuery.of(context).size.width * 0.4, // Make dialog wider
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text("Header Information", style: GoogleFonts.roboto(fontWeight: FontWeight.w600, fontSize: 16, color: ThemeColors.getColor('dialogText', isDarkMode))),
+                  const SizedBox(height: 8),
+                  _buildEditableField('Header Line 1...', headerLine1Controller, isDarkMode),
+                  const SizedBox(height: 8),
+                  _buildEditableField('Header Line 2...', headerLine2Controller, isDarkMode),
+                  const SizedBox(height: 8),
+                  _buildEditableField('Header Line 3...', headerLine3Controller, isDarkMode),
+                  const SizedBox(height: 8),
+                  _buildEditableField('Header Line 4...', headerLine4Controller, isDarkMode),
+                  const Divider(height: 24),
+                  Text("Footer Notes / Remarks", style: GoogleFonts.roboto(fontWeight: FontWeight.w600, fontSize: 16, color: ThemeColors.getColor('dialogText', isDarkMode))),
+                  const SizedBox(height: 8),
+                  _buildEditableField('Footer Line 1...', footerLine1Controller, isDarkMode),
+                  const SizedBox(height: 8),
+                  _buildEditableField('Footer Line 2...', footerLine2Controller, isDarkMode),
+                  const SizedBox(height: 8),
+                  _buildEditableField('Footer Line 3...', footerLine3Controller, isDarkMode),
+                  const SizedBox(height: 8),
+                  _buildEditableField('Footer Line 4...', footerLine4Controller, isDarkMode),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.file_download_done),
+              label: const Text('Confirm & Export'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: ThemeColors.getColor('submitButton', isDarkMode),
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () {
+                final headers = [
+                  headerLine1Controller.text,
+                  headerLine2Controller.text,
+                  headerLine3Controller.text,
+                  headerLine4Controller.text,
+                ];
+                final footers = [
+                  footerLine1Controller.text,
+                  footerLine2Controller.text,
+                  footerLine3Controller.text,
+                  footerLine4Controller.text,
+                ];
+                Navigator.of(dialogContext).pop({'headers': headers, 'footers': footers});
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    // If user cancelled the options dialog, stop.
+    if (options == null) return;
+
+    // Filter the data based on the selected range
+    final List<Map<String, dynamic>> filteredData = _tableData.where((row) {
+      final timestamp = _parseTimestamp(row['AbsDate'], row['AbsTime']);
+      return timestamp != null && !timestamp.isBefore(selectedStart) && !timestamp.isAfter(selectedEnd);
+    }).toList();
+
+    if (filteredData.isEmpty) {
+      MessageUtils.showMessage(context, "No data found in the selected range.", isError: false);
+      return;
+    }
+
+    // Proceed with export using all the collected data
+    final String mode = Global.selectedMode.value;
+    final Uint8List? graphImg = (mode == 'Graph' || mode == 'Combined') ? await _captureGraph(isDarkMode) : null;
+
+    ExportUtils.exportBasedOnMode(
+      context: context,
+      mode: mode,
+      tableData: filteredData,
+      fileName: _fileNameController.text,
+      graphImage: graphImg,
+      channelNames: _channelNames,
+      firstTimestamp: selectedStart,
+      lastTimestamp: selectedEnd,
+      channelSetupData: _channelSetupData,
+      headerLines: options['headers']!, // Pass headers
+      footerLines: options['footers']!, // Pass footers
+    );
+
+    // Dispose controllers after use
+    headerLine1Controller.dispose();
+    headerLine2Controller.dispose();
+    headerLine3Controller.dispose();
+    headerLine4Controller.dispose();
+    footerLine1Controller.dispose();
+    footerLine2Controller.dispose();
+    footerLine3Controller.dispose();
+    footerLine4Controller.dispose();
+  }
+
+  /// Helper for building a tappable date/time field in a dialog.
+  Widget _buildDateTimePickerField({
+    required String label, required IconData icon, required String value, required VoidCallback onTap, required bool isDarkMode,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: TextStyle(fontSize: 12, color: ThemeColors.getColor('dialogSubText', isDarkMode), fontWeight: FontWeight.w500)),
+        const SizedBox(height: 4),
+        InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.8)),
+            ),
+            child: Row(
+              children: [
+                Icon(icon, size: 18, color: ThemeColors.getColor('dialogSubText', isDarkMode)),
+                const SizedBox(width: 10),
+                Text(value, style: GoogleFonts.firaCode(fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode))),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Helper for building an editable text field in a dialog.
+  Widget _buildEditableField(String hintText, TextEditingController controller, bool isDarkMode) {
+    return TextField(
+      controller: controller,
+      style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13),
+      decoration: InputDecoration(
+        hintText: hintText,
+        hintStyle: TextStyle(color: ThemeColors.getColor('dialogSubText', isDarkMode).withOpacity(0.7), fontSize: 12),
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.6))),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: Theme.of(context).primaryColor)),
+      ),
+    );
+  }
+
+
+  // --- UI WIDGETS (UNCHANGED FROM HERE) ---
+
+  Widget _buildExitButton(bool isDarkMode) {
+    return TextButton.icon(
+      icon: const Icon(Icons.exit_to_app_rounded, size: 18),
+      label: const Text("Exit"),
+      onPressed: () => Navigator.pushAndRemoveUntil(context, MaterialPageRoute(builder: (context) => const HomePage()), (Route<dynamic> route) => false),
+      style: TextButton.styleFrom(
+        foregroundColor: ThemeColors.getColor('dialogText', isDarkMode),
+        backgroundColor: ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.8),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.5)),
+        textStyle: GoogleFonts.roboto(fontWeight: FontWeight.w500, fontSize: 14),
+      ),
+    );
+  }
+
+  Widget _buildLeftSection(bool isDarkMode) {
+    return Card(
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      color: ThemeColors.getColor('cardBackground', isDarkMode),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
+      child: _buildDataTable(isDarkMode),
+    );
+  }
+
+  Widget _buildRightSection(bool isDarkMode) {
+    return Card(
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      color: ThemeColors.getColor('cardBackground', isDarkMode),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.7))),
+      child: Column(
+        children: [
+          _buildChannelLegend(isDarkMode),
+          const Divider(height: 1),
+          Expanded(child: Padding(padding: const EdgeInsets.only(top: 8.0, right: 8.0), child: _buildRealTimeGraph(isDarkMode))),
+          const Divider(height: 1),
+          _buildGraphToolbar(isDarkMode),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRealTimeGraph(bool isDarkMode) {
+    final textColor = ThemeColors.getColor('dialogText', isDarkMode);
+    final axisLineColor = ThemeColors.getColor('cardBorder', isDarkMode);
+    List<CartesianSeries> series = [];
+    List<PlotBand> plotBands = [];
+
+    final visibleChannels = _channelNames.entries.where((entry) => _visibleGraphChannels.contains(entry.key)).toList();
+
+    String yAxisTitleText = 'Value';
+    if (visibleChannels.length == 1) {
+      final channelName = visibleChannels.first.value;
+      yAxisTitleText = '$channelName (${_getUnitForChannel(channelName)})';
+    } else if (visibleChannels.isNotEmpty) {
+      yAxisTitleText = 'Value (Mixed Units)';
+    }
+
+    for (var entry in visibleChannels) {
+      final channelIndex = entry.key;
+      final channelName = entry.value;
+      final data = _graphData[channelIndex] ?? [];
+      final setupChannel = _channelSetupData[channelName];
+
+      if (setupChannel != null && setupChannel.targetAlarmMax != null && setupChannel.targetAlarmMin != null) {
+        final alarmColor = Color(setupChannel.targetAlarmColour);
+        if (setupChannel.targetAlarmMax! > 0) plotBands.add(PlotBand(start: setupChannel.targetAlarmMax!, end: setupChannel.targetAlarmMax!, borderWidth: 1.5, borderColor: alarmColor.withOpacity(0.8), dashArray: const <double>[5, 5]));
+        if (setupChannel.targetAlarmMin! > 0) plotBands.add(PlotBand(start: setupChannel.targetAlarmMin!, end: setupChannel.targetAlarmMin!, borderWidth: 1.5, borderColor: alarmColor.withOpacity(0.8), dashArray: const <double>[5, 5]));
+      }
+
+      series.add(LineSeries<ChartData, DateTime>(
+        animationDuration: 0, dataSource: data, name: channelName,
+        color: _graphLineColours[channelIndex] ?? _getDefaultColor(channelIndex),
+        xValueMapper: (ChartData d, _) => d.time,
+        yValueMapper: (ChartData d, _) => d.value,
+        markerSettings: MarkerSettings(isVisible: _showDataPoints, height: 3, width: 3, color: _graphLineColours[channelIndex]),
+      ));
+
+      if (_showPeakValue) {
+        final peakData = _globalPeakValues[channelIndex];
+        if (peakData != null) {
+          series.add(ScatterSeries<ChartData, DateTime>(
+            dataSource: [peakData], name: '$channelName (Peak)',
+            color: _graphLineColours[channelIndex] ?? _getDefaultColor(channelIndex),
+            markerSettings: const MarkerSettings(isVisible: true, height: 10, width: 10, shape: DataMarkerType.circle, borderWidth: 2, borderColor: Colors.black),
+            xValueMapper: (ChartData d, _) => d.time,
+            yValueMapper: (ChartData d, _) => d.value,
+            dataLabelSettings: DataLabelSettings(
+              isVisible: true,
+              labelAlignment: ChartDataLabelAlignment.top,
+              builder: (dynamic data, dynamic point, dynamic series, int pointIndex, int seriesIndex) {
+                final decimalPlaces = setupChannel?.decimalPlaces ?? 2;
+                return Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(color: _graphLineColours[channelIndex], borderRadius: BorderRadius.circular(4)),
+                  child: Text(peakData.value!.toStringAsFixed(decimalPlaces), style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                );
+              },
+            ),
+          ));
+        }
       }
     }
-    _isDatabaseInitialized = false;
 
-    LogPage.addLog('[$_currentTime] [DISPOSE] OpenFilePage disposed.');
-    super.dispose();
+    return RepaintBoundary(
+      key: _graphKey,
+      child: Container(
+        color: ThemeColors.getColor('cardBackground', isDarkMode),
+        child: SfCartesianChart(
+          primaryXAxis: DateTimeAxis(title: AxisTitle(text: 'Time (HH:mm:ss)', textStyle: TextStyle(color: textColor, fontSize: 12)), majorGridLines: MajorGridLines(width: 0.5, color: axisLineColor.withOpacity(0.5)), axisLine: AxisLine(width: 1, color: axisLineColor), labelStyle: TextStyle(color: textColor, fontSize: 10), minimum: _chartVisibleMin, maximum: _chartVisibleMax, dateFormat: DateFormat('HH:mm:ss'), intervalType: DateTimeIntervalType.auto),
+          primaryYAxis: NumericAxis(title: AxisTitle(text: yAxisTitleText, textStyle: TextStyle(color: textColor, fontSize: 12)), majorGridLines: MajorGridLines(width: 0.5, color: axisLineColor.withOpacity(0.5)), axisLine: AxisLine(width: 1, color: axisLineColor), labelStyle: TextStyle(color: textColor, fontSize: 10), plotBands: plotBands),
+          series: series,
+          legend: Legend(isVisible: false),
+          trackballBehavior: _trackballBehavior,
+          zoomPanBehavior: _zoomPanBehavior,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGraphToolbar(bool isDarkMode) {
+    final iconColor = ThemeColors.getColor('dialogSubText', isDarkMode);
+    final activeColor = Theme.of(context).primaryColor;
+    final activeBgColor = activeColor.withOpacity(0.2);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      height: 48,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          _buildSegmentNavigator(isDarkMode),
+          Row(
+            children: [
+              TextButton(onPressed: () => _showChannelFilterDialog(isDarkMode), child: const Text("Select Channel")),
+              const SizedBox(width: 8),
+              Container(decoration: BoxDecoration(color: _showPeakValue ? activeBgColor : Colors.transparent, borderRadius: BorderRadius.circular(8)), child: IconButton(icon: Icon(Icons.show_chart, color: _showPeakValue ? activeColor : iconColor), onPressed: () => setState(() => _showPeakValue = !_showPeakValue), tooltip: 'Show Peak Value')),
+              const SizedBox(width: 8),
+              Container(decoration: BoxDecoration(color: _showDataPoints ? activeBgColor : Colors.transparent, borderRadius: BorderRadius.circular(8)), child: IconButton(icon: Icon(Icons.grain, color: _showDataPoints ? activeColor : iconColor), onPressed: () => setState(() => _showDataPoints = !_showDataPoints), tooltip: 'Toggle Data Points')),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSegmentNavigator(bool isDarkMode) {
+    if (_firstDataTimestamp == null) return const SizedBox.shrink();
+
+    final bool canGoOlder = _currentSegment > 1;
+    final bool canGoNewer = _currentSegment < _maxSegments;
+    final navButtonColor = isDarkMode ? Colors.white : Theme.of(context).primaryColor;
+    final disabledColor = Colors.grey.shade600;
+
+    return Row(
+      children: [
+        SizedBox(height: 30, child: TextButton(onPressed: canGoOlder ? () => _setSegment(_currentSegment - 1) : null, child: Text("< Older", style: TextStyle(color: canGoOlder ? navButtonColor : disabledColor)))),
+        SizedBox(height: 30, child: TextButton(onPressed: null, child: Text("Segment $_currentSegment/$_maxSegments"))),
+        SizedBox(height: 30, child: TextButton(onPressed: canGoNewer ? () => _setSegment(_currentSegment + 1) : null, child: Text("Newer >", style: TextStyle(color: canGoNewer ? navButtonColor : disabledColor)))),
+      ],
+    );
+  }
+
+  void _showChannelFilterDialog(bool isDarkMode) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        final tempVisibleChannels = {..._visibleGraphChannels};
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+              title: Text('Select Channels', style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode))),
+              content: SizedBox(
+                width: 250,
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: _channelNames.length,
+                  itemBuilder: (context, index) {
+                    final entry = _channelNames.entries.elementAt(index);
+                    final channelId = entry.key;
+                    final channelName = entry.value;
+                    return CheckboxListTile(title: Text(channelName, style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode))), value: tempVisibleChannels.contains(channelId), onChanged: (bool? value) => setDialogState(() => value == true ? tempVisibleChannels.add(channelId) : tempVisibleChannels.remove(channelId)));
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
+                TextButton(child: Text('Apply', style: TextStyle(color: ThemeColors.getColor('submitButton', isDarkMode))), onPressed: () { setState(() => _visibleGraphChannels = tempVisibleChannels); Navigator.of(dialogContext).pop(); }),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildChannelLegend(bool isDarkMode) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: _channelNames.entries.map((entry) {
+            final channelIndex = entry.key;
+            final channelName = entry.value;
+            final isVisible = _visibleGraphChannels.contains(channelIndex);
+            return InkWell(
+              onTap: () => _showColorPicker(channelIndex, isDarkMode),
+              borderRadius: BorderRadius.circular(4),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                child: Row(
+                  children: [
+                    Container(width: 12, height: 12, decoration: BoxDecoration(color: isVisible ? (_graphLineColours[channelIndex] ?? _getDefaultColor(channelIndex)) : Colors.grey, borderRadius: BorderRadius.circular(2))),
+                    const SizedBox(width: 8),
+                    Text(channelName, style: TextStyle(fontSize: 12, color: isVisible ? ThemeColors.getColor('dialogText', isDarkMode) : Colors.grey, decoration: isVisible ? TextDecoration.none : TextDecoration.lineThrough)),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDataTable(bool isDarkMode) {
+    if (_isLoading && _tableData.isEmpty) return Center(child: CircularProgressIndicator(color: ThemeColors.getColor('submitButton', isDarkMode)));
+    if (_fetchError != null && _tableData.isEmpty) return Center(child: Text(_fetchError!, style: TextStyle(color: Colors.red.shade400)));
+    if (_tableData.isEmpty) return const Center(child: Text('No tabular data available.'));
+
+    final headerStyle = GoogleFonts.roboto(fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13);
+    final cellStyle = GoogleFonts.firaCode(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12);
+
+    const double snoColWidth = 80.0;
+    const double timeColWidth = 100.0;
+    const double dateColWidth = 120.0;
+    const double channelColWidth = 150.0;
+
+    final double totalWidth = snoColWidth + timeColWidth + dateColWidth + (_channelNames.length * channelColWidth);
+
+    final List<DataColumn> columns = [
+      DataColumn(label: SizedBox(width: snoColWidth, child: Padding(padding: const EdgeInsets.only(left: 16.0), child: Text('S.No', style: headerStyle)))),
+      DataColumn(label: SizedBox(width: timeColWidth, child: Text('Time', style: headerStyle))),
+      DataColumn(label: SizedBox(width: dateColWidth, child: Text('Date', style: headerStyle))),
+      ..._channelNames.entries.map((entry) {
+        final channelName = entry.value;
+        final unit = _getUnitForChannel(channelName);
+        return DataColumn(label: SizedBox(width: channelColWidth, child: Text('$channelName ($unit)', style: headerStyle, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center)));
+      }),
+    ];
+
+    return Column(
+      children: [
+        Scrollbar(
+          controller: _tableHeaderHorizontalScrollController,
+          thumbVisibility: true,
+          child: SingleChildScrollView(
+            controller: _tableHeaderHorizontalScrollController,
+            scrollDirection: Axis.horizontal,
+            child: DataTable(
+              headingRowHeight: 48,
+              dataRowMinHeight: 0,
+              dataRowMaxHeight: 0,
+              columnSpacing: 0,
+              horizontalMargin: 0,
+              headingRowColor: MaterialStateColor.resolveWith((states) => ThemeColors.getColor('tableHeaderBackground', isDarkMode)),
+              columns: columns,
+              rows: const [],
+            ),
+          ),
+        ),
+        Expanded(
+          child: Scrollbar(
+            controller: _tableVerticalScrollController,
+            thumbVisibility: true,
+            child: SingleChildScrollView(
+              controller: _tableVerticalScrollController,
+              scrollDirection: Axis.vertical,
+              child: Scrollbar(
+                controller: _tableBodyHorizontalScrollController,
+                thumbVisibility: true,
+                notificationPredicate: (notification) => notification.depth == 1,
+                child: SingleChildScrollView(
+                  controller: _tableBodyHorizontalScrollController,
+                  scrollDirection: Axis.horizontal,
+                  child: SizedBox(
+                    width: totalWidth,
+                    child: DataTable(
+                      headingRowHeight: 0,
+                      dataRowMinHeight: 40,
+                      dataRowMaxHeight: 40,
+                      columnSpacing: 0,
+                      horizontalMargin: 0,
+                      columns: columns,
+                      rows: _tableData.asMap().entries.map((entry) {
+                        final int index = entry.key;
+                        final Map<String, dynamic> data = entry.value;
+                        return DataRow(
+                          color: MaterialStateProperty.resolveWith<Color?>((states) => index.isOdd ? ThemeColors.getColor('serialPortTableRowOdd', isDarkMode) : null),
+                          cells: [
+                            DataCell(SizedBox(width: snoColWidth, child: Padding(padding: const EdgeInsets.only(left: 16.0), child: Text((data['SNo'] as num?)?.toInt().toString() ?? '', style: cellStyle)))),
+                            DataCell(SizedBox(width: timeColWidth, child: Text(data['AbsTime'] as String? ?? '', style: cellStyle))),
+                            DataCell(SizedBox(width: dateColWidth, child: Text((data['AbsDate'] as String?)?.split(' ').first ?? '', style: cellStyle))),
+                            ..._channelNames.keys.map((channelIndex) {
+                              double? value = (data['AbsPer$channelIndex'] as num?)?.toDouble();
+                              final setupChannel = _channelSetupData[_channelNames[channelIndex]];
+                              String displayValue = value == null ? '-' : value.toStringAsFixed(setupChannel?.decimalPlaces ?? 2);
+                              return DataCell(SizedBox(width: channelColWidth, child: Center(child: Text(displayValue, style: cellStyle))));
+                            }),
+                          ],
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildErrorState(bool isDarkMode) {
+    return Scaffold(
+      backgroundColor: ThemeColors.getColor('appBackground', isDarkMode),
+      body: SafeArea(child: Center(child: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.error_outline_rounded, color: ThemeColors.getColor('errorText', isDarkMode), size: 44), const SizedBox(height: 12),
+          Text(_fetchError ?? "No data record selected or an error occurred.", textAlign: TextAlign.center, style: GoogleFonts.roboto(fontSize: 16, color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500)),
+          const SizedBox(height: 18),
+          ElevatedButton.icon(
+            icon: Icon(Icons.refresh_rounded, color: Colors.white, size: 18),
+            label: Text("Retry / Re-initialize", style: GoogleFonts.roboto(color: Colors.white, fontSize: 13)),
+            style: ElevatedButton.styleFrom(backgroundColor: ThemeColors.getColor('submitButton', isDarkMode), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10)),
+            onPressed: () => _initializeAndFetchData(),
+          )
+        ]),
+      ))),
+    );
+  }
+
+  // --- HELPERS & UTILS ---
+  String _getUnitForChannel(String channelName) {
+    return _channelSetupData[channelName]?.unit ?? '%';
+  }
+
+  void _showColorPicker(int channelIndex, bool isDarkMode) {
+    Color currentColor = _graphLineColours[channelIndex] ?? _getDefaultColor(channelIndex);
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+        title: Text('Select Color for ${_channelNames[channelIndex]}', style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode))),
+        content: SingleChildScrollView(child: ColorPicker(pickerColor: currentColor, onColorChanged: (c) => currentColor = c)),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+          TextButton(
+            child: Text('OK', style: TextStyle(color: ThemeColors.getColor('submitButton', isDarkMode))),
+            onPressed: () {
+              setState(() => _graphLineColours[channelIndex] = currentColor);
+              Navigator.of(context).pop();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Color _getDefaultColor(int index) {
+    final bool isDarkMode = Global.isDarkMode.value;
+    const List<Color> lightModeColors = [ Color(0xFF0288D1), Color(0xFFD81B60), Color(0xFF388E3C), Color(0xFFF57C00), Color(0xFF5E35B1), Color(0xFF00897B), Color(0xFFE53935), Color(0xFF3949AB), Color(0xFF7CB342), Color(0xFFC0CA33), ];
+    const List<Color> darkModeColors = [ Color(0xFF90CAF9), Color(0xFFF48FB1), Color(0xFFA5D6A7), Color(0xFFFFCC80), Color(0xFFB39DDB), Color(0xFF80CBC4), Color(0xFFEF9A9A), Color(0xFF9FA8DA), Color(0xFFC5E1A5), Color(0xFFE6EE9C), ];
+    return isDarkMode ? darkModeColors[(index - 1) % darkModeColors.length] : lightModeColors[(index - 1) % lightModeColors.length];
+  }
+
+  Future<Uint8List?> _captureGraph(bool isDarkMode) async {
+    try {
+      RenderRepaintBoundary? boundary = _graphKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null) return null;
+      ui.Image image = await boundary.toImage(pixelRatio: 3.0);
+      ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      return byteData?.buffer.asUint8List();
+    } catch (e) {
+      LogPage.addLog('[$_currentTime] [CAPTURE_GRAPH] Error: $e');
+      MessageUtils.showMessage(context, "Error capturing graph: $e", isError: true);
+      return null;
+    }
+  }
+
+  Widget _buildHeaderTextField(String label, TextEditingController controller, bool isDarkMode, {double width = 150}) {
+    return SizedBox(
+      width: width,
+      child: TextField(
+        readOnly: true,
+        controller: controller,
+        style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 13, fontWeight: FontWeight.w500),
+        decoration: InputDecoration(
+          labelText: label,
+          labelStyle: TextStyle(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12),
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.6))),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInfoDisplay(String label, List<TextEditingController> controllers, List<String> units, bool isDarkMode) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: TextStyle(fontSize: 11, color: ThemeColors.getColor('dialogSubText', isDarkMode), fontWeight: FontWeight.w500)),
+        const SizedBox(height: 4),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode).withOpacity(0.6)),
+          ),
+          child: Row(
+            children: List.generate(controllers.length, (index) {
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(controllers[index].text, style: GoogleFonts.firaCode(fontSize: 13, color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500)),
+                  Text(units[index], style: GoogleFonts.firaCode(fontSize: 12, color: ThemeColors.getColor('dialogSubText', isDarkMode))),
+                  if (index < controllers.length - 1)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 2.0),
+                      child: Text(':', style: GoogleFonts.firaCode(fontSize: 13, color: ThemeColors.getColor('dialogSubText', isDarkMode))),
+                    ),
+                ],
+              );
+            }),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildHeaderActionButton(bool isDarkMode, String label, IconData icon, VoidCallback onPressed) {
+    return TextButton.icon(
+      icon: Icon(icon, size: 16),
+      label: Text(label),
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        foregroundColor: ThemeColors.getColor('submitButton', isDarkMode),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        side: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.4)),
+      ),
+    );
+  }
+
+  void _openFloatingGraphWindow(bool isDarkMode) {
+    _windowCounter++;
+    final String windowId = 'Window $_windowCounter';
+
+    Map<String, List<Map<String, dynamic>>> dataByChannel = {};
+    for (var entry in _channelNames.entries) {
+      final channelIndex = entry.key;
+      dataByChannel[channelIndex.toString()] = _graphData[channelIndex]?.map((d) => {
+        'time': DateFormat('HH:mm:ss').format(d.time),
+        'value': d.value,
+        'Timestamp': d.time.millisecondsSinceEpoch.toDouble(),
+      }).toList() ?? [];
+    }
+
+    Map<String, Color> channelColors = {};
+    _graphLineColours.forEach((key, value) {
+      channelColors[key.toString()] = value;
+    });
+
+    Map<String, Channel> channelConfigs = {};
+    for (var entry in _channelNames.entries) {
+      final channelIndex = entry.key;
+      final channelName = entry.value;
+      final setup = _channelSetupData[channelName] ?? Channel(recNo: 0, channelName: '', startingCharacter: '', dataLength: 7, decimalPlaces: 2, unit: '%', chartMaximumValue: 100, chartMinimumValue: 0, graphLineColour: 0xFF000000, targetAlarmColour: 0xFFFF0000, targetAlarmMax: null, targetAlarmMin: null);
+      channelConfigs[channelIndex.toString()] = setup.copyWith(
+          channelName: channelName,
+          graphLineColour: _graphLineColours[channelIndex]?.value
+      );
+    }
+    OverlayEntry? overlayEntry;
+    overlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: 100.0 + (_windowCounter * 20),
+        top: 100.0 + (_windowCounter * 20),
+        child: SaveMultiWindowGraph(
+          key: ValueKey(windowId), windowId: windowId, initialData: dataByChannel, channelColors: channelColors,
+          channelConfigs: channelConfigs, entry: overlayEntry!,
+          onClose: (closedEntry) { _windowEntries.remove(closedEntry); },
+        ),
+      ),
+    );
+    Overlay.of(context).insert(overlayEntry);
+    _windowEntries.add(overlayEntry);
   }
 }

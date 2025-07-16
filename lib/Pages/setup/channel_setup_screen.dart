@@ -1,9 +1,7 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:libserialport/libserialport.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
-import '../../constants/colors.dart';
+
 import '../../constants/database_manager.dart';
 import '../../constants/global.dart';
 import '../../constants/theme.dart';
@@ -20,7 +18,7 @@ class ChannelSetupScreen extends StatefulWidget {
 
 class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTickerProviderStateMixin {
   List<Map<String, dynamic>> channels = [];
-  List<String> ports = [];
+  List<String> availablePorts = [];
   String? errorMessage;
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
@@ -31,6 +29,8 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
   final TextEditingController _scanTimeController = TextEditingController();
   bool _isDropdownHovered = false;
   bool _isRowHovered = false;
+
+  final List<int> standardBaudRates = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200];
 
   @override
   void initState() {
@@ -45,11 +45,16 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     _scaleAnimation = Tween<double>(begin: 0.9, end: 1.0).animate(
       CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
     );
-    _loadSavedPortDetails();
-    _fetchPorts();
+
+    _initializeSettings();
     fetchChannels();
     _animationController.forward();
     _logActivity('ChannelSetupScreen initialized');
+  }
+
+  Future<void> _initializeSettings() async {
+    await _loadSavedPortDetails();
+    await _fetchPorts();
   }
 
   @override
@@ -62,139 +67,84 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
   String get _currentTime => DateTime.now().toString().substring(0, 19);
 
   void _logActivity(String message) {
-    LogPage.addLog('[$_currentTime] $message');
+    LogPage.addLog('[$_currentTime] [ChannelSetup] $message');
   }
 
   Future<void> _loadSavedPortDetails() async {
     final savedSettings = await DatabaseManager().getComPortSettings();
-    setState(() {
-      Global.selectedPort.value = savedSettings?['selectedPort'] ?? 'No Ports Detected';
-      Global.baudRate.value = savedSettings?['baudRate'] ?? 9600;
-      Global.dataBits.value = savedSettings?['dataBits'] ?? 8;
-      Global.parity.value = savedSettings?['parity'] ?? 'None';
-      Global.stopBits.value = savedSettings?['stopBits'] ?? 1;
-    });
-    _logActivity('Loaded saved COM port settings: ${Global.selectedPort.value}');
+    if (savedSettings != null && mounted) {
+      setState(() {
+        Global.selectedPort.value = savedSettings['selectedPort'] ?? 'No Ports Detected';
+        Global.baudRate.value = savedSettings['baudRate'] ?? 9600;
+        Global.dataBits.value = savedSettings['dataBits'] ?? 8;
+        Global.parity.value = savedSettings['parity'] ?? 'None';
+        Global.stopBits.value = savedSettings['stopBits'] ?? 1;
+      });
+      _logActivity('Loaded saved settings: Port=${Global.selectedPort.value}, Baud=${Global.baudRate.value}, DataBits=${Global.dataBits.value}, Parity=${Global.parity.value}, StopBits=${Global.stopBits.value}');
+    } else {
+      _logActivity('No saved COM port settings found. Using default values.');
+    }
   }
 
-  Future<void> _savePortDetails(String portInfo, int baudRate, int dataBits, String parity, int stopBits) async {
+  Future<void> _savePortDetails() async {
+    final String portName = Global.selectedPort.value;
+    final int baudRate = Global.baudRate.value;
+    final int dataBits = Global.dataBits.value;
+    final String parity = Global.parity.value;
+    final int stopBits = Global.stopBits.value;
+
+    if (portName == 'No Ports Detected' || portName == 'Error Fetching Ports') {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Cannot save. No valid port selected.', style: GoogleFonts.montserrat()),
+        backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+      ));
+      _logActivity('Save aborted: Attempted to save invalid port ($portName).');
+      return;
+    }
+
     try {
-      // Extract only the port name (e.g., "COM6") from portInfo
-      final portName = portInfo.split(' → ')[0];
       await DatabaseManager().saveComPortSettings(portName, baudRate, dataBits, parity, stopBits);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Port settings saved successfully for $portName', style: GoogleFonts.montserrat(fontSize: 14)),
-          backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          margin: const EdgeInsets.all(16),
-        ),
-      );
-      _logActivity('Port settings saved: $portName');
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Port settings saved for $portName', style: GoogleFonts.montserrat()),
+        backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
+      ));
+      _logActivity('Port settings saved: Port=$portName, Baud=$baudRate, DataBits=$dataBits, Parity=$parity, StopBits=$stopBits');
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error saving port settings: $e', style: GoogleFonts.montserrat(fontSize: 14)),
-          backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          margin: const EdgeInsets.all(16),
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Error saving port settings: $e', style: GoogleFonts.montserrat()),
+        backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
+      ));
       _logActivity('Error saving port settings: $e');
     }
   }
 
   Future<void> _fetchPorts() async {
-    _logActivity('Attempting to fetch available COM ports...');
+    _logActivity('Fetching available COM ports...');
     try {
-      final availablePorts = SerialPort.availablePorts;
-      List<String> portDetails = [];
-      String? defaultPortInfo;
+      final portNames = SerialPort.availablePorts;
 
-      final String currentlySavedPortName = Global.selectedPort.value;
-
-      if (availablePorts.isNotEmpty) {
-        for (final portName in availablePorts) {
-          final port = SerialPort(portName);
-          String fullPortInfo;
-
-          if (port.openReadWrite()) {
-            final config = port.config;
-            String parityString;
-            switch (config.parity) {
-              case SerialPortParity.none: parityString = "None"; break;
-              case SerialPortParity.even: parityString = "Even"; break;
-              case SerialPortParity.odd: parityString = "Odd"; break;
-              default: parityString = "Unknown";
-            }
-            fullPortInfo = '$portName → Baud: ${config.baudRate}, Data Bits: ${config.bits}, Parity: $parityString, Stop Bits: ${config.stopBits}';
-            port.close();
-
-            portDetails.add(fullPortInfo);
-
-            if (portName == currentlySavedPortName) {
-              defaultPortInfo = fullPortInfo;
-              _logActivity('Found saved port $portName with current details: $fullPortInfo');
-            }
-          } else {
-            final lastError = SerialPort.lastError;
-            _logActivity('Failed to open port $portName to read config: ${lastError?.message ?? "Unknown error"}');
-          }
-        }
-
-        setState(() {
-          ports = portDetails;
-
-          if (defaultPortInfo != null && ports.contains(defaultPortInfo)) {
-            Global.selectedPort.value = defaultPortInfo;
-          } else if (ports.isNotEmpty) {
-            Global.selectedPort.value = ports[0];
-            _logActivity('Saved port not found or not openable. Defaulting to first available port: ${ports[0]}');
-          } else {
-            Global.selectedPort.value = 'No Ports Detected';
-            _logActivity('No ports detected. Global.selectedPort set to "No Ports Detected".');
-          }
-
-          final selectedPortValue = Global.selectedPort.value;
-          if (selectedPortValue.contains(' → ')) {
-            final parts = selectedPortValue.split(' → ');
-            final details = parts[1];
-            Global.baudRate.value = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
-            Global.dataBits.value = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
-            Global.parity.value = details.split(', ')[2].split(': ')[1];
-            Global.stopBits.value = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
-          } else {
-            Global.baudRate.value = 9600;
-            Global.dataBits.value = 8;
-            Global.parity.value = 'None';
-            Global.stopBits.value = 1;
-          }
-        });
-      } else {
-        setState(() {
-          ports = ['No Ports Detected'];
-          Global.selectedPort.value = 'No Ports Detected';
-          Global.baudRate.value = 9600;
-          Global.dataBits.value = 8;
-          Global.parity.value = 'None';
-          Global.stopBits.value = 1;
-        });
-        _logActivity('No COM ports found. Global.selectedPort set to "No Ports Detected".');
-      }
-      _logActivity('Finished fetching COM ports.');
-    } catch (e) {
       setState(() {
-        ports = ['Error Fetching Ports'];
-        Global.selectedPort.value = 'Error Fetching Ports';
-        Global.baudRate.value = 9600;
-        Global.dataBits.value = 8;
-        Global.parity.value = 'None';
-        Global.stopBits.value = 1;
+        availablePorts = portNames;
+        final String savedPortName = Global.selectedPort.value;
+
+        if (availablePorts.contains(savedPortName)) {
+          _logActivity('Saved port "$savedPortName" found and is available.');
+        } else if (availablePorts.isNotEmpty) {
+          final firstPortName = availablePorts.first;
+          Global.selectedPort.value = firstPortName;
+          _logActivity('Saved port "$savedPortName" not found. Defaulting to first available port: "$firstPortName".');
+        } else {
+          Global.selectedPort.value = 'No Ports Detected';
+          _logActivity('No COM ports detected.');
+        }
       });
+
+    } catch (e) {
       _logActivity('CRITICAL Error fetching ports: $e');
-      print('Error fetching ports: $e');
+      setState(() {
+        availablePorts = [];
+        Global.selectedPort.value = 'Error Fetching Ports';
+      });
     }
   }
 
@@ -219,7 +169,6 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
         errorMessage = 'Error fetching channels: $error';
       });
       _logActivity('Error fetching channels: $error');
-      print('Error fetching channels: $error');
     }
   }
 
@@ -260,18 +209,13 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
       for (int recNo in _selectedRecNos) {
         final channel = channels.firstWhere((c) => (c['RecNo'] as num).toInt() == recNo);
         await db.insert('SelectChannel', {
-          'RecNo': recNo,
-          'ChannelName': channel['ChannelName'],
-          'StartingCharacter': channel['StartingCharacter'],
-          'DataLength': channel['DataLength'],
-          'Unit': channel['Unit'],
-          'DecimalPlaces': channel['DecimalPlaces'],
+          'RecNo': recNo, 'ChannelName': channel['ChannelName'], 'StartingCharacter': channel['StartingCharacter'],
+          'DataLength': channel['DataLength'], 'Unit': channel['Unit'], 'DecimalPlaces': channel['DecimalPlaces'],
         });
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Selected channels saved: ${_selectedRecNos.length}',
-              style: GoogleFonts.montserrat(fontSize: 14)),
+          content: Text('Selected channels saved: ${_selectedRecNos.length}', style: GoogleFonts.montserrat(fontSize: 14)),
           backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -297,9 +241,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
     try {
       final db = await DatabaseManager().database;
       await db.delete('SelectChannel');
-      setState(() {
-        _selectedRecNos.clear();
-      });
+      setState(() { _selectedRecNos.clear(); });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Selections cleared', style: GoogleFonts.montserrat(fontSize: 14)),
@@ -347,7 +289,6 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
       _logActivity('AutoStart dialog opened. Current settings loaded.');
     } catch (e) {
       _logActivity('Error loading AutoStart settings for dialog: $e');
-      print('Error loading AutoStart settings: $e');
     }
 
     await showDialog(
@@ -355,10 +296,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(
-              maxWidth: 400,
-              minWidth: 300,
-            ),
+            constraints: const BoxConstraints(maxWidth: 400, minWidth: 300,),
             child: Card(
               elevation: ThemeColors.getColor('cardElevation', Global.isDarkMode.value),
               color: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
@@ -369,32 +307,12 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Configure AutoStart',
-                      style: GoogleFonts.montserrat(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w700,
-                        color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                      ),
-                    ),
+                    Text('Configure AutoStart', style: GoogleFonts.montserrat(fontSize: 20, fontWeight: FontWeight.w700, color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),)),
                     const SizedBox(height: 16),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        'Start Time',
-                        style: GoogleFonts.montserrat(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                        ),
-                      ),
-                      subtitle: Text(
-                        dialogStartTime != null ? dialogStartTime!.format(context) : 'Select time',
-                        style: GoogleFonts.montserrat(
-                          fontSize: 14,
-                          color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
-                        ),
-                      ),
+                      title: Text('Start Time', style: GoogleFonts.montserrat(fontSize: 16, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),)),
+                      subtitle: Text(dialogStartTime != null ? dialogStartTime!.format(context) : 'Select time', style: GoogleFonts.montserrat(fontSize: 14, color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),)),
                       onTap: () async {
                         final selectedTime = await showTimePicker(
                           context: context,
@@ -403,16 +321,11 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                             data: ThemeData(
                               colorScheme: ColorScheme(
                                 brightness: Global.isDarkMode.value ? Brightness.dark : Brightness.light,
-                                primary: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
-                                onPrimary: Colors.white,
-                                secondary: ThemeColors.getColor('cardBackground', Global.isDarkMode.value),
-                                onSecondary: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                                error: ThemeColors.getColor('errorText', Global.isDarkMode.value),
-                                onError: Colors.white,
-                                background: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
-                                onBackground: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                                surface: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
-                                onSurface: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                primary: ThemeColors.getColor('submitButton', Global.isDarkMode.value), onPrimary: Colors.white,
+                                secondary: ThemeColors.getColor('cardBackground', Global.isDarkMode.value), onSecondary: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                error: ThemeColors.getColor('errorText', Global.isDarkMode.value), onError: Colors.white,
+                                background: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value), onBackground: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                surface: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value), onSurface: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
                               ),
                             ),
                             child: child!,
@@ -427,21 +340,8 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                     ),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        'End Time',
-                        style: GoogleFonts.montserrat(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                          color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                        ),
-                      ),
-                      subtitle: Text(
-                        dialogEndTime != null ? dialogEndTime!.format(context) : 'Select time',
-                        style: GoogleFonts.montserrat(
-                          fontSize: 14,
-                          color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
-                        ),
-                      ),
+                      title: Text('End Time', style: GoogleFonts.montserrat(fontSize: 16, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),)),
+                      subtitle: Text(dialogEndTime != null ? dialogEndTime!.format(context) : 'Select time', style: GoogleFonts.montserrat(fontSize: 14, color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),)),
                       onTap: () async {
                         final selectedTime = await showTimePicker(
                           context: context,
@@ -450,16 +350,11 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                             data: ThemeData(
                               colorScheme: ColorScheme(
                                 brightness: Global.isDarkMode.value ? Brightness.dark : Brightness.light,
-                                primary: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
-                                onPrimary: Colors.white,
-                                secondary: ThemeColors.getColor('cardBackground', Global.isDarkMode.value),
-                                onSecondary: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                                error: ThemeColors.getColor('errorText', Global.isDarkMode.value),
-                                onError: Colors.white,
-                                background: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
-                                onBackground: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                                surface: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value),
-                                onSurface: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                primary: ThemeColors.getColor('submitButton', Global.isDarkMode.value), onPrimary: Colors.white,
+                                secondary: ThemeColors.getColor('cardBackground', Global.isDarkMode.value), onSecondary: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                error: ThemeColors.getColor('errorText', Global.isDarkMode.value), onError: Colors.white,
+                                background: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value), onBackground: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
+                                surface: ThemeColors.getColor('dialogBackground', Global.isDarkMode.value), onSurface: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
                               ),
                             ),
                             child: child!,
@@ -476,64 +371,24 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                       controller: dialogScanTimeController,
                       decoration: InputDecoration(
                         labelText: 'Scan Time (seconds)',
-                        labelStyle: GoogleFonts.montserrat(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide.none,
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(
-                            color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value),
-                            width: 1.5,
-                          ),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(
-                            color: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
-                            width: 2,
-                          ),
-                        ),
+                        labelStyle: GoogleFonts.montserrat(fontSize: 14, fontWeight: FontWeight.w500, color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none,),
+                        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', Global.isDarkMode.value), width: 1.5,),),
+                        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', Global.isDarkMode.value), width: 2,),),
                         filled: true,
                         fillColor: ThemeColors.getColor('textFieldBackground', Global.isDarkMode.value),
                         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                       ),
-                      style: GoogleFonts.montserrat(
-                        fontSize: 14,
-                        color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),
-                      ),
+                      style: GoogleFonts.montserrat(fontSize: 14, color: ThemeColors.getColor('dialogText', Global.isDarkMode.value),),
                       keyboardType: TextInputType.number,
-                      onChanged: (value) {
-                        if (value.isNotEmpty && !RegExp(r'^\d+$').hasMatch(value)) {
-                          dialogScanTimeController.text = value.replaceAll(RegExp(r'[^\d]'), '');
-                          dialogScanTimeController.selection = TextSelection.fromPosition(
-                            TextPosition(offset: dialogScanTimeController.text.length),
-                          );
-                        }
-                      },
                     ),
                     const SizedBox(height: 24),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.end,
                       children: [
                         TextButton(
-                          onPressed: () {
-                            Navigator.of(context).pop();
-                            _logActivity('AutoStart configuration cancelled.');
-                          },
-                          child: Text(
-                            'Cancel',
-                            style: GoogleFonts.montserrat(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),
-                            ),
-                          ),
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: Text('Cancel', style: GoogleFonts.montserrat(fontSize: 14, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogSubText', Global.isDarkMode.value),)),
                         ),
                         const SizedBox(width: 8),
                         _buildButton(
@@ -544,69 +399,27 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                             if (dialogStartTime != null && dialogEndTime != null && dialogScanTimeController.text.isNotEmpty) {
                               final scanTime = int.tryParse(dialogScanTimeController.text);
                               if (scanTime == null || scanTime <= 0) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Please enter a valid positive scan time',
-                                        style: GoogleFonts.montserrat(fontSize: 14)),
-                                    backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
-                                    behavior: SnackBarBehavior.floating,
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                    margin: const EdgeInsets.all(16),
-                                  ),
-                                );
-                                _logActivity('Failed to save AutoStart: Invalid scan time.');
+                                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Please enter a valid positive scan time', style: GoogleFonts.montserrat(fontSize: 14)), backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value), behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), margin: const EdgeInsets.all(16),));
                                 return;
                               }
                               try {
                                 final db = await DatabaseManager().database;
                                 await db.delete('AutoStart');
                                 await db.insert('AutoStart', {
-                                  'StartTimeHr': dialogStartTime!.hour,
-                                  'StartTimeMin': dialogStartTime!.minute,
-                                  'EndTimeHr': dialogEndTime!.hour,
-                                  'EndTimeMin': dialogEndTime!.minute,
+                                  'StartTimeHr': dialogStartTime!.hour, 'StartTimeMin': dialogStartTime!.minute,
+                                  'EndTimeHr': dialogEndTime!.hour, 'EndTimeMin': dialogEndTime!.minute,
                                   'ScanTimeSec': scanTime,
                                 });
                                 setState(() {
-                                  _startTime = dialogStartTime;
-                                  _endTime = dialogEndTime;
-                                  _scanTimeController.text = dialogScanTimeController.text;
+                                  _startTime = dialogStartTime; _endTime = dialogEndTime; _scanTimeController.text = dialogScanTimeController.text;
                                 });
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('AutoStart settings saved', style: GoogleFonts.montserrat(fontSize: 14)),
-                                    backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value),
-                                    behavior: SnackBarBehavior.floating,
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                    margin: const EdgeInsets.all(16),
-                                  ),
-                                );
+                                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('AutoStart settings saved', style: GoogleFonts.montserrat(fontSize: 14)), backgroundColor: ThemeColors.getColor('submitButton', Global.isDarkMode.value), behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), margin: const EdgeInsets.all(16),));
                                 Navigator.of(context).pop();
-                                _logActivity('AutoStart settings saved successfully.');
                               } catch (e) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Error saving AutoStart settings: $e',
-                                        style: GoogleFonts.montserrat(fontSize: 14)),
-                                    backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
-                                    behavior: SnackBarBehavior.floating,
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                    margin: const EdgeInsets.all(16),
-                                  ),
-                                );
-                                _logActivity('Error saving AutoStart settings: $e');
+                                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error saving AutoStart settings: $e', style: GoogleFonts.montserrat(fontSize: 14)), backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value), behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), margin: const EdgeInsets.all(16),));
                               }
                             } else {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text('Please fill all fields', style: GoogleFonts.montserrat(fontSize: 14)),
-                                  backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value),
-                                  behavior: SnackBarBehavior.floating,
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                  margin: const EdgeInsets.all(16),
-                                ),
-                              );
-                              _logActivity('Failed to save AutoStart: Fields not filled.');
+                              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Please fill all fields', style: GoogleFonts.montserrat(fontSize: 14)), backgroundColor: ThemeColors.getColor('errorText', Global.isDarkMode.value), behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), margin: const EdgeInsets.all(16),));
                             }
                           },
                         ),
@@ -644,7 +457,6 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                       _selectedRecNos.clear();
                     }
                   });
-                  _logActivity('All channels selection toggled: $value');
                 },
                 activeColor: ThemeColors.getColor('submitButton', isDarkMode),
                 checkColor: Colors.white,
@@ -652,61 +464,11 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                 side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode)),
               ),
             ),
-            SizedBox(
-              width: 50,
-              child: Text(
-                'S.No',
-                style: GoogleFonts.montserrat(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                  color: ThemeColors.getColor('dialogText', isDarkMode),
-                ),
-              ),
-            ),
-            Expanded(
-              flex: 2,
-              child: Text(
-                'Channel',
-                style: GoogleFonts.montserrat(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                  color: ThemeColors.getColor('dialogText', isDarkMode),
-                ),
-              ),
-            ),
-            SizedBox(
-              width: 60,
-              child: Text(
-                'Unit',
-                style: GoogleFonts.montserrat(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                  color: ThemeColors.getColor('dialogText', isDarkMode),
-                ),
-              ),
-            ),
-            Expanded(
-              flex: 1,
-              child: Text(
-                'Start Char',
-                style: GoogleFonts.montserrat(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                  color: ThemeColors.getColor('dialogText', isDarkMode),
-                ),
-              ),
-            ),
-            SizedBox(
-              width: 80,
-              child: Text(
-                'Actions',
-                style: GoogleFonts.montserrat(
-                  fontWeight: FontWeight.w700,
-                  fontSize: 15,
-                  color: ThemeColors.getColor('dialogText', isDarkMode),
-                ),
-              ),
-            ),
+            SizedBox(width: 50, child: Text('S.No', style: GoogleFonts.montserrat(fontWeight: FontWeight.w700, fontSize: 15, color: ThemeColors.getColor('dialogText', isDarkMode),),)),
+            Expanded(flex: 2, child: Text('Channel', style: GoogleFonts.montserrat(fontWeight: FontWeight.w700, fontSize: 15, color: ThemeColors.getColor('dialogText', isDarkMode),),)),
+            SizedBox(width: 60, child: Text('Unit', style: GoogleFonts.montserrat(fontWeight: FontWeight.w700, fontSize: 15, color: ThemeColors.getColor('dialogText', isDarkMode),),)),
+            Expanded(flex: 1, child: Text('Start Char', style: GoogleFonts.montserrat(fontWeight: FontWeight.w700, fontSize: 15, color: ThemeColors.getColor('dialogText', isDarkMode),),)),
+            SizedBox(width: 80, child: Text('Actions', style: GoogleFonts.montserrat(fontWeight: FontWeight.w700, fontSize: 15, color: ThemeColors.getColor('dialogText', isDarkMode),),)),
           ],
         ),
       ),
@@ -727,18 +489,8 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
               : index.isEven
               ? ThemeColors.getColor('cardBackground', isDarkMode)
               : ThemeColors.getColor('tableRowAlternate', isDarkMode),
-          border: Border(
-            bottom: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 0.5),
-          ),
-          boxShadow: _isRowHovered
-              ? [
-            BoxShadow(
-              color: ThemeColors.getColor('buttonHover', isDarkMode).withOpacity(0.2),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
-            ),
-          ]
-              : [],
+          border: Border(bottom: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 0.5),),
+          boxShadow: _isRowHovered ? [BoxShadow(color: ThemeColors.getColor('buttonHover', isDarkMode).withOpacity(0.2), blurRadius: 4, offset: const Offset(0, 2),),] : [],
         ),
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
         child: Row(
@@ -749,13 +501,9 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                 value: _selectedRecNos.contains(recNo),
                 onChanged: (value) {
                   setState(() {
-                    if (value == true) {
-                      _selectedRecNos.add(recNo);
-                    } else {
-                      _selectedRecNos.remove(recNo);
-                    }
+                    if (value == true) { _selectedRecNos.add(recNo); }
+                    else { _selectedRecNos.remove(recNo); }
                   });
-                  _logActivity('Channel $recNo selection toggled: $value');
                 },
                 activeColor: ThemeColors.getColor('submitButton', isDarkMode),
                 checkColor: Colors.white,
@@ -763,46 +511,10 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                 side: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode)),
               ),
             ),
-            SizedBox(
-              width: 50,
-              child: Text(
-                '$recNo',
-                style: GoogleFonts.montserrat(
-                  fontSize: 13,
-                  color: ThemeColors.getColor('cardText', isDarkMode),
-                ),
-              ),
-            ),
-            Expanded(
-              flex: 2,
-              child: Text(
-                channel['ChannelName'] ?? '',
-                style: GoogleFonts.montserrat(
-                  fontSize: 13,
-                  color: ThemeColors.getColor('cardText', isDarkMode),
-                ),
-              ),
-            ),
-            SizedBox(
-              width: 60,
-              child: Text(
-                channel['Unit'] ?? '',
-                style: GoogleFonts.montserrat(
-                  fontSize: 13,
-                  color: ThemeColors.getColor('cardText', isDarkMode),
-                ),
-              ),
-            ),
-            Expanded(
-              flex: 1,
-              child: Text(
-                channel['StartingCharacter'] ?? '',
-                style: GoogleFonts.montserrat(
-                  fontSize: 13,
-                  color: ThemeColors.getColor('cardText', isDarkMode),
-                ),
-              ),
-            ),
+            SizedBox(width: 50, child: Text('$recNo', style: GoogleFonts.montserrat(fontSize: 13, color: ThemeColors.getColor('cardText', isDarkMode),),)),
+            Expanded(flex: 2, child: Text(channel['ChannelName'] ?? '', style: GoogleFonts.montserrat(fontSize: 13, color: ThemeColors.getColor('cardText', isDarkMode),),)),
+            SizedBox(width: 60, child: Text(channel['Unit'] ?? '', style: GoogleFonts.montserrat(fontSize: 13, color: ThemeColors.getColor('cardText', isDarkMode),),)),
+            Expanded(flex: 1, child: Text(channel['StartingCharacter'] ?? '', style: GoogleFonts.montserrat(fontSize: 13, color: ThemeColors.getColor('cardText', isDarkMode),),)),
             SizedBox(
               width: 80,
               child: Row(
@@ -811,14 +523,9 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                   IconButton(
                     icon: Icon(Icons.edit, color: ThemeColors.getColor('submitButton', isDarkMode), size: 22),
                     onPressed: () async {
-                      _logActivity('Editing channel $recNo.');
-                      final result = await Navigator.push(
-                        context,
-                        MaterialPageRoute(builder: (context) => EditChannelScreen(channel: channel)),
-                      );
+                      final result = await Navigator.push(context, MaterialPageRoute(builder: (context) => EditChannelScreen(channel: channel)),);
                       if (result == true) {
                         fetchChannels();
-                        _logActivity('Channel $recNo edited and refreshed.');
                       }
                     },
                     tooltip: 'Edit Channel',
@@ -855,44 +562,17 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
           onTap: onTap,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),
-            padding: EdgeInsets.symmetric(
-              horizontal: isSmall ? 12 : (isProminent ? 28 : 20),
-              vertical: isSmall ? 8 : (isProminent ? 16 : 12),
-            ),
+            padding: EdgeInsets.symmetric(horizontal: isSmall ? 12 : (isProminent ? 28 : 20), vertical: isSmall ? 8 : (isProminent ? 16 : 12),),
             decoration: BoxDecoration(
-              gradient: isHovered
-                  ? LinearGradient(
-                colors: [
-                  ThemeColors.getColor('buttonHover', Global.isDarkMode.value),
-                  ThemeColors.getColor('buttonGradientEnd', Global.isDarkMode.value),
-                ],
-              )
-                  : gradient,
+              gradient: isHovered ? LinearGradient(colors: [ThemeColors.getColor('buttonHover', Global.isDarkMode.value), ThemeColors.getColor('buttonGradientEnd', Global.isDarkMode.value),]) : gradient,
               borderRadius: BorderRadius.circular(14),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(isProminent ? 0.3 : 0.2),
-                  blurRadius: isProminent ? 10 : 8,
-                  offset: const Offset(0, 4),
-                ),
-              ],
+              boxShadow: [BoxShadow(color: Colors.black.withOpacity(isProminent ? 0.3 : 0.2), blurRadius: isProminent ? 10 : 8, offset: const Offset(0, 4),),],
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (icon != null) ...[
-                  Icon(icon, color: Colors.white, size: isSmall ? 18 : 24),
-                  if (text.isNotEmpty) const SizedBox(width: 10),
-                ],
-                if (text.isNotEmpty)
-                  Text(
-                    text,
-                    style: GoogleFonts.montserrat(
-                      fontSize: isProminent ? 16 : 14,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+                if (icon != null) ...[Icon(icon, color: Colors.white, size: isSmall ? 18 : 24), if (text.isNotEmpty) const SizedBox(width: 10)],
+                if (text.isNotEmpty) Text(text, style: GoogleFonts.montserrat(fontSize: isProminent ? 16 : 14, color: Colors.white, fontWeight: FontWeight.w600,),),
               ],
             ),
           ),
@@ -919,14 +599,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          'Select Port',
-                          style: GoogleFonts.montserrat(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w700,
-                            color: ThemeColors.getColor('dialogText', isDarkMode),
-                          ),
-                        ),
+                        Text('Port Configuration', style: GoogleFonts.montserrat(fontSize: 22, fontWeight: FontWeight.w700, color: ThemeColors.getColor('dialogText', isDarkMode))),
                         const SizedBox(height: 16),
                         MouseRegion(
                           onEnter: (_) => setState(() => _isDropdownHovered = true),
@@ -939,146 +612,90 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                               padding: const EdgeInsets.all(20.0),
                               decoration: BoxDecoration(
                                 border: Border.all(
-                                  color: _isDropdownHovered
-                                      ? ThemeColors.getColor('submitButton', isDarkMode)
-                                      : ThemeColors.getColor('cardBorder', isDarkMode),
+                                  color: _isDropdownHovered ? ThemeColors.getColor('submitButton', isDarkMode) : ThemeColors.getColor('cardBorder', isDarkMode),
                                   width: _isDropdownHovered ? 2.0 : 1.5,
                                 ),
                                 borderRadius: BorderRadius.circular(16),
                               ),
-                              child: Row(
+                              child: Column(
                                 children: [
-                                  Expanded(
-                                    child: ValueListenableBuilder<String>(
-                                      valueListenable: Global.selectedPort,
-                                      builder: (context, selectedPortValue, _) {
-                                        final String displayValue = selectedPortValue.split(' → ')[0];
+                                  Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Expanded(
+                                        flex: 2,
+                                        child: ValueListenableBuilder<String>(
+                                          valueListenable: Global.selectedPort,
+                                          builder: (context, selectedPortValue, _) {
+                                            final String? currentSelection = availablePorts.contains(selectedPortValue) ? selectedPortValue : null;
 
-                                        String? currentSelectedPortInList;
-                                        if (ports.contains(selectedPortValue)) {
-                                          currentSelectedPortInList = selectedPortValue;
-                                        } else if (ports.isNotEmpty && selectedPortValue == 'No Ports Detected') {
-                                          currentSelectedPortInList = null;
-                                        } else if (ports.isNotEmpty && !ports.contains(selectedPortValue)) {
-                                          currentSelectedPortInList = null;
-                                        } else {
-                                          currentSelectedPortInList = null;
-                                        }
-
-                                        return DropdownButtonFormField<String>(
-                                          value: currentSelectedPortInList,
-                                          hint: Text(
-                                            displayValue,
-                                            style: GoogleFonts.montserrat(
-                                              fontSize: 14,
-                                              color: ThemeColors.getColor('dialogText', isDarkMode),
-                                            ),
-                                          ),
-                                          decoration: InputDecoration(
-                                            labelText: 'Port',
-                                            labelStyle: GoogleFonts.montserrat(
-                                              fontSize: 15,
-                                              fontWeight: FontWeight.w500,
-                                              color: ThemeColors.getColor('dialogSubText', isDarkMode),
-                                            ),
-                                            filled: true,
-                                            fillColor: ThemeColors.getColor('dropdownBackground', isDarkMode),
-                                            border: OutlineInputBorder(
-                                              borderRadius: BorderRadius.circular(12),
-                                              borderSide: BorderSide.none,
-                                            ),
-                                            enabledBorder: OutlineInputBorder(
-                                              borderRadius: BorderRadius.circular(12),
-                                              borderSide: BorderSide(
-                                                color: ThemeColors.getColor('cardBorder', isDarkMode),
-                                                width: 1.5,
+                                            return DropdownButtonFormField<String>(
+                                              value: currentSelection,
+                                              hint: Text(selectedPortValue, style: GoogleFonts.montserrat(fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode)), overflow: TextOverflow.ellipsis),
+                                              decoration: InputDecoration(
+                                                labelText: 'Port',
+                                                labelStyle: GoogleFonts.montserrat(fontSize: 15, fontWeight: FontWeight.w500, color: ThemeColors.getColor('dialogSubText', isDarkMode)),
+                                                filled: true,
+                                                fillColor: ThemeColors.getColor('dropdownBackground', isDarkMode),
+                                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                                                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 1.5)),
+                                                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 2.5)),
+                                                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                                                prefixIcon: Icon(Icons.usb, size: 24, color: ThemeColors.getColor('cardIcon', isDarkMode)),
                                               ),
-                                            ),
-                                            focusedBorder: OutlineInputBorder(
-                                              borderRadius: BorderRadius.circular(12),
-                                              borderSide: BorderSide(
-                                                color: ThemeColors.getColor('submitButton', isDarkMode),
-                                                width: 2.5,
-                                              ),
-                                            ),
-                                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                                            prefixIcon: Icon(
-                                              Icons.usb,
-                                              size: 24,
-                                              color: ThemeColors.getColor('cardIcon', isDarkMode),
-                                            ),
-                                          ),
-                                          style: GoogleFonts.montserrat(
-                                            fontSize: 14,
-                                            color: ThemeColors.getColor('dialogText', isDarkMode),
-                                          ),
-                                          dropdownColor: isDarkMode ? ThemeColors.getColor('dropdownBackground', isDarkMode) : Colors.white,
-                                          items: ports.map((portInfo) {
-                                            return DropdownMenuItem<String>(
-                                              value: portInfo,
-                                              child: Text(
-                                                portInfo.split(' → ')[0],
-                                                style: GoogleFonts.montserrat(
-                                                  fontSize: 14,
-                                                  color: ThemeColors.getColor('dialogText', isDarkMode),
-                                                ),
-                                              ),
+                                              dropdownColor: isDarkMode ? ThemeColors.getColor('dropdownBackground', isDarkMode) : Colors.white,
+                                              items: availablePorts.map((portName) {
+                                                return DropdownMenuItem<String>(value: portName, child: Text(portName, style: GoogleFonts.montserrat(fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode))));
+                                              }).toList(),
+                                              onChanged: (value) {
+                                                if (value != null) {
+                                                  Global.selectedPort.value = value;
+                                                  _logActivity('User selected new port: $value');
+                                                }
+                                              },
                                             );
-                                          }).toList(),
-                                          onChanged: (value) {
-                                            if (value != null) {
-                                              Global.selectedPort.value = value;
-                                              final parts = value.split(' → ');
-                                              if (parts.length > 1) {
-                                                final details = parts[1];
-                                                Global.baudRate.value = int.tryParse(details.split(', ')[0].split(': ')[1]) ?? 9600;
-                                                Global.dataBits.value = int.tryParse(details.split(', ')[1].split(': ')[1]) ?? 8;
-                                                Global.parity.value = details.split(', ')[2].split(': ')[1];
-                                                Global.stopBits.value = int.tryParse(details.split(', ')[3].split(': ')[1]) ?? 1;
-                                              } else {
-                                                Global.baudRate.value = 9600;
-                                                Global.dataBits.value = 8;
-                                                Global.parity.value = 'None';
-                                                Global.stopBits.value = 1;
-                                              }
-                                              _logActivity('Selected port: ${Global.selectedPort.value}');
-                                            }
                                           },
-                                        );
-                                      },
-                                    ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        flex: 1,
+                                        child: ValueListenableBuilder<int>(
+                                          valueListenable: Global.baudRate,
+                                          builder: (context, selectedBaudRate, _) {
+                                            return DropdownButtonFormField<int>(
+                                              value: standardBaudRates.contains(selectedBaudRate) ? selectedBaudRate : null,
+                                              hint: Text(selectedBaudRate.toString(), style: GoogleFonts.montserrat(fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode))),
+                                              decoration: InputDecoration(
+                                                labelText: 'Baud Rate',
+                                                labelStyle: GoogleFonts.montserrat(fontSize: 15, fontWeight: FontWeight.w500, color: ThemeColors.getColor('dialogSubText', isDarkMode)),
+                                                filled: true,
+                                                fillColor: ThemeColors.getColor('dropdownBackground', isDarkMode),
+                                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                                                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 1.5)),
+                                                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: ThemeColors.getColor('submitButton', isDarkMode), width: 2.5)),
+                                                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                                              ),
+                                              dropdownColor: isDarkMode ? ThemeColors.getColor('dropdownBackground', isDarkMode) : Colors.white,
+                                              items: standardBaudRates.map((rate) {
+                                                return DropdownMenuItem<int>(value: rate, child: Text(rate.toString(), style: GoogleFonts.montserrat(fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode))));
+                                              }).toList(),
+                                              onChanged: (value) {
+                                                if (value != null) {
+                                                  Global.baudRate.value = value;
+                                                  _logActivity('User changed baud rate to: $value');
+                                                }
+                                              },
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                  const SizedBox(width: 12),
-                                  _buildButton(
-                                    text: 'Save',
-                                    icon: Icons.save,
-                                    gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'backup'),
-                                    onTap: () {
-                                      final selectedPortValue = Global.selectedPort.value;
-                                      if (selectedPortValue == 'No Ports Detected' || selectedPortValue == 'Error Fetching Ports') {
-                                        ScaffoldMessenger.of(context).showSnackBar(
-                                          SnackBar(
-                                            content: Text('Cannot save. No valid port selected.', style: GoogleFonts.montserrat(fontSize: 14)),
-                                            backgroundColor: ThemeColors.getColor('errorText', isDarkMode),
-                                            behavior: SnackBarBehavior.floating,
-                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                            margin: const EdgeInsets.all(16),
-                                          ),
-                                        );
-                                        _logActivity('Attempted to save invalid port: $selectedPortValue');
-                                        return;
-                                      }
-
-                                      final parts = selectedPortValue.split(' → ');
-                                      String portName = parts[0];
-                                      int baudRate = Global.baudRate.value;
-                                      int dataBits = Global.dataBits.value;
-                                      String parity = Global.parity.value;
-                                      int stopBits = Global.stopBits.value;
-
-                                      _savePortDetails(portName, baudRate, dataBits, parity, stopBits);
-                                    },
-                                    isSmall: true,
+                                  const SizedBox(height: 16),
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: _buildButton(text: 'Save Port Settings', icon: Icons.save, gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'backup'), onTap: _savePortDetails, isSmall: true),
                                   ),
                                 ],
                               ),
@@ -1086,14 +703,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                           ),
                         ),
                         const SizedBox(height: 24),
-                        Text(
-                          'AutoStart Configuration',
-                          style: GoogleFonts.montserrat(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w700,
-                            color: ThemeColors.getColor('dialogText', isDarkMode),
-                          ),
-                        ),
+                        Text('AutoStart Configuration', style: GoogleFonts.montserrat(fontSize: 22, fontWeight: FontWeight.w700, color: ThemeColors.getColor('dialogText', isDarkMode))),
                         const SizedBox(height: 16),
                         Card(
                           elevation: ThemeColors.getColor('cardElevation', isDarkMode),
@@ -1104,39 +714,19 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                             borderRadius: BorderRadius.circular(16),
                             child: Container(
                               padding: const EdgeInsets.all(20),
-                              decoration: BoxDecoration(
-                                border: Border.all(
-                                  color: ThemeColors.getColor('cardBorder', isDarkMode),
-                                  width: 1.5,
-                                ),
-                                borderRadius: BorderRadius.circular(16),
-                              ),
+                              decoration: BoxDecoration(border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 1.5), borderRadius: BorderRadius.circular(16)),
                               child: Row(
                                 children: [
                                   Icon(Icons.timer, color: ThemeColors.getColor('submitButton', isDarkMode), size: 28),
                                   const SizedBox(width: 12),
-                                  Text(
-                                    'Configure AutoStart',
-                                    style: GoogleFonts.montserrat(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w600,
-                                      color: ThemeColors.getColor('dialogText', isDarkMode),
-                                    ),
-                                  ),
+                                  Text('Configure AutoStart', style: GoogleFonts.montserrat(fontSize: 16, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode))),
                                 ],
                               ),
                             ),
                           ),
                         ),
                         const SizedBox(height: 24),
-                        Text(
-                          'Authentication Settings',
-                          style: GoogleFonts.montserrat(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w700,
-                            color: ThemeColors.getColor('dialogText', isDarkMode),
-                          ),
-                        ),
+                        Text('Authentication Settings', style: GoogleFonts.montserrat(fontSize: 22, fontWeight: FontWeight.w700, color: ThemeColors.getColor('dialogText', isDarkMode))),
                         const SizedBox(height: 16),
                         Card(
                           elevation: ThemeColors.getColor('cardElevation', isDarkMode),
@@ -1144,101 +734,48 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                           child: InkWell(
                             onTap: () {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(builder: (context) => const AuthSettingsScreen()),
-                              );
+                              Navigator.push(context, MaterialPageRoute(builder: (context) => const AuthSettingsScreen()));
                               _logActivity('Navigated to Authentication Settings.');
                             },
                             borderRadius: BorderRadius.circular(16),
                             child: Container(
                               padding: const EdgeInsets.all(20),
-                              decoration: BoxDecoration(
-                                border: Border.all(
-                                  color: ThemeColors.getColor('cardBorder', isDarkMode),
-                                  width: 1.5,
-                                ),
-                                borderRadius: BorderRadius.circular(16),
-                              ),
+                              decoration: BoxDecoration(border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 1.5), borderRadius: BorderRadius.circular(16)),
                               child: Row(
                                 children: [
                                   Icon(Icons.lock, color: ThemeColors.getColor('submitButton', isDarkMode), size: 28),
                                   const SizedBox(width: 12),
-                                  Text(
-                                    'Configure Authentication',
-                                    style: GoogleFonts.montserrat(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w600,
-                                      color: ThemeColors.getColor('dialogText', isDarkMode),
-                                    ),
-                                  ),
+                                  Text('Configure Authentication', style: GoogleFonts.montserrat(fontSize: 16, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode))),
                                 ],
                               ),
                             ),
                           ),
                         ),
                         const SizedBox(height: 24),
-                        Text(
-                          'Channels',
-                          style: GoogleFonts.montserrat(
-                            fontSize: 22,
-                            fontWeight: FontWeight.w700,
-                            color: ThemeColors.getColor('dialogText', isDarkMode),
-                          ),
-                        ),
+                        Text('Channels', style: GoogleFonts.montserrat(fontSize: 22, fontWeight: FontWeight.w700, color: ThemeColors.getColor('dialogText', isDarkMode))),
                         const SizedBox(height: 16),
                         Card(
                           elevation: ThemeColors.getColor('cardElevation', isDarkMode),
                           color: ThemeColors.getColor('cardBackground', isDarkMode),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                           child: Container(
-                            decoration: BoxDecoration(
-                              border: Border.all(
-                                color: ThemeColors.getColor('cardBorder', isDarkMode),
-                                width: 1.5,
-                              ),
-                              borderRadius: BorderRadius.circular(16),
-                            ),
+                            decoration: BoxDecoration(border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode), width: 1.5), borderRadius: BorderRadius.circular(16)),
                             height: 400,
                             child: errorMessage != null
                                 ? Center(
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(
-                                    Icons.error_outline,
-                                    color: ThemeColors.getColor('errorText', isDarkMode),
-                                    size: 48,
-                                  ),
+                                  Icon(Icons.error_outline, color: ThemeColors.getColor('errorText', isDarkMode), size: 48),
                                   const SizedBox(height: 16),
-                                  Text(
-                                    errorMessage!,
-                                    style: GoogleFonts.montserrat(
-                                      fontSize: 14,
-                                      color: ThemeColors.getColor('dialogText', isDarkMode),
-                                    ),
-                                    textAlign: TextAlign.center,
-                                  ),
+                                  Text(errorMessage!, style: GoogleFonts.montserrat(fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode)), textAlign: TextAlign.center),
                                   const SizedBox(height: 24),
-                                  _buildButton(
-                                    text: 'Retry',
-                                    icon: Icons.refresh,
-                                    gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'backup'),
-                                    onTap: fetchChannels,
-                                  ),
+                                  _buildButton(text: 'Retry', icon: Icons.refresh, gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'backup'), onTap: fetchChannels),
                                 ],
                               ),
                             )
                                 : channels.isEmpty
-                                ? Center(
-                              child: Text(
-                                'No channels found',
-                                style: GoogleFonts.montserrat(
-                                  fontSize: 14,
-                                  color: ThemeColors.getColor('dialogText', isDarkMode),
-                                ),
-                              ),
-                            )
+                                ? Center(child: Text('No channels found', style: GoogleFonts.montserrat(fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode))))
                                 : Scrollbar(
                               child: SingleChildScrollView(
                                 scrollDirection: Axis.vertical,
@@ -1247,9 +784,7 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                                   child: Column(
                                     children: [
                                       _buildTableHeader(isDarkMode),
-                                      ...channels.asMap().entries.map((entry) {
-                                        return _buildTableRow(entry.value, entry.key, isDarkMode);
-                                      }),
+                                      ...channels.asMap().entries.map((entry) => _buildTableRow(entry.value, entry.key, isDarkMode)),
                                     ],
                                   ),
                                 ),
@@ -1261,25 +796,9 @@ class _ChannelSetupScreenState extends State<ChannelSetupScreen> with SingleTick
                         Row(
                           mainAxisAlignment: MainAxisAlignment.end,
                           children: [
-                            _buildButton(
-                              text: 'Reset',
-                              icon: Icons.clear,
-                              gradient: LinearGradient(
-                                colors: [
-                                  ThemeColors.getColor('resetButton', isDarkMode),
-                                  ThemeColors.getColor('resetButton', isDarkMode).withOpacity(0.8),
-                                ],
-                              ),
-                              onTap: _cancelSelection,
-                            ),
+                            _buildButton(text: 'Reset', icon: Icons.clear, gradient: LinearGradient(colors: [ThemeColors.getColor('resetButton', isDarkMode), ThemeColors.getColor('resetButton', isDarkMode).withOpacity(0.8)]), onTap: _cancelSelection),
                             const SizedBox(width: 16),
-                            _buildButton(
-                              text: 'Submit',
-                              icon: Icons.check,
-                              gradient: ThemeColors.getButtonGradient(isDarkMode),
-                              onTap: _saveSelectedChannels,
-                              isProminent: true,
-                            ),
+                            _buildButton(text: 'Submit', icon: Icons.check, gradient: ThemeColors.getButtonGradient(isDarkMode), onTap: _saveSelectedChannels, isProminent: true),
                           ],
                         ),
                       ],

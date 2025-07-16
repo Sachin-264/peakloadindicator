@@ -7,17 +7,20 @@ import 'package:flutter_libserialport/flutter_libserialport.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
 
+import '../../constants/database_manager.dart';
 import '../../constants/global.dart';
 import '../../constants/message_utils.dart';
+import '../../constants/sessionmanager.dart';
 import '../../constants/theme.dart';
-import '../Open_FIle/file_browser_page.dart'; // Import for FileSelectionDialog
+import '../Open_FIle/file_browser_page.dart';
 import '../Open_FIle/open_file.dart';
 import '../Secondary_window/save_secondary_window.dart';
+import '../logScreen/log.dart';
 import 'channel.dart';
-
-
 
 // Helper class for Syncfusion Chart data points
 class ChartData {
@@ -43,24 +46,43 @@ class ActiveChannel {
   double? get targetAlarmMax => originalChannel.targetAlarmMax;
   double? get targetAlarmMin => originalChannel.targetAlarmMin;
   int get targetAlarmColour => originalChannel.targetAlarmColour;
+  double get recNo => originalChannel.recNo;
 
-
+  // FIX: Bulletproof color parsing from the database.
   factory ActiveChannel.fromChannel(Channel channel) {
+    Color parsedColor = Colors.red; // Default color
+    try {
+      final dbValue = channel.graphLineColour;
+      if (dbValue is int) {
+        // If the value is already an integer (like 0xFFFF0000)
+        parsedColor = Color(dbValue);
+      } else if (dbValue is String && dbValue.toString().isNotEmpty) {
+        // If the value is a hex string (like 'FF0000')
+        final colorString = (dbValue).replaceAll('#', '');
+        final colorValue = int.parse('FF$colorString', radix: 16);
+        parsedColor = Color(colorValue);
+      }
+    } catch (e) {
+      LogPage.addLog("[COLOR PARSE ERROR] Could not parse color '${channel.graphLineColour}' for channel '${channel.channelName}'. Error: $e");
+    }
     return ActiveChannel(
       originalChannel: channel,
-      graphLineColour: Color(channel.graphLineColour),
+      graphLineColour: parsedColor,
     );
   }
 }
 
+
 class SerialPortScreen extends StatefulWidget {
   final List<Channel> selectedChannels;
   final VoidCallback onBack;
+  final void Function(String fileName) onOpenFile;
 
   const SerialPortScreen({
     super.key,
     required this.selectedChannels,
     required this.onBack,
+    required this.onOpenFile,
   });
 
   @override
@@ -81,12 +103,29 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
   bool _isAttemptingReconnect = false;
   bool _isDataDirty = false;
 
+  String? _comPortName;
+  int? _baudRate;
+  int? _dataBits;
+  String? _parity;
+  int? _stopBits;
+
+  // Save/Append Logic State
+  bool _isSaving = false;
+  String? _sessionDbName;
+  int? _recNo;
+  int _savedTableRowCount = 0;
+
+  // Auto-Save State
+  Timer? _autoSaveTimer;
+  bool _isAutoSaveEnabled = false;
+  int _autoSaveIntervalSeconds = 30;
+
   // Data Flow Watchdog
   bool _isDataFlowing = false;
   Timer? _dataStoppageTimer;
 
   // Display Mode state
-  String _currentDisplayMode = 'Combined'; // Can be 'Combined', 'Graph', or 'Table'
+  String _currentDisplayMode = 'Combined';
 
   // Data & Business Logic
   late final List<ActiveChannel> _activeChannels;
@@ -105,8 +144,12 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
   late final TextEditingController _filenameController;
   final TextEditingController _openFileController = TextEditingController();
   final _operatorController = TextEditingController(text: "Operator");
-  final ScrollController _tableScrollController = ScrollController();
-  final ScrollController _tableHorizontalScrollController = ScrollController();
+
+  // --- Scroll Controllers for Sticky Header Table ---
+  final ScrollController _tableVerticalScrollController = ScrollController();
+  final ScrollController _tableHeaderHorizontalScrollController = ScrollController();
+  final ScrollController _tableBodyHorizontalScrollController = ScrollController();
+
   Duration _testDuration = const Duration(days: 1);
   Duration _scanRate = const Duration(seconds: 1);
   Duration _graphTimeWindow = const Duration(minutes: 5);
@@ -130,37 +173,97 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
   @override
   void initState() {
     super.initState();
-    _activeChannels = widget.selectedChannels.map((c) => ActiveChannel.fromChannel(c)).toList();
-    _channelMap = {for (var channel in _activeChannels) channel.startingCharacter: channel};
-    _visibleGraphChannels = _activeChannels.map((c) => c.startingCharacter).toSet();
+    _loadSettings();
 
-    _trackballBehavior = TrackballBehavior(
-      enable: true,
-      activationMode: ActivationMode.singleTap,
-      tooltipDisplayMode: TrackballDisplayMode.groupAllPoints,
-      tooltipSettings: const InteractiveTooltip(
-        enable: true,
-        format: 'series.name : point.y',
-      ),
-      shouldAlwaysShow: false,
-    );
+    _activeChannels =
+        widget.selectedChannels
+            .map((c) => ActiveChannel.fromChannel(c))
+            .toList();
+    _channelMap =
+    {for (var channel in _activeChannels) channel.startingCharacter: channel};
+    _visibleGraphChannels =
+        _activeChannels.map((c) => c.startingCharacter).toSet();
 
+    _trackballBehavior = TrackballBehavior(enable: true,
+        activationMode: ActivationMode.singleTap,
+        tooltipDisplayMode: TrackballDisplayMode.groupAllPoints,
+        tooltipSettings: const InteractiveTooltip(
+            enable: true, format: 'series.name : point.y'),
+        shouldAlwaysShow: false);
     _zoomPanBehavior = ZoomPanBehavior(
-      enablePinching: true,
-      enablePanning: true,
-      zoomMode: ZoomMode.x,
-    );
+        enablePinching: true, enablePanning: true, zoomMode: ZoomMode.x);
 
-    final initialFilename = "Test_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}";
+    final initialFilename = "Test_${DateFormat('yyyyMMdd_HHmmss').format(
+        DateTime.now())}";
     _filenameController = TextEditingController(text: initialFilename);
 
     for (var channel in _activeChannels) {
       _graphData[channel.startingCharacter] = [];
       _lastChannelValues[channel.startingCharacter] = null;
     }
+
+    // Add listeners to synchronize horizontal scroll controllers
+    _tableHeaderHorizontalScrollController.addListener(() {
+      if (_tableHeaderHorizontalScrollController.hasClients &&
+          _tableBodyHorizontalScrollController.hasClients &&
+          _tableHeaderHorizontalScrollController.offset != _tableBodyHorizontalScrollController.offset) {
+        _tableBodyHorizontalScrollController.jumpTo(_tableHeaderHorizontalScrollController.offset);
+      }
+    });
+
+    _tableBodyHorizontalScrollController.addListener(() {
+      if (_tableBodyHorizontalScrollController.hasClients &&
+          _tableHeaderHorizontalScrollController.hasClients &&
+          _tableBodyHorizontalScrollController.offset != _tableHeaderHorizontalScrollController.offset) {
+        _tableHeaderHorizontalScrollController.jumpTo(_tableBodyHorizontalScrollController.offset);
+      }
+    });
   }
 
-  // --- MULTI-WINDOW LOGIC ---
+  Future<void> _loadSettings() async {
+    LogPage.addLog("[LOG] Fetching settings from database...");
+    final comPortSettings = await DatabaseManager().getComPortSettings();
+    if (comPortSettings != null) {
+      setState(() {
+        _comPortName = comPortSettings['selectedPort'];
+        _baudRate = comPortSettings['baudRate'];
+        _dataBits = comPortSettings['dataBits'];
+        _parity = comPortSettings['parity'];
+        _stopBits = comPortSettings['stopBits'];
+        LogPage.addLog(
+            "[LOG] Loaded COM settings: Port=$_comPortName, Baud=$_baudRate, DataBits=$_dataBits, Parity=$_parity, StopBits=$_stopBits");
+      });
+    } else {
+      LogPage.addLog("[LOG] No COM port settings found in the database.");
+    }
+
+    final authSettings = await DatabaseManager().getAuthSettings();
+    if (mounted && authSettings != null) {
+      setState(() {
+        _isAutoSaveEnabled = (authSettings['isAutoSaveEnabled'] ?? 0) == 1;
+        _autoSaveIntervalSeconds =
+            authSettings['autoSaveIntervalSeconds'] ?? 30;
+        LogPage.addLog(
+            "[LOG] Loaded Auto-Save settings: Enabled=$_isAutoSaveEnabled, Interval=$_autoSaveIntervalSeconds");
+      });
+    }
+  }
+
+  int _getParityFromString(String? parityString) {
+    switch (parityString?.toLowerCase()) {
+      case 'odd':
+        return SerialPortParity.odd;
+      case 'even':
+        return SerialPortParity.even;
+      case 'mark':
+        return SerialPortParity.mark;
+      case 'space':
+        return SerialPortParity.space;
+      case 'none':
+      default:
+        return SerialPortParity.none;
+    }
+  }
 
   void _addGraphWindow() {
     _windowCounter++;
@@ -212,29 +315,24 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     _overlayEntries.add(entry);
   }
 
-  // --- CORE LOGIC: CONNECTION, DATA, & FILE HANDLING ---
-
   void _showOpenFileDialog() {
     showDialog(
       context: context,
       builder: (BuildContext dialogContext) {
         return FileSelectionDialog(
           controller: _openFileController,
-          onOpenPressed: () {
-            if (_openFileController.text.isNotEmpty) {
-              Navigator.of(dialogContext).pop();
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => OpenFilePage(
-                    fileName: _openFileController.text,
-                    onExit: () => Navigator.pop(context),
-                  ),
-                ),
-              );
-            } else {
+          onOpenPressed: () async {
+            final fileName = _openFileController.text;
+            if (fileName.isEmpty) {
               MessageUtils.showMessage(context, 'Please select a file first.', isError: true);
+              return;
             }
+            if (!await _showUnsavedDataDialog()) {
+              return;
+            }
+            Navigator.of(dialogContext).pop();
+            _disconnectPort();
+            widget.onOpenFile(fileName);
           },
         );
       },
@@ -243,18 +341,39 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
 
   void _connectAndRead() {
     if (_isPortOpen) return;
-    const portName = 'COM6';
+
+    final portName = _comPortName;
+    if (portName == null || portName.isEmpty) {
+      setState(() => _statusMessage = "Error: COM Port not configured.");
+      MessageUtils.showMessage(
+          context, "Please configure the COM Port in settings.", isError: true);
+      LogPage.addLog("[LOG] Connect aborted: COM Port name is null or empty.");
+      return;
+    }
+
     if (!_isAttemptingReconnect) {
       setState(() => _statusMessage = "Connecting to $portName...");
     }
+
     try {
       _port = SerialPort(portName);
-      if (!_port!.openReadWrite()) throw Exception("Failed to open port $portName");
+      if (!_port!.openReadWrite()) {
+        throw SerialPortError("Failed to open port $portName");
+      }
 
       _reconnectTimer?.cancel();
       _isAttemptingReconnect = false;
 
-      final config = SerialPortConfig()..baudRate = 2400..bits = 8..parity = SerialPortParity.none..stopBits = 1;
+      final config = SerialPortConfig()
+        ..baudRate = _baudRate ?? 9600
+        ..bits = _dataBits ?? 8
+        ..parity = _getParityFromString(_parity)
+        ..stopBits = _stopBits ?? 1;
+
+      LogPage.addLog("[LOG] Applying port configuration: Baud=${config
+          .baudRate}, Bits=${config.bits}, Parity=${config
+          .parity}, StopBits=${config.stopBits}");
+
       _port!.config = config;
       _reader = SerialPortReader(_port!);
 
@@ -270,11 +389,16 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
           _statusMessage = "Connected. Waiting for data...";
           _scanRateTimer?.cancel();
           _scanRateTimer = Timer.periodic(_scanRate, _onScanRateTick);
+          _startAutoSaveTimer();
         });
+        LogPage.addLog("[LOG] Successfully connected to $portName.");
       }
     } catch (e) {
+      LogPage.addLog("[LOG] Error during connection: $e");
       if (mounted && !_isAttemptingReconnect) {
-        setState(() => _statusMessage = "Error: Could not connect.");
+        setState(() =>
+        _statusMessage =
+        "Error: Could not connect to $portName. Check connection/settings.");
       }
     }
   }
@@ -287,6 +411,7 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     _reader?.close();
     if (_port?.isOpen ?? false) _port?.close();
     _port?.dispose();
+    _stopAutoSaveTimer();
 
     if (mounted) {
       setState(() {
@@ -297,12 +422,14 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
         _isAttemptingReconnect = false;
         _statusMessage = "Disconnected";
       });
+      LogPage.addLog("[LOG] Port disconnected.");
     }
   }
 
   void _startReconnectProcedure() {
     if (_isAttemptingReconnect || !mounted) return;
     _dataStoppageTimer?.cancel();
+    _stopAutoSaveTimer();
     setState(() {
       _isPortOpen = false;
       _isDataFlowing = false;
@@ -340,7 +467,8 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
       final currentMatch = matches[i];
       final nextMatch = matches[i + 1];
       final String identifier = currentMatch.group(0)!;
-      final String valueString = _buffer.substring(currentMatch.end, nextMatch.start);
+      final String valueString = _buffer.substring(
+          currentMatch.end, nextMatch.start);
       if (_channelMap.containsKey(identifier)) {
         _bufferLatestValue(identifier, valueString);
       }
@@ -389,7 +517,10 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
       _disconnectPort();
       return;
     }
-    if (!_isDataDirty) _isDataDirty = true;
+
+    if (!_isDataDirty) {
+      setState(() => _isDataDirty = true);
+    }
 
     final newRow = <String, dynamic>{'Time': now};
     final Map<String, List<Map<String, dynamic>>> newDataForStream = {};
@@ -398,13 +529,27 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
       final lastValue = _lastChannelValues[channel.startingCharacter];
       newRow[channel.channelName] = lastValue;
       _graphData[channel.startingCharacter]!.add(ChartData(now, lastValue));
-      newDataForStream[channel.startingCharacter] = [{'time': DateFormat('HH:mm:ss').format(now), 'value': lastValue, 'Timestamp': now.millisecondsSinceEpoch.toDouble()}];
+      newDataForStream[channel.startingCharacter] = [
+        {
+          'time': DateFormat('HH:mm:ss').format(now),
+          'value': lastValue,
+          'Timestamp': now.millisecondsSinceEpoch.toDouble()
+        }
+      ];
     }
 
     if (Global.hasGraphDataListener) {
-      final Map<String, Color> channelColors = {for (var c in _activeChannels) c.startingCharacter: c.graphLineColour};
-      final Map<String, Channel> channelConfigs = {for (var c in _activeChannels) c.startingCharacter: c.originalChannel};
-      Global.graphDataSink.add({'dataByChannel': newDataForStream, 'channelColors': channelColors, 'channelConfigs': channelConfigs});
+      final Map<String, Color> channelColors = {
+        for (var c in _activeChannels) c.startingCharacter: c.graphLineColour
+      };
+      final Map<String, Channel> channelConfigs = {
+        for (var c in _activeChannels) c.startingCharacter: c.originalChannel
+      };
+      Global.graphDataSink.add({
+        'dataByChannel': newDataForStream,
+        'channelColors': channelColors,
+        'channelConfigs': channelConfigs
+      });
     }
 
     _tableData.add(newRow);
@@ -412,7 +557,8 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     if (_showPeakValue) _calculateGlobalPeakValues();
 
     final totalDuration = now.difference(_firstDataTimestamp!);
-    final newMaxSegments = (totalDuration.inMilliseconds / _graphTimeWindow.inMilliseconds).floor() + 1;
+    final newMaxSegments = (totalDuration.inMilliseconds /
+        _graphTimeWindow.inMilliseconds).floor() + 1;
 
     if (newMaxSegments > _maxSegments) {
       setState(() {
@@ -426,8 +572,10 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
       if (mounted) setState(() {});
     }
 
-    if (_tableScrollController.hasClients) {
-      _tableScrollController.animateTo(_tableScrollController.position.maxScrollExtent, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+    if (_tableVerticalScrollController.hasClients) {
+      _tableVerticalScrollController.animateTo(
+          _tableVerticalScrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
     }
   }
 
@@ -443,15 +591,18 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
   void _calculateGlobalPeakValues() {
     _globalPeakValues.clear();
     for (var channel in _activeChannels) {
-      final dataList = _graphData[channel.startingCharacter]?.where((d) => d.value != null).toList();
+      final dataList = _graphData[channel.startingCharacter]?.where((d) =>
+      d.value != null).toList();
       if (dataList != null && dataList.isNotEmpty) {
-        _globalPeakValues[channel.channelName] = dataList.reduce((c, n) => c.value! > n.value! ? c : n);
+        _globalPeakValues[channel.channelName] =
+            dataList.reduce((c, n) => c.value! > n.value! ? c : n);
       }
     }
   }
 
   Future<void> _onClearPressed() async {
     if (await _showUnsavedDataDialog() && mounted) {
+      _stopAutoSaveTimer();
       _dataStoppageTimer?.cancel();
       setState(() {
         _tableData.clear();
@@ -462,7 +613,8 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
         _isDataFlowing = false;
         if (_isPortOpen) _statusMessage = "Connected. Waiting for data...";
         _firstDataTimestamp = null;
-        _filenameController.text = "Test_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}";
+        _filenameController.text =
+        "Test_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}";
         _currentSegment = 1;
         _maxSegments = 1;
         _isLive = true;
@@ -470,12 +622,19 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
         _chartVisibleMax = null;
         _globalPeakValues.clear();
         _showPeakValue = false;
+
+        _sessionDbName = null;
+        _recNo = null;
+        _savedTableRowCount = 0;
       });
     }
   }
 
   Future<void> _onExitPressed() async {
-    if (await _showUnsavedDataDialog()) widget.onBack();
+    if (await _showUnsavedDataDialog()) {
+      _stopAutoSaveTimer();
+      widget.onBack();
+    }
   }
 
   @override
@@ -488,8 +647,9 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     _filenameController.dispose();
     _openFileController.dispose();
     _operatorController.dispose();
-    _tableScrollController.dispose();
-    _tableHorizontalScrollController.dispose();
+    _tableVerticalScrollController.dispose();
+    _tableHeaderHorizontalScrollController.dispose();
+    _tableBodyHorizontalScrollController.dispose();
     super.dispose();
   }
 
@@ -499,7 +659,8 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
       valueListenable: Global.isDarkMode,
       builder: (context, isDarkMode, child) {
         return Scaffold(
-          backgroundColor: ThemeColors.getColor('serialPortBackground', isDarkMode),
+          backgroundColor: ThemeColors.getColor(
+              'serialPortBackground', isDarkMode),
           body: Column(
             children: [
               _buildHeaderPanel(isDarkMode),
@@ -510,9 +671,9 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
                       ? Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _buildLeftPanel(context, isDarkMode),
+                      Expanded(flex: 5, child: _buildLeftPanel(context, isDarkMode)),
                       const SizedBox(width: 12),
-                      Expanded(child: _buildRightPanel(context, isDarkMode)),
+                      Expanded(flex: 7, child: _buildRightPanel(context, isDarkMode)),
                     ],
                   )
                       : Column(
@@ -535,40 +696,104 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     );
   }
 
+  Widget _buildAutoSaveStatus(bool isDarkMode) {
+    if (!_isAutoSaveEnabled || _autoSaveIntervalSeconds <= 0) {
+      return const SizedBox.shrink(); // Don't show anything if disabled
+    }
+
+    final String displayInterval = _formatDurationForDisplay(_autoSaveIntervalSeconds);
+    final String tooltipMessage = _formatDurationForTooltip(_autoSaveIntervalSeconds);
+
+    return Tooltip(
+      message: 'Auto-saving every $tooltipMessage',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.green.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(20), // Pill shape
+          border: Border.all(color: Colors.green.shade300, width: 1),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(LucideIcons.save, color: Colors.green.shade400, size: 14),
+            const SizedBox(width: 6),
+            Text(
+              'Auto-Save:',
+              style: GoogleFonts.poppins(
+                color: Colors.green.shade400,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              displayInterval,
+              style: GoogleFonts.poppins(
+                color: Colors.green.shade300,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildHeaderPanel(bool isDarkMode) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
         color: ThemeColors.getColor('serialPortCardBackground', isDarkMode),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), spreadRadius: 2, blurRadius: 8, offset: const Offset(0, 3))],
-        border: Border(bottom: BorderSide(color: Colors.grey.withOpacity(0.2), width: 1)),
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withOpacity(0.2),
+              spreadRadius: 2,
+              blurRadius: 8,
+              offset: const Offset(0, 3)
+          )
+        ],
+        border: Border(
+            bottom: BorderSide(color: Colors.grey.withOpacity(0.2), width: 1)),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          _buildHeaderTextField('Filename', _filenameController, isDarkMode, width: 250),
+          _buildHeaderTextField(
+              'Filename', _filenameController, isDarkMode, width: 250),
           const SizedBox(width: 16),
-          _buildHeaderTextField('Operator', _operatorController, isDarkMode, width: 150),
+          _buildHeaderTextField(
+              'Operator', _operatorController, isDarkMode, width: 150),
+
           const Spacer(),
-          _buildEditableDuration('Graph Window', _graphTimeWindow, isDarkMode, (d) { setState(() => _graphTimeWindow = d); _setSegment(_currentSegment, goLive: _isLive); }),
+
+          _buildAutoSaveStatus(isDarkMode),
+          const SizedBox(width: 24),
+          _buildEditableDuration(
+              'Graph Window', _graphTimeWindow, isDarkMode, (d) {
+            setState(() => _graphTimeWindow = d);
+            _setSegment(_currentSegment, goLive: _isLive);
+          }),
           const SizedBox(width: 16),
-          _buildEditableDuration('Test Duration', _testDuration, isDarkMode, (d) => setState(() => _testDuration = d), showDays: true),
+          _buildEditableDuration(
+              'Test Duration', _testDuration, isDarkMode, (d) =>
+              setState(() => _testDuration = d), showDays: true),
           const SizedBox(width: 16),
-          _buildEditableDuration('Scan Rate', _scanRate, isDarkMode, (d) => setState(() => _scanRate = d)),
+          _buildEditableDuration('Scan Rate', _scanRate, isDarkMode, (d) =>
+              setState(() => _scanRate = d)),
         ],
       ),
     );
   }
 
   Widget _buildLeftPanel(BuildContext context, bool isDarkMode) {
-    return SizedBox(
-      width: MediaQuery.of(context).size.width * 0.4,
-      child: Column(
-        children: [
-          Expanded(child: _buildDataTable(context, isDarkMode)),
-          const SizedBox(height: 12),
-          _buildControlPanel(isDarkMode),
-        ],
-      ),
+    return Column(
+      children: [
+        Expanded(child: _buildDataTable(context, isDarkMode)),
+        const SizedBox(height: 12),
+        _buildControlPanel(isDarkMode),
+      ],
     );
   }
 
@@ -576,8 +801,29 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     final headerStyle = GoogleFonts.poppins(color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w600, fontSize: 14);
     final cellStyle = GoogleFonts.firaCode(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 13);
     final timeFormat = DateFormat('HH:mm:ss');
-    final double columnWidth = 140;
-    final double totalWidth = columnWidth + (_activeChannels.length * columnWidth);
+
+    const double timeColWidth = 140.0;
+    const double channelColWidth = 150.0;
+    final double totalWidth = timeColWidth + (_activeChannels.length * channelColWidth);
+
+    final List<DataColumn> columns = [
+      DataColumn(
+        label: SizedBox(
+          width: timeColWidth,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16.0),
+            child: Text('Time(HH:MM:SS)', style: headerStyle),
+          ),
+        ),
+      ),
+      ..._activeChannels.map((c) => DataColumn(
+        label: SizedBox(
+          width: channelColWidth,
+          child: Text('${c.channelName} (${c.unit})', style: headerStyle, textAlign: TextAlign.center, overflow: TextOverflow.ellipsis),
+        ),
+      )),
+    ];
+
     return Card(
       color: ThemeColors.getColor('serialPortCardBackground', isDarkMode),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -585,58 +831,93 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
       clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
-          SingleChildScrollView(
-            controller: _tableHorizontalScrollController,
-            scrollDirection: Axis.horizontal,
-            child: Container(
-              width: totalWidth,
-              padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 14.0),
-              color: ThemeColors.getColor('serialPortTableHeaderBackground', isDarkMode),
-              child: Row(
-                children: [
-                  SizedBox(width: columnWidth, child: Text('Time(HH:MM:SS)', style: headerStyle)),
-                  ..._activeChannels.map((c) => SizedBox(width: columnWidth, child: Text('${c.channelName} (${c.unit})', style: headerStyle, textAlign: TextAlign.center, overflow: TextOverflow.ellipsis))),
-                ],
+          Scrollbar(
+            controller: _tableHeaderHorizontalScrollController,
+            thumbVisibility: true,
+            child: SingleChildScrollView(
+              controller: _tableHeaderHorizontalScrollController,
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                headingRowHeight: 52,
+                dataRowMinHeight: 0,
+                dataRowMaxHeight: 0,
+                columnSpacing: 0,
+                horizontalMargin: 0,
+                headingRowColor: MaterialStateColor.resolveWith((states) => ThemeColors.getColor('serialPortTableHeaderBackground', isDarkMode)),
+                columns: columns,
+                rows: const [],
               ),
             ),
           ),
           const Divider(height: 1, thickness: 1),
           Expanded(
-            child: SingleChildScrollView(
-              controller: _tableHorizontalScrollController,
-              scrollDirection: Axis.horizontal,
-              child: SizedBox(
-                width: totalWidth,
-                child: ListView.builder(
-                  primary: false,
-                  controller: _tableScrollController,
-                  itemCount: _tableData.length,
-                  itemBuilder: (context, index) {
-                    final rowData = _tableData[index];
-                    return Container(
-                      padding: const EdgeInsets.symmetric(vertical: 4.0, horizontal: 16.0),
-                      color: index == _tableData.length - 1 ? (isDarkMode ? Colors.teal.withOpacity(0.3) : Colors.teal.withOpacity(0.2)) : (index.isOdd ? ThemeColors.getColor('serialPortTableRowOdd', isDarkMode) : null),
-                      child: Row(
-                        children: [
-                          SizedBox(width: columnWidth, child: Text(timeFormat.format(rowData['Time']), style: cellStyle)),
-                          ..._activeChannels.map((c) {
-                            final value = rowData[c.channelName];
-                            final text = value != null ? value.toStringAsFixed(c.decimalPlaces) : '-';
-                            bool isPeak = _showPeakValue && _globalPeakValues[c.channelName]?.time == rowData['Time'];
-                            bool isAlarm = value != null && ((c.targetAlarmMax != null && value > c.targetAlarmMax!) || (c.targetAlarmMin != null && value < c.targetAlarmMin!));
-                            return SizedBox(
-                              width: columnWidth,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(vertical: 4.0),
-                                decoration: BoxDecoration(color: isPeak ? Theme.of(context).primaryColor.withOpacity(0.4) : Colors.transparent, borderRadius: BorderRadius.circular(4)),
-                                child: Text(text, style: cellStyle.copyWith(color: isAlarm ? Color(c.targetAlarmColour) : null, fontWeight: isAlarm ? FontWeight.bold : null), textAlign: TextAlign.center),
+            child: Scrollbar(
+              controller: _tableVerticalScrollController,
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                controller: _tableVerticalScrollController,
+                scrollDirection: Axis.vertical,
+                child: Scrollbar(
+                  controller: _tableBodyHorizontalScrollController,
+                  thumbVisibility: true,
+                  notificationPredicate: (notification) => notification.depth == 1,
+                  child: SingleChildScrollView(
+                    controller: _tableBodyHorizontalScrollController,
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: totalWidth,
+                      child: DataTable(
+                        headingRowHeight: 0,
+                        dataRowMinHeight: 40,
+                        dataRowMaxHeight: 40,
+                        columnSpacing: 0,
+                        horizontalMargin: 0,
+                        columns: columns,
+                        rows: List<DataRow>.generate(_tableData.length, (index) {
+                          final rowData = _tableData[index];
+                          return DataRow(
+                            color: MaterialStateProperty.resolveWith<Color?>((states) {
+                              if (index == _tableData.length - 1) {
+                                return (isDarkMode ? Colors.teal.withOpacity(0.3) : Colors.teal.withOpacity(0.2));
+                              }
+                              return index.isOdd ? ThemeColors.getColor('serialPortTableRowOdd', isDarkMode) : null;
+                            }),
+                            cells: [
+                              DataCell(
+                                SizedBox(
+                                  width: timeColWidth,
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(left: 16.0),
+                                    child: Text(timeFormat.format(rowData['Time']), style: cellStyle),
+                                  ),
+                                ),
                               ),
-                            );
-                          }),
-                        ],
+                              ..._activeChannels.map((c) {
+                                final value = rowData[c.channelName];
+                                final text = value != null ? value.toStringAsFixed(c.decimalPlaces) : '-';
+                                bool isPeak = _showPeakValue && _globalPeakValues[c.channelName]?.time == rowData['Time'];
+                                bool isAlarm = value != null && ((c.targetAlarmMax != null && value > c.targetAlarmMax!) || (c.targetAlarmMin != null && value < c.targetAlarmMin!));
+                                return DataCell(
+                                  SizedBox(
+                                    width: channelColWidth,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(vertical: 4.0),
+                                      decoration: BoxDecoration(color: isPeak ? Theme.of(context).primaryColor.withOpacity(0.4) : Colors.transparent, borderRadius: BorderRadius.circular(4)),
+                                      child: Text(
+                                        text,
+                                        style: cellStyle.copyWith(color: isAlarm ? Color(c.targetAlarmColour) : null, fontWeight: isAlarm ? FontWeight.bold : null),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }),
+                            ],
+                          );
+                        }),
                       ),
-                    );
-                  },
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -662,7 +943,10 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
               padding: const EdgeInsets.only(top: 8, right: 8),
               child: _graphData.values.any((list) => list.isNotEmpty)
                   ? _buildRealTimeGraph(isDarkMode)
-                  : Center(child: Text('Waiting for data...', style: TextStyle(fontSize: 18, color: ThemeColors.getColor('serialPortInputLabel', isDarkMode)))),
+                  : Center(child: Text('Waiting for data...', style: TextStyle(
+                  fontSize: 18,
+                  color: ThemeColors.getColor(
+                      'serialPortInputLabel', isDarkMode)))),
             ),
           ),
           const Divider(height: 1),
@@ -674,7 +958,9 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
 
   Widget _buildGraphToolbar(BuildContext context, bool isDarkMode) {
     final iconColor = ThemeColors.getColor('dialogSubText', isDarkMode);
-    final activeColor = Theme.of(context).primaryColor;
+    final activeColor = Theme
+        .of(context)
+        .primaryColor;
     final activeBgColor = activeColor.withOpacity(0.2);
 
     return Container(
@@ -686,15 +972,32 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
           _buildSegmentNavigator(isDarkMode),
           Row(
             children: [
-              TextButton(onPressed: () => _showChannelFilterDialog(context, isDarkMode), child: const Text("Select Channel")),
+              TextButton(onPressed: () =>
+                  _showChannelFilterDialog(context, isDarkMode),
+                  child: const Text("Select Channel")),
               const SizedBox(width: 8),
-              TextButton(onPressed: () => _showModeDialog(context, isDarkMode), child: const Text("Mode")),
+              TextButton(onPressed: () => _showModeDialog(context, isDarkMode),
+                  child: const Text("Mode")),
               const SizedBox(width: 8),
-              TextButton(onPressed: _addGraphWindow, child: const Text("Add Window")),
+              TextButton(
+                  onPressed: _addGraphWindow, child: const Text("Add Window")),
               const SizedBox(width: 8),
-              Container(decoration: BoxDecoration(color: _showPeakValue ? activeBgColor : Colors.transparent, borderRadius: BorderRadius.circular(8)), child: IconButton(icon: Icon(Icons.show_chart, color: _showPeakValue ? activeColor : iconColor), onPressed: _togglePeakValue, tooltip: 'Show Peak Value')),
+              Container(decoration: BoxDecoration(
+                  color: _showPeakValue ? activeBgColor : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8)),
+                  child: IconButton(icon: Icon(Icons.show_chart,
+                      color: _showPeakValue ? activeColor : iconColor),
+                      onPressed: _togglePeakValue,
+                      tooltip: 'Show Peak Value')),
               const SizedBox(width: 8),
-              Container(decoration: BoxDecoration(color: _showDataPoints ? activeBgColor : Colors.transparent, borderRadius: BorderRadius.circular(8)), child: IconButton(icon: Icon(Icons.grain, color: _showDataPoints ? activeColor : iconColor), onPressed: () => setState(() => _showDataPoints = !_showDataPoints), tooltip: 'Toggle Data Points')),
+              Container(decoration: BoxDecoration(
+                  color: _showDataPoints ? activeBgColor : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8)),
+                  child: IconButton(icon: Icon(Icons.grain,
+                      color: _showDataPoints ? activeColor : iconColor),
+                      onPressed: () =>
+                          setState(() => _showDataPoints = !_showDataPoints),
+                      tooltip: 'Toggle Data Points')),
             ],
           ),
         ],
@@ -707,14 +1010,33 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
 
     final bool canGoOlder = _currentSegment > 1;
     final bool canGoNewer = !_isLive && _currentSegment < _maxSegments;
-    final navButtonColor = isDarkMode ? Colors.white : Theme.of(context).primaryColor;
+    final navButtonColor = isDarkMode ? Colors.white : Theme
+        .of(context)
+        .primaryColor;
     final disabledColor = Colors.grey.shade600;
 
     return Row(
       children: [
-        SizedBox(height: 30, child: TextButton(onPressed: canGoOlder ? () => _setSegment(_currentSegment - 1) : null, child: Text("< Older", style: TextStyle(color: canGoOlder ? navButtonColor : disabledColor)))),
-        SizedBox(height: 30, child: TextButton(style: TextButton.styleFrom(backgroundColor: _isLive ? Theme.of(context).primaryColor.withOpacity(0.2) : null), onPressed: () => _setSegment(_maxSegments, goLive: true), child: Text(_isLive ? "LIVE" : "Segment $_currentSegment"))),
-        SizedBox(height: 30, child: TextButton(onPressed: canGoNewer ? () => _setSegment(_currentSegment + 1) : null, child: Text("Newer >", style: TextStyle(color: canGoNewer ? navButtonColor : disabledColor)))),
+        SizedBox(height: 30,
+            child: TextButton(onPressed: canGoOlder
+                ? () => _setSegment(_currentSegment - 1)
+                : null,
+                child: Text("< Older", style: TextStyle(
+                    color: canGoOlder ? navButtonColor : disabledColor)))),
+        SizedBox(height: 30,
+            child: TextButton(
+                style: TextButton.styleFrom(backgroundColor: _isLive ? Theme
+                    .of(context)
+                    .primaryColor
+                    .withOpacity(0.2) : null),
+                onPressed: () => _setSegment(_maxSegments, goLive: true),
+                child: Text(_isLive ? "LIVE" : "Segment $_currentSegment"))),
+        SizedBox(height: 30,
+            child: TextButton(onPressed: canGoNewer
+                ? () => _setSegment(_currentSegment + 1)
+                : null,
+                child: Text("Newer >", style: TextStyle(
+                    color: canGoNewer ? navButtonColor : disabledColor)))),
       ],
     );
   }
@@ -724,7 +1046,9 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     setState(() {
       _currentSegment = segment;
       _isLive = goLive || (_currentSegment == _maxSegments);
-      final segmentStartTime = _firstDataTimestamp!.add(Duration(milliseconds: (_currentSegment - 1) * _graphTimeWindow.inMilliseconds));
+      final segmentStartTime = _firstDataTimestamp!.add(Duration(
+          milliseconds: (_currentSegment - 1) *
+              _graphTimeWindow.inMilliseconds));
       _chartVisibleMin = segmentStartTime;
       _chartVisibleMax = segmentStartTime.add(_graphTimeWindow);
     });
@@ -732,14 +1056,17 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
 
   Widget _buildRealTimeGraph(bool isDarkMode) {
     final textColor = ThemeColors.getColor('dialogText', isDarkMode);
-    final axisLineColor = ThemeColors.getColor('serialPortCardBorder', isDarkMode);
+    final axisLineColor = ThemeColors.getColor(
+        'serialPortCardBorder', isDarkMode);
     List<CartesianSeries> series = [];
     List<PlotBand> plotBands = [];
-    final visibleChannels = _activeChannels.where((c) => _visibleGraphChannels.contains(c.startingCharacter)).toList();
+    final visibleChannels = _activeChannels.where((c) =>
+        _visibleGraphChannels.contains(c.startingCharacter)).toList();
 
     String yAxisTitleText;
     if (visibleChannels.length == 1) {
-      yAxisTitleText = '${visibleChannels.first.channelName} (${visibleChannels.first.unit})';
+      yAxisTitleText =
+      '${visibleChannels.first.channelName} (${visibleChannels.first.unit})';
     } else {
       yAxisTitleText = 'Value (Mixed Units)';
     }
@@ -747,21 +1074,84 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     for (var channel in visibleChannels) {
       final data = _graphData[channel.startingCharacter] ?? [];
       final alarmColor = Color(channel.targetAlarmColour);
-      if (channel.targetAlarmMax != null) plotBands.add(PlotBand(start: channel.targetAlarmMax!, end: channel.targetAlarmMax!, borderWidth: 1.5, borderColor: alarmColor.withOpacity(0.8), dashArray: const <double>[5, 5]));
-      if (channel.targetAlarmMin != null) plotBands.add(PlotBand(start: channel.targetAlarmMin!, end: channel.targetAlarmMin!, borderWidth: 1.5, borderColor: alarmColor.withOpacity(0.8), dashArray: const <double>[5, 5]));
-      series.add(LineSeries<ChartData, DateTime>(animationDuration: 0, dataSource: data, name: channel.channelName, color: channel.graphLineColour, xValueMapper: (ChartData d, _) => d.time, yValueMapper: (ChartData d, _) => d.value, markerSettings: MarkerSettings(isVisible: _showDataPoints, height: 3, width: 3, color: channel.graphLineColour)));
+      if (channel.targetAlarmMax != null) plotBands.add(PlotBand(
+          start: channel.targetAlarmMax!,
+          end: channel.targetAlarmMax!,
+          borderWidth: 1.5,
+          borderColor: alarmColor.withOpacity(0.8),
+          dashArray: const <double>[5, 5]));
+      if (channel.targetAlarmMin != null) plotBands.add(PlotBand(
+          start: channel.targetAlarmMin!,
+          end: channel.targetAlarmMin!,
+          borderWidth: 1.5,
+          borderColor: alarmColor.withOpacity(0.8),
+          dashArray: const <double>[5, 5]));
+      series.add(LineSeries<ChartData, DateTime>(animationDuration: 0,
+          dataSource: data,
+          name: channel.channelName,
+          color: channel.graphLineColour,
+          xValueMapper: (ChartData d, _) => d.time,
+          yValueMapper: (ChartData d, _) => d.value,
+          markerSettings: MarkerSettings(isVisible: _showDataPoints,
+              height: 3,
+              width: 3,
+              color: channel.graphLineColour)));
     }
 
     if (_showPeakValue && _globalPeakValues.isNotEmpty) {
       for (var channel in visibleChannels) {
         final peakData = _globalPeakValues[channel.channelName];
         if (peakData != null) {
-          series.add(ScatterSeries<ChartData, DateTime>(dataSource: [peakData], name: '${channel.channelName} (Peak)', color: channel.graphLineColour, markerSettings: const MarkerSettings(isVisible: true, height: 10, width: 10, shape: DataMarkerType.circle, borderWidth: 2, borderColor: Colors.black), xValueMapper: (ChartData d, _) => d.time, yValueMapper: (ChartData d, _) => d.value, dataLabelSettings: DataLabelSettings(isVisible: true, labelAlignment: ChartDataLabelAlignment.top, builder: (dynamic data, dynamic point, dynamic series, int pointIndex, int seriesIndex) => Container(padding: const EdgeInsets.all(4), decoration: BoxDecoration(color: channel.graphLineColour, borderRadius: BorderRadius.circular(4)), child: Text(peakData.value!.toStringAsFixed(channel.decimalPlaces), style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold))))));
+          series.add(ScatterSeries<ChartData, DateTime>(dataSource: [peakData],
+              name: '${channel.channelName} (Peak)',
+              color: channel.graphLineColour,
+              markerSettings: const MarkerSettings(isVisible: true,
+                  height: 10,
+                  width: 10,
+                  shape: DataMarkerType.circle,
+                  borderWidth: 2,
+                  borderColor: Colors.black),
+              xValueMapper: (ChartData d, _) => d.time,
+              yValueMapper: (ChartData d, _) => d.value,
+              dataLabelSettings: DataLabelSettings(isVisible: true,
+                  labelAlignment: ChartDataLabelAlignment.top,
+                  builder: (dynamic data, dynamic point, dynamic series,
+                      int pointIndex, int seriesIndex) =>
+                      Container(padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                              color: channel.graphLineColour,
+                              borderRadius: BorderRadius.circular(4)),
+                          child: Text(peakData.value!.toStringAsFixed(
+                              channel.decimalPlaces), style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold))))));
         }
       }
     }
 
-    return SfCartesianChart(primaryXAxis: DateTimeAxis(title: AxisTitle(text: 'Time (HH:mm:ss)', textStyle: TextStyle(color: textColor, fontSize: 12)), majorGridLines: MajorGridLines(width: 0.5, color: axisLineColor.withOpacity(0.5)), axisLine: AxisLine(width: 1, color: axisLineColor), labelStyle: TextStyle(color: textColor, fontSize: 10), minimum: _chartVisibleMin, maximum: _chartVisibleMax, dateFormat: DateFormat('HH:mm:ss'), intervalType: DateTimeIntervalType.auto), primaryYAxis: NumericAxis(title: AxisTitle(text: yAxisTitleText, textStyle: TextStyle(color: textColor, fontSize: 12)), majorGridLines: MajorGridLines(width: 0.5, color: axisLineColor.withOpacity(0.5)), axisLine: AxisLine(width: 1, color: axisLineColor), labelStyle: TextStyle(color: textColor, fontSize: 10), plotBands: plotBands), series: series, legend: Legend(isVisible: false), trackballBehavior: _trackballBehavior, zoomPanBehavior: _zoomPanBehavior);
+    return SfCartesianChart(primaryXAxis: DateTimeAxis(title: AxisTitle(
+        text: 'Time (HH:mm:ss)',
+        textStyle: TextStyle(color: textColor, fontSize: 12)),
+        majorGridLines: MajorGridLines(
+            width: 0.5, color: axisLineColor.withOpacity(0.5)),
+        axisLine: AxisLine(width: 1, color: axisLineColor),
+        labelStyle: TextStyle(color: textColor, fontSize: 10),
+        minimum: _chartVisibleMin,
+        maximum: _chartVisibleMax,
+        dateFormat: DateFormat('HH:mm:ss'),
+        intervalType: DateTimeIntervalType.auto),
+        primaryYAxis: NumericAxis(title: AxisTitle(text: yAxisTitleText,
+            textStyle: TextStyle(color: textColor, fontSize: 12)),
+            majorGridLines: MajorGridLines(
+                width: 0.5, color: axisLineColor.withOpacity(0.5)),
+            axisLine: AxisLine(width: 1, color: axisLineColor),
+            labelStyle: TextStyle(color: textColor, fontSize: 10),
+            plotBands: plotBands),
+        series: series,
+        legend: Legend(isVisible: false),
+        trackballBehavior: _trackballBehavior,
+        zoomPanBehavior: _zoomPanBehavior);
   }
 
   void _showChannelFilterDialog(BuildContext context, bool isDarkMode) {
@@ -772,8 +1162,10 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
-              title: Text('Select Channels', style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode))),
+              backgroundColor: ThemeColors.getColor(
+                  'dialogBackground', isDarkMode),
+              title: Text('Select Channels', style: TextStyle(
+                  color: ThemeColors.getColor('dialogText', isDarkMode))),
               content: SizedBox(
                 width: 250,
                 child: ListView.builder(
@@ -781,13 +1173,32 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
                   itemCount: _activeChannels.length,
                   itemBuilder: (context, index) {
                     final channel = _activeChannels[index];
-                    return CheckboxListTile(title: Text(channel.channelName, style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode))), value: tempVisibleChannels.contains(channel.startingCharacter), onChanged: (bool? value) => setDialogState(() => value == true ? tempVisibleChannels.add(channel.startingCharacter) : tempVisibleChannels.remove(channel.startingCharacter)));
+                    return CheckboxListTile(
+                        title: Text(channel.channelName, style: TextStyle(
+                            color: ThemeColors.getColor(
+                                'dialogText', isDarkMode))),
+                        value: tempVisibleChannels.contains(
+                            channel.startingCharacter),
+                        onChanged: (bool? value) =>
+                            setDialogState(() =>
+                            value == true
+                                ? tempVisibleChannels.add(
+                                channel.startingCharacter)
+                                : tempVisibleChannels.remove(
+                                channel.startingCharacter)));
                   },
                 ),
               ),
               actions: [
-                TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const Text('Cancel')),
-                TextButton(child: Text('Apply', style: TextStyle(color: ThemeColors.getColor('submitButton', isDarkMode))), onPressed: () { setState(() => _visibleGraphChannels = tempVisibleChannels); Navigator.of(dialogContext).pop(); }),
+                TextButton(onPressed: () => Navigator.of(dialogContext).pop(),
+                    child: const Text('Cancel')),
+                TextButton(child: Text('Apply', style: TextStyle(
+                    color: ThemeColors.getColor('submitButton', isDarkMode))),
+                    onPressed: () {
+                      setState(() =>
+                      _visibleGraphChannels = tempVisibleChannels);
+                      Navigator.of(dialogContext).pop();
+                    }),
               ],
             );
           },
@@ -804,7 +1215,8 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: _activeChannels.map((channel) {
-            final isVisible = _visibleGraphChannels.contains(channel.startingCharacter);
+            final isVisible = _visibleGraphChannels.contains(
+                channel.startingCharacter);
             return InkWell(
               onTap: () => _showColorPicker(channel, isDarkMode),
               borderRadius: BorderRadius.circular(4),
@@ -812,9 +1224,16 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
                 padding: const EdgeInsets.symmetric(horizontal: 8.0),
                 child: Row(
                   children: [
-                    Container(width: 12, height: 12, decoration: BoxDecoration(color: isVisible ? channel.graphLineColour : Colors.grey, borderRadius: BorderRadius.circular(2))),
+                    Container(width: 12, height: 12, decoration: BoxDecoration(
+                        color: isVisible ? channel.graphLineColour : Colors
+                            .grey, borderRadius: BorderRadius.circular(2))),
                     const SizedBox(width: 8),
-                    Text(channel.channelName, style: TextStyle(fontSize: 12, color: isVisible ? ThemeColors.getColor('dialogText', isDarkMode) : Colors.grey, decoration: isVisible ? TextDecoration.none : TextDecoration.lineThrough)),
+                    Text(channel.channelName, style: TextStyle(fontSize: 12,
+                        color: isVisible ? ThemeColors.getColor(
+                            'dialogText', isDarkMode) : Colors.grey,
+                        decoration: isVisible
+                            ? TextDecoration.none
+                            : TextDecoration.lineThrough)),
                   ],
                 ),
               ),
@@ -827,7 +1246,8 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
 
   Widget _buildControlPanel(bool isDarkMode) {
     Color statusColor;
-    if (_statusMessage.startsWith("Error") || _statusMessage.contains("lost") || _statusMessage.contains("stopped")) {
+    if (_statusMessage.startsWith("Error") || _statusMessage.contains("lost") ||
+        _statusMessage.contains("stopped")) {
       statusColor = Colors.red.shade400;
     } else if (_isPortOpen && _isDataFlowing) {
       statusColor = Colors.green.shade400;
@@ -842,24 +1262,53 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
         padding: const EdgeInsets.all(12.0),
         child: Column(
           children: [
-            Text('Status: $_statusMessage', style: GoogleFonts.firaCode(fontSize: 13, color: statusColor), textAlign: TextAlign.center),
+            Text('Status: $_statusMessage',
+                style: GoogleFonts.firaCode(fontSize: 13, color: statusColor),
+                textAlign: TextAlign.center),
             const SizedBox(height: 16),
             Row(children: [
-              Expanded(child: _buildControlButton(label: 'Connect', icon: Icons.power_settings_new, onPressed: _isPortOpen || _isAttemptingReconnect ? null : _connectAndRead, isDarkMode: isDarkMode)),
+              Expanded(child: _buildControlButton(label: 'Connect',
+                  icon: Icons.power_settings_new,
+                  onPressed: _isPortOpen || _isAttemptingReconnect
+                      ? null
+                      : _connectAndRead,
+                  isDarkMode: isDarkMode)),
               const SizedBox(width: 10),
-              Expanded(child: _buildControlButton(label: 'Disconnect', icon: Icons.link_off, onPressed: _isPortOpen || _isAttemptingReconnect ? _disconnectPort : null, color: ThemeColors.getColor('resetButton', isDarkMode), isDarkMode: isDarkMode)),
+              Expanded(child: _buildControlButton(label: 'Disconnect',
+                  icon: Icons.link_off,
+                  onPressed: _isPortOpen || _isAttemptingReconnect
+                      ? _disconnectPort
+                      : null,
+                  color: ThemeColors.getColor('resetButton', isDarkMode),
+                  isDarkMode: isDarkMode)),
             ]),
             const SizedBox(height: 10),
             Row(children: [
-              Expanded(child: _buildControlButton(label: 'Open', icon: Icons.folder_open, onPressed: _showOpenFileDialog, isDarkMode: isDarkMode)),
+              Expanded(child: _buildControlButton(label: 'Open',
+                  icon: Icons.folder_open,
+                  onPressed: _showOpenFileDialog,
+                  isDarkMode: isDarkMode)),
               const SizedBox(width: 10),
-              Expanded(child: _buildControlButton(label: 'Save', icon: Icons.save, onPressed: null, isDarkMode: isDarkMode, color: Colors.grey.shade600)),
+              Expanded(child: _buildControlButton(label: 'Save',
+                  icon: Icons.save,
+                  onPressed: _isDataDirty ? _saveData : null,
+                  isDarkMode: isDarkMode,
+                  color: _isDataDirty ? ThemeColors.getColor(
+                      'submitButton', isDarkMode) : Colors.grey.shade600)),
             ]),
             const SizedBox(height: 10),
             Row(children: [
-              Expanded(child: _buildControlButton(label: 'Clear Data', icon: Icons.cleaning_services_rounded, onPressed: _onClearPressed, isDarkMode: isDarkMode, color: Colors.orange.shade800)),
+              Expanded(child: _buildControlButton(label: 'Clear Data',
+                  icon: Icons.cleaning_services_rounded,
+                  onPressed: _onClearPressed,
+                  isDarkMode: isDarkMode,
+                  color: Colors.orange.shade800)),
               const SizedBox(width: 10),
-              Expanded(child: _buildControlButton(label: 'Exit', icon: Icons.exit_to_app, onPressed: _isPortOpen ? null : _onExitPressed, isDarkMode: isDarkMode, color: Colors.red.shade700)),
+              Expanded(child: _buildControlButton(label: 'Exit',
+                  icon: Icons.exit_to_app,
+                  onPressed: _isPortOpen ? null : _onExitPressed,
+                  isDarkMode: isDarkMode,
+                  color: Colors.red.shade700)),
             ]),
           ],
         ),
@@ -867,10 +1316,10 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     );
   }
 
-  // NEW: Redesigned compact control panel
   Widget _buildCompactControlPanel(bool isDarkMode) {
     Color statusColor;
-    if (_statusMessage.startsWith("Error") || _statusMessage.contains("lost") || _statusMessage.contains("stopped")) {
+    if (_statusMessage.startsWith("Error") || _statusMessage.contains("lost") ||
+        _statusMessage.contains("stopped")) {
       statusColor = Colors.red.shade400;
     } else if (_isPortOpen && _isDataFlowing) {
       statusColor = Colors.green.shade400;
@@ -887,24 +1336,56 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
           children: [
             Padding(
               padding: const EdgeInsets.only(bottom: 12.0),
-              child: Text('Status: $_statusMessage', style: GoogleFonts.firaCode(fontSize: 13, color: statusColor), textAlign: TextAlign.center),
+              child: Text('Status: $_statusMessage',
+                  style: GoogleFonts.firaCode(fontSize: 13, color: statusColor),
+                  textAlign: TextAlign.center),
             ),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                Expanded(child: _buildControlButton(label: 'Connect', icon: Icons.power_settings_new, onPressed: _isPortOpen || _isAttemptingReconnect ? null : _connectAndRead, isDarkMode: isDarkMode)),
+                Expanded(child: _buildControlButton(label: 'Connect',
+                    icon: Icons.power_settings_new,
+                    onPressed: _isPortOpen || _isAttemptingReconnect
+                        ? null
+                        : _connectAndRead,
+                    isDarkMode: isDarkMode)),
                 const SizedBox(width: 10),
-                Expanded(child: _buildControlButton(label: 'Disconnect', icon: Icons.link_off, onPressed: _isPortOpen || _isAttemptingReconnect ? _disconnectPort : null, color: ThemeColors.getColor('resetButton', isDarkMode), isDarkMode: isDarkMode)),
+                Expanded(child: _buildControlButton(label: 'Disconnect',
+                    icon: Icons.link_off,
+                    onPressed: _isPortOpen || _isAttemptingReconnect
+                        ? _disconnectPort
+                        : null,
+                    color: ThemeColors.getColor('resetButton', isDarkMode),
+                    isDarkMode: isDarkMode)),
                 const SizedBox(width: 10),
-                Expanded(child: _buildControlButton(label: 'Open', icon: Icons.folder_open, onPressed: _showOpenFileDialog, isDarkMode: isDarkMode)),
+                Expanded(child: _buildControlButton(label: 'Open',
+                    icon: Icons.folder_open,
+                    onPressed: _showOpenFileDialog,
+                    isDarkMode: isDarkMode)),
                 const SizedBox(width: 10),
-                Expanded(child: _buildControlButton(label: 'Save', icon: Icons.save, onPressed: null, isDarkMode: isDarkMode, color: Colors.grey.shade600)),
+                Expanded(child: _buildControlButton(label: 'Save',
+                    icon: Icons.save,
+                    onPressed: _isDataDirty ? _saveData : null,
+                    isDarkMode: isDarkMode,
+                    color: _isDataDirty ? ThemeColors.getColor(
+                        'submitButton', isDarkMode) : Colors.grey.shade600)),
                 const SizedBox(width: 10),
-                Expanded(child: _buildControlButton(label: 'Mode', icon: LucideIcons.layoutGrid, onPressed: () => _showModeDialog(context, isDarkMode), isDarkMode: isDarkMode)),
+                Expanded(child: _buildControlButton(label: 'Mode',
+                    icon: LucideIcons.layoutGrid,
+                    onPressed: () => _showModeDialog(context, isDarkMode),
+                    isDarkMode: isDarkMode)),
                 const SizedBox(width: 10),
-                Expanded(child: _buildControlButton(label: 'Clear Data', icon: Icons.cleaning_services_rounded, onPressed: _onClearPressed, isDarkMode: isDarkMode, color: Colors.orange.shade800)),
+                Expanded(child: _buildControlButton(label: 'Clear Data',
+                    icon: Icons.cleaning_services_rounded,
+                    onPressed: _onClearPressed,
+                    isDarkMode: isDarkMode,
+                    color: Colors.orange.shade800)),
                 const SizedBox(width: 10),
-                Expanded(child: _buildControlButton(label: 'Exit', icon: Icons.exit_to_app, onPressed: _isPortOpen ? null : _onExitPressed, isDarkMode: isDarkMode, color: Colors.red.shade700)),
+                Expanded(child: _buildControlButton(label: 'Exit',
+                    icon: Icons.exit_to_app,
+                    onPressed: _isPortOpen ? null : _onExitPressed,
+                    isDarkMode: isDarkMode,
+                    color: Colors.red.shade700)),
               ],
             ),
           ],
@@ -913,60 +1394,283 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     );
   }
 
-  Widget _buildHeaderTextField(String label, TextEditingController controller, bool isDarkMode, {double width = 200}) => SizedBox(width: width, child: TextField(controller: controller, style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode), fontSize: 14, fontWeight: FontWeight.w500), decoration: InputDecoration(labelText: label, labelStyle: TextStyle(color: ThemeColors.getColor('dialogSubText', isDarkMode)), isDense: true, contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12), border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)), enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: ThemeColors.getColor('serialPortCardBorder', isDarkMode))))));
+  Widget _buildHeaderTextField(String label, TextEditingController controller,
+      bool isDarkMode, {double width = 200}) =>
+      SizedBox(width: width,
+          child: TextField(controller: controller,
+              onChanged: (v) => setState(() => _isDataDirty = true),
+              style: TextStyle(
+                  color: ThemeColors.getColor('dialogText', isDarkMode),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500),
+              decoration: InputDecoration(labelText: label,
+                  labelStyle: TextStyle(
+                      color: ThemeColors.getColor('dialogSubText', isDarkMode)),
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(
+                      vertical: 10, horizontal: 12),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8)),
+                  enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: ThemeColors.getColor(
+                          'serialPortCardBorder', isDarkMode))))));
 
-  Widget _buildEditableDuration(String label, Duration duration, bool isDarkMode, ValueChanged<Duration> onDurationChanged, {bool showSeconds = true, bool showDays = false}) {
+  Widget _buildEditableDuration(String label, Duration duration,
+      bool isDarkMode, ValueChanged<Duration> onDurationChanged,
+      {bool showSeconds = true, bool showDays = false}) {
     String formatDurationReadable(Duration d) {
       if (d.inSeconds < 60 && !showDays) return '${d.inSeconds}s';
-      if (d.inMinutes < 60 && !showDays) return '${d.inMinutes}m ${d.inSeconds.remainder(60)}s';
-      if (d.inHours < 24 && !showDays) return '${d.inHours}h ${d.inMinutes.remainder(60)}m';
+      if (d.inMinutes < 60 && !showDays)
+        return '${d.inMinutes}m ${d.inSeconds.remainder(60)}s';
+      if (d.inHours < 24 && !showDays)
+        return '${d.inHours}h ${d.inMinutes.remainder(60)}m';
       var parts = [];
       if (d.inDays > 0 || showDays) parts.add('${d.inDays}d');
-      if (d.inHours.remainder(24) > 0 || parts.isNotEmpty) parts.add('${d.inHours.remainder(24)}h');
+      if (d.inHours.remainder(24) > 0 || parts.isNotEmpty) parts.add(
+          '${d.inHours.remainder(24)}h');
       parts.add('${d.inMinutes.remainder(60)}m');
       if (showSeconds) parts.add('${d.inSeconds.remainder(60)}s');
       return parts.join(' ');
     }
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(label, style: TextStyle(color: ThemeColors.getColor('dialogSubText', isDarkMode), fontSize: 12)), const SizedBox(height: 4), InkWell(onTap: () => _showDurationPickerDialog(label, duration, isDarkMode, onDurationChanged, showSeconds, showDays), child: Container(padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12), decoration: BoxDecoration(borderRadius: BorderRadius.circular(8), border: Border.all(color: ThemeColors.getColor('serialPortCardBorder', isDarkMode))), child: Text(formatDurationReadable(duration), style: GoogleFonts.firaCode(fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w500))))]);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: TextStyle(
+              color: ThemeColors.getColor('dialogSubText', isDarkMode),
+              fontSize: 12)),
+          const SizedBox(height: 4),
+          InkWell(onTap: () =>
+              _showDurationPickerDialog(
+                  label, duration, isDarkMode, onDurationChanged, showSeconds,
+                  showDays),
+              child: Container(padding: const EdgeInsets.symmetric(
+                  vertical: 8, horizontal: 12),
+                  decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: ThemeColors.getColor(
+                          'serialPortCardBorder', isDarkMode))),
+                  child: Text(formatDurationReadable(duration),
+                      style: GoogleFonts.firaCode(fontSize: 14,
+                          color: ThemeColors.getColor('dialogText', isDarkMode),
+                          fontWeight: FontWeight.w500))))
+        ]);
   }
 
-  Widget _buildControlButton({required String label, required IconData icon, required VoidCallback? onPressed, required bool isDarkMode, Color? color}) {
-    final buttonColor = color ?? ThemeColors.getColor('submitButton', isDarkMode);
-    return ElevatedButton.icon(icon: Icon(icon, size: 16), label: Text(label, style: const TextStyle(fontSize: 13, overflow: TextOverflow.ellipsis)), onPressed: onPressed, style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8), backgroundColor: buttonColor, foregroundColor: Colors.white, disabledBackgroundColor: buttonColor.withOpacity(0.4), disabledForegroundColor: Colors.white.withOpacity(0.7), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))));
+  Widget _buildControlButton(
+      {required String label, required IconData icon, required VoidCallback? onPressed, required bool isDarkMode, Color? color}) {
+    final buttonColor = color ??
+        ThemeColors.getColor('submitButton', isDarkMode);
+    return ElevatedButton.icon(icon: Icon(icon, size: 16),
+        label: Text(label, style: const TextStyle(
+            fontSize: 13, overflow: TextOverflow.ellipsis)),
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+            backgroundColor: buttonColor,
+            foregroundColor: Colors.white,
+            disabledBackgroundColor: buttonColor.withOpacity(0.4),
+            disabledForegroundColor: Colors.white.withOpacity(0.7),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8))));
   }
 
-  Future<bool> _showUnsavedDataDialog() async => !_isDataDirty || (await showDialog<bool>(
-    context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('Unsaved Data'),
-      content: const Text('You have unsaved data. Are you sure you want to continue? All unsaved data will be lost.'),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(false),
-          child: const Text('Cancel'),
-        ),
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(true),
-          child: Text('Continue', style: TextStyle(color: Colors.red.shade400)),
-        ),
-      ],
-    ),
-  )) == true;
+  Future<bool> _showUnsavedDataDialog() async =>
+      !_isDataDirty || (await showDialog<bool>(
+        context: context,
+        builder: (context) =>
+            AlertDialog(
+              title: const Text('Unsaved Data'),
+              content: const Text(
+                  'You have unsaved data. Are you sure you want to continue? All unsaved data will be lost.'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: Text(
+                      'Continue', style: TextStyle(color: Colors.red.shade400)),
+                ),
+              ],
+            ),
+      )) == true;
 
-  void _showColorPicker(ActiveChannel channel, bool isDarkMode) => showDialog(context: context, builder: (context) => AlertDialog(backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode), title: Text('Select Channel Color', style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode))), content: SingleChildScrollView(child: ColorPicker(pickerColor: channel.graphLineColour, onColorChanged: (color) => setState(() => channel.graphLineColour = color))), actions: [TextButton(child: Text('OK', style: TextStyle(color: ThemeColors.getColor('submitButton', isDarkMode))), onPressed: () => Navigator.of(context).pop())]));
-
-  void _showDurationPickerDialog(String title, Duration initialDuration, bool isDarkMode, ValueChanged<Duration> onConfirm, bool showSeconds, bool showDays) {
-    final dCtrl = TextEditingController(text: showDays ? initialDuration.inDays.toString() : '0');
-    final hCtrl = TextEditingController(text: initialDuration.inHours.remainder(24).toString());
-    final mCtrl = TextEditingController(text: initialDuration.inMinutes.remainder(60).toString());
-    final sCtrl = TextEditingController(text: initialDuration.inSeconds.remainder(60).toString());
-    void setDuration(Duration d) { dCtrl.text = showDays ? d.inDays.toString() : '0'; hCtrl.text = d.inHours.remainder(24).toString(); mCtrl.text = d.inMinutes.remainder(60).toString(); sCtrl.text = d.inSeconds.remainder(60).toString(); }
-    showDialog(context: context, builder: (context) => AlertDialog(backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode), title: Text('Set $title', style: TextStyle(color: ThemeColors.getColor('dialogText', isDarkMode))), content: Column(mainAxisSize: MainAxisSize.min, children: [Wrap(spacing: 8.0, runSpacing: 4.0, children: [ActionChip(label: const Text('1 min'), onPressed: () => setDuration(const Duration(minutes: 1))), ActionChip(label: const Text('5 min'), onPressed: () => setDuration(const Duration(minutes: 5))), ActionChip(label: const Text('10 min'), onPressed: () => setDuration(const Duration(minutes: 10))), ActionChip(label: const Text('30 min'), onPressed: () => setDuration(const Duration(minutes: 30))), ActionChip(label: const Text('1 hour'), onPressed: () => setDuration(const Duration(hours: 1)))]), const SizedBox(height: 20), Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [if (showDays) ...[_durationTextField(dCtrl, 'DD', isDarkMode), Text(':', style: TextStyle(fontSize: 24, color: ThemeColors.getColor('dialogText', isDarkMode)))], _durationTextField(hCtrl, 'HH', isDarkMode), Text(':', style: TextStyle(fontSize: 24, color: ThemeColors.getColor('dialogText', isDarkMode))), _durationTextField(mCtrl, 'MM', isDarkMode), if (showSeconds) ...[Text(':', style: TextStyle(fontSize: 24, color: ThemeColors.getColor('dialogText', isDarkMode))), _durationTextField(sCtrl, 'SS', isDarkMode)]])]), actions: [TextButton(child: const Text('Cancel'), onPressed: () => Navigator.of(context).pop()), TextButton(child: Text('OK', style: TextStyle(color: ThemeColors.getColor('submitButton', isDarkMode))), onPressed: () { final d = int.tryParse(dCtrl.text) ?? 0; final h = int.tryParse(hCtrl.text) ?? 0; final m = int.tryParse(mCtrl.text) ?? 0; final s = int.tryParse(sCtrl.text) ?? 0; onConfirm(Duration(days: d, hours: h, minutes: m, seconds: s)); Navigator.of(context).pop(); })]));
+  void _showColorPicker(ActiveChannel channel, bool isDarkMode) {
+    Color pickedColor = channel.graphLineColour;
+    showDialog(
+      context: context,
+      builder: (context) {
+        bool isDefault = false;
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            return AlertDialog(
+              backgroundColor: ThemeColors.getColor(
+                  'dialogBackground', isDarkMode),
+              title: Text('Select Channel Color', style: TextStyle(
+                  color: ThemeColors.getColor('dialogText', isDarkMode))),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ColorPicker(pickerColor: pickedColor,
+                        onColorChanged: (color) => pickedColor = color),
+                    const Divider(),
+                    CheckboxListTile(
+                      title: Text("Set as default for this channel",
+                          style: TextStyle(color: ThemeColors.getColor(
+                              'dialogText', isDarkMode))),
+                      value: isDefault,
+                      onChanged: (value) =>
+                          setDialogState(() =>
+                          isDefault = value ?? false),
+                      controlAffinity: ListTileControlAffinity.leading,
+                      activeColor: Theme
+                          .of(context)
+                          .primaryColor,
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(child: const Text('Cancel'),
+                    onPressed: () => Navigator.of(context).pop()),
+                TextButton(
+                  child: Text('OK', style: TextStyle(
+                      color: ThemeColors.getColor('submitButton', isDarkMode))),
+                  onPressed: () {
+                    setState(() => channel.graphLineColour = pickedColor);
+                    if (isDefault) {
+                      _updateChannelColorInDatabase(channel);
+                    }
+                    Navigator.of(context).pop();
+                  },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
-  Widget _durationTextField(TextEditingController controller, String label, bool isDarkMode) => SizedBox(width: 50, child: TextField(controller: controller, textAlign: TextAlign.center, keyboardType: TextInputType.number, style: TextStyle(fontSize: 20, color: ThemeColors.getColor('dialogText', isDarkMode)), decoration: InputDecoration(labelText: label, labelStyle: TextStyle(color: ThemeColors.getColor('dialogSubText', isDarkMode)))));
+  void _showDurationPickerDialog(String title, Duration initialDuration,
+      bool isDarkMode, ValueChanged<Duration> onConfirm, bool showSeconds,
+      bool showDays) {
+    final dCtrl = TextEditingController(
+        text: showDays ? initialDuration.inDays.toString() : '0');
+    final hCtrl = TextEditingController(
+        text: initialDuration.inHours.remainder(24).toString());
+    final mCtrl = TextEditingController(
+        text: initialDuration.inMinutes.remainder(60).toString());
+    final sCtrl = TextEditingController(
+        text: initialDuration.inSeconds.remainder(60).toString());
+    void setDuration(Duration d) {
+      dCtrl.text = showDays ? d.inDays.toString() : '0';
+      hCtrl.text = d.inHours.remainder(24).toString();
+      mCtrl.text = d.inMinutes.remainder(60).toString();
+      sCtrl.text = d.inSeconds.remainder(60).toString();
+    }
+    showDialog(context: context, builder: (context) =>
+        AlertDialog(backgroundColor: ThemeColors.getColor(
+            'dialogBackground', isDarkMode),
+            title: Text('Set $title', style: TextStyle(
+                color: ThemeColors.getColor('dialogText', isDarkMode))),
+            content: Column(mainAxisSize: MainAxisSize.min,
+                children: [
+                  Wrap(spacing: 8.0,
+                      runSpacing: 4.0,
+                      children: [
+                        ActionChip(label: const Text('1 min'),
+                            onPressed: () =>
+                                setDuration(const Duration(minutes: 1))),
+                        ActionChip(label: const Text('5 min'),
+                            onPressed: () =>
+                                setDuration(const Duration(minutes: 5))),
+                        ActionChip(label: const Text('10 min'),
+                            onPressed: () =>
+                                setDuration(const Duration(minutes: 10))),
+                        ActionChip(label: const Text('30 min'),
+                            onPressed: () =>
+                                setDuration(const Duration(minutes: 30))),
+                        ActionChip(label: const Text('1 hour'),
+                            onPressed: () =>
+                                setDuration(const Duration(hours: 1)))
+                      ]),
+                  const SizedBox(height: 20),
+                  Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        if (showDays) ...[
+                          _durationTextField(dCtrl, 'DD', isDarkMode),
+                          Text(':', style: TextStyle(fontSize: 24,
+                              color: ThemeColors.getColor(
+                                  'dialogText', isDarkMode)))
+                        ],
+                        _durationTextField(hCtrl, 'HH', isDarkMode),
+                        Text(':', style: TextStyle(fontSize: 24,
+                            color: ThemeColors.getColor(
+                                'dialogText', isDarkMode))),
+                        _durationTextField(mCtrl, 'MM', isDarkMode),
+                        if (showSeconds) ...[
+                          Text(':', style: TextStyle(fontSize: 24,
+                              color: ThemeColors.getColor(
+                                  'dialogText', isDarkMode))),
+                          _durationTextField(sCtrl, 'SS', isDarkMode)
+                        ]
+                      ])
+                ]),
+            actions: [
+              TextButton(child: const Text('Cancel'),
+                  onPressed: () => Navigator.of(context).pop()),
+              TextButton(child: Text('OK', style: TextStyle(
+                  color: ThemeColors.getColor('submitButton', isDarkMode))),
+                  onPressed: () {
+                    final d = int.tryParse(dCtrl.text) ?? 0;
+                    final h = int.tryParse(hCtrl.text) ?? 0;
+                    final m = int.tryParse(mCtrl.text) ?? 0;
+                    final s = int.tryParse(sCtrl.text) ?? 0;
+                    onConfirm(
+                        Duration(days: d, hours: h, minutes: m, seconds: s));
+                    Navigator.of(context).pop();
+                  })
+            ]));
+  }
 
-  Widget _buildDialogButton({required String text, required IconData icon, required LinearGradient gradient, required VoidCallback onPressed}) => GestureDetector(onTap: onPressed, child: Container(padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), decoration: BoxDecoration(gradient: gradient, borderRadius: BorderRadius.circular(12), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8, offset: const Offset(0, 4))]), child: Row(mainAxisAlignment: MainAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [Icon(icon, color: Colors.white, size: 20), const SizedBox(width: 8), Text(text, style: GoogleFonts.poppins(fontSize: 14, color: Colors.white, fontWeight: FontWeight.w600), overflow: TextOverflow.visible, softWrap: false)])));
+  Widget _durationTextField(TextEditingController controller, String label,
+      bool isDarkMode) =>
+      SizedBox(width: 50,
+          child: TextField(controller: controller,
+              textAlign: TextAlign.center,
+              keyboardType: TextInputType.number,
+              style: TextStyle(fontSize: 20,
+                  color: ThemeColors.getColor('dialogText', isDarkMode)),
+              decoration: InputDecoration(labelText: label,
+                  labelStyle: TextStyle(color: ThemeColors.getColor(
+                      'dialogSubText', isDarkMode)))));
+
+  Widget _buildDialogButton(
+      {required String text, required IconData icon, required LinearGradient gradient, required VoidCallback onPressed}) =>
+      GestureDetector(onTap: onPressed,
+          child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(gradient: gradient,
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(color: Colors.black.withOpacity(0.2),
+                        blurRadius: 8,
+                        offset: const Offset(0, 4))
+                  ]),
+              child: Row(mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(icon, color: Colors.white, size: 20),
+                    const SizedBox(width: 8),
+                    Text(text, style: GoogleFonts.poppins(fontSize: 14,
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600),
+                        overflow: TextOverflow.visible,
+                        softWrap: false)
+                  ])));
 
   void _showModeDialog(BuildContext context, bool isDarkMode) {
     showDialog(
@@ -976,32 +1680,84 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
         return BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
           child: Dialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-            backgroundColor: ThemeColors.getColor('dialogBackground', isDarkMode),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20)),
+            backgroundColor: ThemeColors.getColor(
+                'dialogBackground', isDarkMode),
             child: Container(
               width: 400,
               padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(borderRadius: BorderRadius.circular(20), gradient: LinearGradient(colors: [ThemeColors.getColor('dialogBackground', isDarkMode), ThemeColors.getColor('dialogBackground', isDarkMode).withOpacity(0.9)], begin: Alignment.topLeft, end: Alignment.bottomRight)),
+              decoration: BoxDecoration(borderRadius: BorderRadius.circular(20),
+                  gradient: LinearGradient(colors: [
+                    ThemeColors.getColor('dialogBackground', isDarkMode),
+                    ThemeColors
+                        .getColor('dialogBackground', isDarkMode)
+                        .withOpacity(0.9)
+                  ], begin: Alignment.topLeft, end: Alignment.bottomRight)),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text('Select Mode', style: GoogleFonts.poppins(fontSize: 22, fontWeight: FontWeight.w600, color: ThemeColors.getColor('dialogText', isDarkMode))),
+                  Text('Select Mode', style: GoogleFonts.poppins(fontSize: 22,
+                      fontWeight: FontWeight.w600,
+                      color: ThemeColors.getColor('dialogText', isDarkMode))),
                   const SizedBox(height: 12),
-                  Text('Choose your preferred options', style: GoogleFonts.poppins(fontSize: 14, color: ThemeColors.getColor('dialogSubText', isDarkMode))),
+                  Text('Choose your preferred options',
+                      style: GoogleFonts.poppins(fontSize: 14,
+                          color: ThemeColors.getColor(
+                              'dialogSubText', isDarkMode))),
                   const SizedBox(height: 24),
                   Column(
                     children: [
-                      _buildDialogButton(text: 'Graph Mode', icon: LucideIcons.barChart2, gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'graph'), onPressed: () { setState(() => _currentDisplayMode = 'Graph'); MessageUtils.showMessage(context, 'Switched to Graph mode!'); Navigator.of(dialogContext).pop(); }),
+                      _buildDialogButton(text: 'Graph Mode',
+                          icon: LucideIcons.barChart2,
+                          gradient: ThemeColors.getDialogButtonGradient(
+                              isDarkMode, 'graph'),
+                          onPressed: () {
+                            setState(() => _currentDisplayMode = 'Graph');
+                            MessageUtils.showMessage(context,
+                                'Switched to Graph mode!');
+                            Navigator.of(dialogContext).pop();
+                          }),
                       const SizedBox(height: 12),
-                      _buildDialogButton(text: 'Table Mode', icon: LucideIcons.table, gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'table'), onPressed: () { setState(() => _currentDisplayMode = 'Table'); MessageUtils.showMessage(context, 'Switched to Table mode!'); Navigator.of(dialogContext).pop(); }),
+                      _buildDialogButton(text: 'Table Mode',
+                          icon: LucideIcons.table,
+                          gradient: ThemeColors.getDialogButtonGradient(
+                              isDarkMode, 'table'),
+                          onPressed: () {
+                            setState(() => _currentDisplayMode = 'Table');
+                            MessageUtils.showMessage(context,
+                                'Switched to Table mode!');
+                            Navigator.of(dialogContext).pop();
+                          }),
                       const SizedBox(height: 12),
-                      _buildDialogButton(text: 'Combined Mode', icon: LucideIcons.layoutGrid, gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'combined'), onPressed: () { setState(() => _currentDisplayMode = 'Combined'); MessageUtils.showMessage(context, 'Switched to Combined mode!'); Navigator.of(dialogContext).pop(); }),
+                      _buildDialogButton(text: 'Combined Mode',
+                          icon: LucideIcons.layoutGrid,
+                          gradient: ThemeColors.getDialogButtonGradient(
+                              isDarkMode, 'combined'),
+                          onPressed: () {
+                            setState(() => _currentDisplayMode = 'Combined');
+                            MessageUtils.showMessage(context,
+                                'Switched to Combined mode!');
+                            Navigator.of(dialogContext).pop();
+                          }),
                       const SizedBox(height: 12),
-                      _buildDialogButton(text: isDarkMode ? 'Light Theme' : 'Dark Theme', icon: isDarkMode ? LucideIcons.sun : LucideIcons.moon, gradient: ThemeColors.getDialogButtonGradient(isDarkMode, 'restore'), onPressed: () { Global.saveTheme(!isDarkMode); Navigator.of(dialogContext).pop(); }),
+                      _buildDialogButton(
+                          text: isDarkMode ? 'Light Theme' : 'Dark Theme',
+                          icon: isDarkMode ? LucideIcons.sun : LucideIcons.moon,
+                          gradient: ThemeColors.getDialogButtonGradient(
+                              isDarkMode, 'restore'),
+                          onPressed: () {
+                            Global.saveTheme(!isDarkMode);
+                            Navigator.of(dialogContext).pop();
+                          }),
                     ],
                   ),
                   const SizedBox(height: 24),
-                  TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: Text('Cancel', style: GoogleFonts.poppins(fontSize: 16, color: Colors.redAccent, fontWeight: FontWeight.w600))),
+                  TextButton(onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: Text('Cancel', style: GoogleFonts.poppins(
+                          fontSize: 16,
+                          color: Colors.redAccent,
+                          fontWeight: FontWeight.w600))),
                 ],
               ),
             ),
@@ -1009,5 +1765,284 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
         );
       },
     );
+  }
+
+  Future<void> _saveData() async {
+    if (_isSaving || !_isDataDirty) {
+      return;
+    }
+
+    setState(() => _isSaving = true);
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) =>
+      const Dialog(
+        child: Padding(
+          padding: EdgeInsets.all(20.0),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(width: 20),
+              Text("Saving data...")
+            ],
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final isFirstSave = _sessionDbName == null;
+
+      if (isFirstSave) {
+        _recNo = (prefs.getInt('recNo') ?? 0) + 1;
+        final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+        _sessionDbName = 'serial_data_$timestamp.db';
+      }
+
+      final mainDb = await DatabaseManager().database;
+      final sessionDb = await SessionDatabaseManager().openSessionDatabase(
+          _sessionDbName!);
+
+      final testPayload = _prepareTestPayload(_filenameController.text);
+      final test1Payload = _prepareTest1Payload();
+
+      await mainDb.insert(
+          'Test', testPayload, conflictAlgorithm: ConflictAlgorithm.replace);
+      await sessionDb.insert(
+          'Test', testPayload, conflictAlgorithm: ConflictAlgorithm.replace);
+
+      if (isFirstSave) {
+        final test2Payload = _prepareTest2Payload();
+        await sessionDb.insert(
+            'Test2', test2Payload, conflictAlgorithm: ConflictAlgorithm.ignore);
+      }
+
+      if (test1Payload.isNotEmpty) {
+        final batch = sessionDb.batch();
+        for (final row in test1Payload) {
+          batch.insert('Test1', row);
+        }
+        await batch.commit(noResult: true);
+      }
+
+      if (isFirstSave) {
+        await prefs.setInt('recNo', _recNo!);
+      }
+
+      setState(() {
+        _savedTableRowCount = _tableData.length;
+        _isDataDirty = false;
+      });
+
+      if (mounted) {
+        MessageUtils.showMessage(
+            context, "Data saved successfully to $_sessionDbName");
+      }
+    } catch (e, s) {
+      LogPage.addLog("Save Error: $e\n$s");
+      if (mounted) {
+        MessageUtils.showMessage(
+            context, "An error occurred while saving: $e", isError: true);
+      }
+    } finally {
+      if (mounted) Navigator.of(context).pop();
+      setState(() => _isSaving = false);
+    }
+  }
+
+  Map<String, dynamic> _prepareTestPayload(String userFacingFileName) {
+    final now = DateTime.now();
+    final testDuration = _firstDataTimestamp != null ? now.difference(
+        _firstDataTimestamp!) : Duration.zero;
+
+    double maxY = 0.0;
+    double minY = 0.0;
+    if (_activeChannels.isNotEmpty) {
+      maxY = _activeChannels
+          .map((c) => c.originalChannel.chartMaximumValue)
+          .reduce((a, b) =>
+      a > b ? a : b);
+      minY = _activeChannels
+          .map((c) => c.originalChannel.chartMinimumValue)
+          .reduce((a, b) =>
+      a < b ? a : b);
+    }
+
+    return {
+      'RecNo': _recNo?.toDouble(),
+      'FName': userFacingFileName,
+      'OperatorName': _operatorController.text.isNotEmpty ? _operatorController
+          .text : "Operator",
+      'TDate': _firstDataTimestamp != null ? DateFormat('yyyy-MM-dd').format(
+          _firstDataTimestamp!) : "",
+      'TTime': _firstDataTimestamp != null ? DateFormat('HH:mm:ss').format(
+          _firstDataTimestamp!) : "",
+      'ScanningRate': _scanRate.inSeconds.toDouble(),
+      'ScanningRateHH': _scanRate.inHours.toDouble(),
+      'ScanningRateMM': _scanRate.inMinutes.remainder(60).toDouble(),
+      'ScanningRateSS': _scanRate.inSeconds.remainder(60).toDouble(),
+      'TestDurationDD': testDuration.inDays.toDouble(),
+      'TestDurationHH': testDuration.inHours.remainder(24).toDouble(),
+      'TestDurationMM': testDuration.inMinutes.remainder(60).toDouble(),
+      'TestDurationSS': testDuration.inSeconds.remainder(60).toDouble(),
+      'GraphVisibleArea': _graphTimeWindow.inSeconds.toDouble(),
+      'TotalChannel': _activeChannels.length,
+      'DBName': _sessionDbName,
+      'BaseLine': 0.0,
+      'FullScale': 0.0,
+      'Descrip': "",
+      'AbsorptionPer': 0.0,
+      'NOR': 0.0,
+      'FLName': "$userFacingFileName.csv",
+      'XAxis': "Time", 'XAxisRecNo': 1.0, 'XAxisUnit': "s", 'XAxisCode': 1.0,
+      'MaxYAxis': maxY,
+      'MinYAxis': minY,
+    };
+  }
+
+  List<Map<String, dynamic>> _prepareTest1Payload() {
+    if (_savedTableRowCount >= _tableData.length) return [];
+
+    final newRows = _tableData.sublist(_savedTableRowCount);
+    final sortedChannels = List<ActiveChannel>.from(_activeChannels)
+      ..sort((a, b) => a.recNo.compareTo(b.recNo));
+
+    final List<Map<String, dynamic>> payload = [];
+    for (int i = 0; i < newRows.length; i++) {
+      final rowData = newRows[i];
+      final overallRowIndex = _savedTableRowCount + i;
+      final rowTimestamp = rowData['Time'] as DateTime;
+      final Map<String, dynamic> rowPayload = {
+        'RecNo': _recNo?.toDouble(),
+        'SNo': (overallRowIndex + 1).toDouble(),
+        'SlNo': (overallRowIndex + 1).toDouble(),
+        'AbsDate': DateFormat('yyyy-MM-dd').format(rowTimestamp),
+        'AbsTime': DateFormat('HH:mm:ss').format(rowTimestamp),
+        'AbsDateTime': DateFormat('yyyy-MM-dd HH:mm:ss').format(rowTimestamp),
+        'ChangeTime': DateFormat('HH:mm:ss').format(rowTimestamp),
+        'Shown': "Y",
+        'AbsAvg': 0.0,
+      };
+      for (int j = 0; j < sortedChannels.length; j++) {
+        final channel = sortedChannels[j];
+        final value = rowData[channel.channelName];
+        rowPayload['AbsPer${j + 1}'] = (value is num) ? value.toDouble() : null;
+      }
+      payload.add(rowPayload);
+    }
+    return payload;
+  }
+
+  Map<String, dynamic> _prepareTest2Payload() {
+    final sortedChannels = List<ActiveChannel>.from(_activeChannels)
+      ..sort((a, b) => a.recNo.compareTo(b.recNo));
+    final Map<String, dynamic> payload = {'RecNo': _recNo?.toDouble()};
+    for (int i = 0; i < 100; i++) {
+      payload['ChannelName${i + 1}'] =
+      (i < sortedChannels.length) ? sortedChannels[i].channelName : "";
+    }
+    return payload;
+  }
+
+  void _startAutoSaveTimer() {
+    _stopAutoSaveTimer();
+    if (_isAutoSaveEnabled && _isPortOpen && _autoSaveIntervalSeconds > 0) {
+      _autoSaveTimer = Timer.periodic(
+        Duration(seconds: _autoSaveIntervalSeconds),
+            (timer) {
+          if (_isDataDirty && !_isSaving) {
+            LogPage.addLog('[LOG] Auto-saving data...');
+            _saveData();
+          }
+        },
+      );
+    }
+  }
+
+  void _stopAutoSaveTimer() {
+    _autoSaveTimer?.cancel();
+    _autoSaveTimer = null;
+  }
+
+  Future<void> _updateChannelColorInDatabase(ActiveChannel channel) async {
+    try {
+      final db = await DatabaseManager().database;
+      final colorString = channel.graphLineColour.value
+          .toRadixString(16)
+          .padLeft(8, '0')
+          .substring(2)
+          .toUpperCase();
+
+      await db.update(
+        'ChannelSetup',
+        {'graphLineColour': colorString},
+        where: 'RecNo = ?',
+        whereArgs: [channel.recNo],
+      );
+      if (mounted) {
+        MessageUtils.showMessage(context,
+            "'${channel.channelName}' default color updated to #$colorString.");
+      }
+    } catch (e) {
+      if (mounted) {
+        MessageUtils.showMessage(
+            context, "Error updating color: $e", isError: true);
+      }
+    }
+  }
+
+  String _formatDurationForTooltip(int totalSeconds) {
+    if (totalSeconds <= 0) return "a very short interval";
+
+    final duration = Duration(seconds: totalSeconds);
+    final parts = <String>[];
+
+    final days = duration.inDays;
+    final hours = duration.inHours.remainder(24);
+    final minutes = duration.inMinutes.remainder(60);
+    final seconds = duration.inSeconds.remainder(60);
+
+    if (days > 0) {
+      parts.add('$days day${days > 1 ? 's' : ''}');
+    }
+    if (hours > 0) {
+      parts.add('$hours hour${hours > 1 ? 's' : ''}');
+    }
+    if (minutes > 0) {
+      parts.add('$minutes minute${minutes > 1 ? 's' : ''}');
+    }
+    if (seconds > 0) {
+      parts.add('$seconds second${seconds > 1 ? 's' : ''}');
+    }
+
+    if (parts.isEmpty) {
+      return "a very short interval";
+    } else {
+      return parts.join(', ');
+    }
+  }
+
+  String _formatDurationForDisplay(int totalSeconds) {
+    if (totalSeconds <= 0) return "0s";
+
+    final duration = Duration(seconds: totalSeconds);
+
+    final days = duration.inDays;
+    final hours = duration.inHours.remainder(24);
+    final minutes = duration.inMinutes.remainder(60);
+    final seconds = duration.inSeconds.remainder(60);
+
+    if (days > 0) {
+      return '${days}d ${hours}h';
+    } else if (hours > 0) {
+      return '${hours}h ${minutes}m';
+    } else if (minutes > 0) {
+      return '${minutes}m ${seconds}s';
+    } else {
+      return '${seconds}s';
+    }
   }
 }

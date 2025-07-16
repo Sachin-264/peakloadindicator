@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
+import 'package:bitsdojo_window/bitsdojo_window.dart'; // Import bitsdojo_window
 import '../../constants/database_manager.dart';
 import '../../constants/theme.dart';
 import '../../constants/global.dart';
@@ -100,7 +101,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
           Navigator.pop(context, true); // Return true to refresh main screen
         }
       } catch (e) {
-        print('Error: $e');
+        LogPage.addLog('Error: $e');
         String errorMessage = e.toString();
         if (errorMessage.contains('UNIQUE constraint failed')) {
           errorMessage = 'Failed to save channel: Channel name already exists.';
@@ -189,6 +190,7 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
     );
   }
 
+  // region UI Widgets
   Widget _buildFormField({
     required TextEditingController controller,
     required String label,
@@ -432,178 +434,205 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
     );
   }
 
+  Widget _buildBackButton({required bool isDarkMode}) {
+    return GestureDetector(
+      onTap: () => Navigator.of(context).pop(),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        decoration: BoxDecoration(
+          color: ThemeColors.getColor('cardBackground', isDarkMode),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode)),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, 2))],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.arrow_back, color: ThemeColors.getColor('dialogText', isDarkMode), size: 18),
+            const SizedBox(width: 8),
+            Text('Back',
+                style: GoogleFonts.poppins(
+                    fontSize: 14, color: ThemeColors.getColor('dialogText', isDarkMode), fontWeight: FontWeight.w600)),
+          ],
+        ),
+      ),
+    );
+  }
+  // endregion
+
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
       valueListenable: Global.isDarkMode,
       builder: (context, isDarkMode, child) {
+        final title = widget.channel != null ? 'Edit Channel' : 'Add Channel';
+
         return Scaffold(
-          backgroundColor: ThemeColors.getColor('appBackground', isDarkMode),
-          appBar: AppBar(
-            backgroundColor: ThemeColors.getColor('appBackground', isDarkMode),
-            elevation: 0,
-            leading: IconButton(
-              icon: Icon(
-                Icons.arrow_back,
-                color: ThemeColors.getColor('titleBarIcon', isDarkMode),
-                size: 24,
-              ),
-              onPressed: () => Navigator.pop(context),
-            ),
-            title: Text(
-              widget.channel != null ? 'Edit Channel' : 'Add Channel',
-              style: GoogleFonts.poppins(
-                fontSize: 20,
-                fontWeight: FontWeight.w600,
-                color: ThemeColors.getColor('titleBarText', isDarkMode),
+          backgroundColor: Colors.transparent,
+          body: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  ThemeColors.getColor('appBackground', isDarkMode),
+                  ThemeColors.getColor('appBackgroundSecondary', isDarkMode)
+                ],
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
               ),
             ),
-          ),
-          body: SafeArea(
-            child: SingleChildScrollView(
-              child: Padding(
-                padding: const EdgeInsets.all(24.0),
-                child: Card(
-                  elevation: ThemeColors.getColor('cardElevation', isDarkMode),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(16),
-                      gradient: LinearGradient(
-                        colors: [
-                          ThemeColors.getColor('cardBackground', isDarkMode),
-                          ThemeColors.getColor('cardBackground', isDarkMode).withOpacity(0.95),
-                        ],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      border: Border.all(
-                        color: ThemeColors.getColor('cardBorder', isDarkMode),
-                      ),
-                    ),
-                    padding: const EdgeInsets.all(24.0),
-                    child: Form(
-                      key: _formKey,
+            child: Column(
+              children: [
+                _CustomTitleBar(title: title),
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24.0),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            'Channel Configuration',
-                            style: GoogleFonts.poppins(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w600,
-                              color: ThemeColors.getColor('dialogText', isDarkMode),
+                          _buildBackButton(isDarkMode: isDarkMode),
+                          const SizedBox(height: 24),
+                          Card(
+                            elevation: 0,
+                            color: Colors.transparent, // Card background is handled by container decoration
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: ThemeColors.getColor('cardBackground', isDarkMode),
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode)),
+                                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 8)],
+                              ),
+                              padding: const EdgeInsets.all(24.0),
+                              child: Form(
+                                key: _formKey,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Channel Configuration',
+                                      style: GoogleFonts.poppins(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w600,
+                                        color: ThemeColors.getColor('dialogText', isDarkMode),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    _buildFormField(
+                                      controller: _channelNameController,
+                                      label: 'Channel Name',
+                                      validator: (value) => value!.isEmpty ? 'Required' : null,
+                                      icon: Icons.label,
+                                    ),
+                                    _buildFormField(
+                                      controller: _unitController,
+                                      label: 'Unit',
+                                      validator: (value) => value!.isEmpty ? 'Required' : null,
+                                      icon: Icons.straighten,
+                                    ),
+                                    _buildFormFieldRow(
+                                      controller1: _targetAlarmMaxController,
+                                      label1: 'Alarm Max',
+                                      controller2: _targetAlarmMinController,
+                                      label2: 'Alarm Min',
+                                      keyboardType: TextInputType.number,
+                                      validator: (value) =>
+                                      value!.isEmpty || int.tryParse(value) == null ? 'Valid number required' : null,
+                                      icon1: Icons.warning,
+                                      icon2: Icons.warning,
+                                    ),
+                                    _buildFormField(
+                                      controller: _targetAlarmColourController,
+                                      label: 'Alarm Colour',
+                                      validator: (value) =>
+                                      value!.isEmpty || RegExp(r'^[0-9A-Fa-f]{6}$').hasMatch(value)
+                                          ? null
+                                          : 'Valid 6-digit Hex code required',
+                                      icon: Icons.color_lens,
+                                      isColorField: true,
+                                      isAlarmColor: true,
+                                    ),
+                                    _buildFormField(
+                                      controller: _graphLineColourController,
+                                      label: 'Channel Colour',
+                                      validator: (value) =>
+                                      value!.isEmpty || RegExp(r'^[0-9A-Fa-f]{6}$').hasMatch(value)
+                                          ? null
+                                          : 'Valid 6-digit Hex code required',
+                                      icon: Icons.color_lens,
+                                      isColorField: true,
+                                      isAlarmColor: false,
+                                    ),
+                                    const SizedBox(height: 32),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.end,
+                                      children: [
+                                        GestureDetector(
+                                          onTap: () => Navigator.pop(context),
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                                            decoration: BoxDecoration(
+                                              // Using a non-prominent gradient/color
+                                              color: ThemeColors.getColor('cardBackground', isDarkMode),
+                                              border: Border.all(color: ThemeColors.getColor('cardBorder', isDarkMode)),
+                                              borderRadius: BorderRadius.circular(12),
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: Colors.black.withOpacity(0.1),
+                                                  blurRadius: 8,
+                                                  offset: const Offset(0, 4),
+                                                ),
+                                              ],
+                                            ),
+                                            child: Text(
+                                              'Cancel',
+                                              style: GoogleFonts.poppins(
+                                                fontSize: 16,
+                                                color: ThemeColors.getColor('dialogText', isDarkMode),
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 16),
+                                        GestureDetector(
+                                          onTap: _saveChannel,
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+                                            decoration: BoxDecoration(
+                                              gradient: ThemeColors.getButtonGradient(isDarkMode),
+                                              borderRadius: BorderRadius.circular(12),
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.3),
+                                                  blurRadius: 8,
+                                                  offset: const Offset(0, 4),
+                                                ),
+                                              ],
+                                            ),
+                                            child: Text(
+                                              'Save',
+                                              style: GoogleFonts.poppins(
+                                                fontSize: 16,
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 16),
-                          _buildFormField(
-                            controller: _channelNameController,
-                            label: 'Channel Name',
-                            validator: (value) => value!.isEmpty ? 'Required' : null,
-                            icon: Icons.label,
-                          ),
-                          _buildFormField(
-                            controller: _unitController,
-                            label: 'Unit',
-                            validator: (value) => value!.isEmpty ? 'Required' : null,
-                            icon: Icons.straighten,
-                          ),
-                          _buildFormFieldRow(
-                            controller1: _targetAlarmMaxController,
-                            label1: 'Alarm Max',
-                            controller2: _targetAlarmMinController,
-                            label2: 'Alarm Min',
-                            keyboardType: TextInputType.number,
-                            validator: (value) =>
-                            value!.isEmpty || int.tryParse(value) == null ? 'Valid number required' : null,
-                            icon1: Icons.warning,
-                            icon2: Icons.warning,
-                          ),
-                          _buildFormField(
-                            controller: _targetAlarmColourController,
-                            label: 'Alarm Colour',
-                            validator: (value) =>
-                            value!.isEmpty || RegExp(r'^[0-9A-Fa-f]{6}$').hasMatch(value)
-                                ? null
-                                : 'Valid 6-digit Hex code required',
-                            icon: Icons.color_lens,
-                            isColorField: true,
-                            isAlarmColor: true,
-                          ),
-                          _buildFormField(
-                            controller: _graphLineColourController,
-                            label: 'Channel Colour',
-                            validator: (value) =>
-                            value!.isEmpty || RegExp(r'^[0-9A-Fa-f]{6}$').hasMatch(value)
-                                ? null
-                                : 'Valid 6-digit Hex code required',
-                            icon: Icons.color_lens,
-                            isColorField: true,
-                            isAlarmColor: false,
-                          ),
-                          const SizedBox(height: 32),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.end,
-                            children: [
-                              GestureDetector(
-                                onTap: () => Navigator.pop(context),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                                  decoration: BoxDecoration(
-                                    gradient: ThemeColors.getButtonGradient(isDarkMode),
-                                    borderRadius: BorderRadius.circular(12),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: ThemeColors.getColor('resetButton', isDarkMode).withOpacity(0.3),
-                                        blurRadius: 8,
-                                        offset: const Offset(0, 4),
-                                      ),
-                                    ],
-                                  ),
-                                  child: Text(
-                                    'Cancel',
-                                    style: GoogleFonts.poppins(
-                                      fontSize: 16,
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 16),
-                              GestureDetector(
-                                onTap: _saveChannel,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                                  decoration: BoxDecoration(
-                                    gradient: ThemeColors.getButtonGradient(isDarkMode),
-                                    borderRadius: BorderRadius.circular(12),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: ThemeColors.getColor('submitButton', isDarkMode).withOpacity(0.3),
-                                        blurRadius: 8,
-                                        offset: const Offset(0, 4),
-                                      ),
-                                    ],
-                                  ),
-                                  child: Text(
-                                    'Save',
-                                    style: GoogleFonts.poppins(
-                                      fontSize: 16,
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
                           ),
                         ],
                       ),
                     ),
                   ),
                 ),
-              ),
+              ],
             ),
           ),
         );
@@ -623,4 +652,59 @@ class _EditChannelScreenState extends State<EditChannelScreen> {
   }
 
   String get _currentTime => DateTime.now().toString().substring(0, 19);
+}
+
+// Custom Title Bar widget copied and adapted from AuthSettingsScreen
+class _CustomTitleBar extends StatelessWidget {
+  final String title;
+  const _CustomTitleBar({required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: Global.isDarkMode,
+      builder: (context, isDarkMode, child) {
+        final buttonColors = WindowButtonColors(
+          iconNormal: ThemeColors.getColor('titleBarText', isDarkMode),
+          mouseOver: ThemeColors.getColor('cardBackground', isDarkMode),
+          mouseDown: ThemeColors.getColor('buttonGradientEnd', isDarkMode),
+          iconMouseOver: ThemeColors.getColor('buttonGradientStart', isDarkMode),
+          iconMouseDown: Colors.white,
+        );
+
+        final closeButtonColors = WindowButtonColors(
+          mouseOver: const Color(0xFFD32F2F),
+          mouseDown: const Color(0xFFB71C1C),
+          iconNormal: ThemeColors.getColor('titleBarText', isDarkMode),
+          iconMouseOver: Colors.white,
+        );
+
+        return Container(
+          height: 40,
+          decoration: BoxDecoration(gradient: ThemeColors.getTitleBarGradient(isDarkMode)),
+          child: Row(
+            children: [
+              Expanded(
+                child: MoveWindow(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 16.0),
+                      child: Text(
+                        'Countronics Smart Logger - $title', // Use dynamic title
+                        style: GoogleFonts.poppins(fontSize: 16, fontWeight: FontWeight.w600, color: ThemeColors.getColor('titleBarText', isDarkMode)),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              MinimizeWindowButton(colors: buttonColors),
+              MaximizeWindowButton(colors: buttonColors),
+              CloseWindowButton(colors: closeButtonColors),
+            ],
+          ),
+        );
+      },
+    );
+  }
 }

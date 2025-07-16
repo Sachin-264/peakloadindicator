@@ -7,6 +7,7 @@ import '../../constants/global.dart';
 import '../../constants/loader_widget.dart';
 import '../../constants/message_utils.dart';
 import '../../constants/theme.dart';
+import '../logScreen/log.dart';
 import 'channel.dart';
 
 class NewTestPage extends StatefulWidget {
@@ -55,7 +56,7 @@ class _NewTestPageState extends State<NewTestPage> with SingleTickerProviderStat
       final database = await DatabaseManager().database;
 
       final List<Map<String, dynamic>> data = await database.query('ChannelSetup');
-      print('Fetched channels from ChannelSetup: $data');
+      LogPage.addLog('Fetched channels from ChannelSetup: $data');
 
       setState(() {
         _channels = data.map((item) => Channel.fromJson(item)).toList();
@@ -66,7 +67,7 @@ class _NewTestPageState extends State<NewTestPage> with SingleTickerProviderStat
         _isLoading = false;
         _errorMessage = 'Error fetching channels: $e';
       });
-      print('Error fetching channels: $e');
+      LogPage.addLog('Error fetching channels: $e');
     }
   }
 
@@ -265,10 +266,10 @@ class _NewTestPageState extends State<NewTestPage> with SingleTickerProviderStat
                                             setState(() {
                                               if (selected == true) {
                                                 _selectedRowIndices.add(index);
-                                                print('Selected row: $index');
+                                                LogPage.addLog('Selected row: $index');
                                               } else {
                                                 _selectedRowIndices.remove(index);
-                                                print('Deselected row: $index');
+                                                LogPage.addLog('Deselected row: $index');
                                               }
                                             });
                                           },
@@ -310,7 +311,7 @@ class _NewTestPageState extends State<NewTestPage> with SingleTickerProviderStat
                               onTap: () {
                                 setState(() {
                                   _selectedRowIndices.clear();
-                                  print('Reset button pressed, cleared selections');
+                                  LogPage.addLog('Reset button pressed, cleared selections');
                                 });
                               },
                             ),

@@ -5,7 +5,8 @@ import '../../constants/colors.dart';
 import '../../Pages/homepage.dart';
 import '../../constants/database_manager.dart';
 import '../../constants/theme.dart';
-import '../../main.dart'; // Ensure CustomTitleBar is accessible
+import '../../main.dart';
+import '../logScreen/log.dart'; // Ensure CustomTitleBar is accessible
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -73,9 +74,9 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       precacheImage(const AssetImage('assets/images/logo_animation.gif'), context)
           .then((_) {
-        print('GIF preloaded successfully');
+        LogPage.addLog('GIF preloaded successfully');
       }).catchError((error) {
-        print('GIF loading error: $error');
+        LogPage.addLog('GIF loading error: $error');
       });
     });
   }
@@ -94,7 +95,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
         });
       }
     } catch (e) {
-      print('Database initialization error: $e');
+      LogPage.addLog('Database initialization error: $e');
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -193,7 +194,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     }
     }
     } catch (e) {
-    print('Login error: $e');
+    LogPage.addLog('Login error: $e');
     if (mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
@@ -385,7 +386,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                   _usernameController.clear();
                                   _passwordController.clear();
                                 } catch (e) {
-                                  print('Password reset error: $e');
+                                  LogPage.addLog('Password reset error: $e');
                                   Navigator.of(context).pop();
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     SnackBar(
@@ -685,7 +686,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                               color: AppColors.headerBackground.withOpacity(0.5),
                               colorBlendMode: BlendMode.multiply,
                               errorBuilder: (context, error, stackTrace) {
-                                print('GIF render error: $error');
+                                LogPage.addLog('GIF render error: $error');
                                 return Container(
                                   color: AppColors.cardBackground,
                                   child: Center(

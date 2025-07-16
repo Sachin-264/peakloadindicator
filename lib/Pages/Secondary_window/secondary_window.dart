@@ -760,10 +760,6 @@ if (minY < 0 && xAxisChannel == null) minY = 0;
 maxX += xRange * 0.05;
 minX -= xRange * 0.05;
 
-// Debug print to diagnose data issues
-debugPrint('minX: $minX, maxX: $maxX, minY: $minY, maxY: $maxY, xRange: $xRange, yRange: $yRange');
-debugPrint('Selected channels: $selectedChannels, xAxisChannel: $xAxisChannel');
-debugPrint('Line bars data count: ${lineBarsData.length}');
 
 return Column(
 children: [
