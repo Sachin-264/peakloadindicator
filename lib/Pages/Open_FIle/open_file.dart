@@ -804,6 +804,7 @@ class _OpenFilePageState extends State<OpenFilePage> {
       mode: mode,
       tableData: filteredData,
       fileName: _fileNameController.text,
+      operatorName: _operatorController.text,
       graphImage: graphImg,
       channelNames: _channelNames,
       firstTimestamp: selectedStart,
@@ -934,7 +935,7 @@ class _OpenFilePageState extends State<OpenFilePage> {
       final channelName = visibleChannels.first.value;
       yAxisTitleText = '$channelName (${_getUnitForChannel(channelName)})';
     } else if (visibleChannels.isNotEmpty) {
-      yAxisTitleText = 'Value (Mixed Units)';
+      yAxisTitleText = 'Value';
     }
 
     for (var entry in visibleChannels) {

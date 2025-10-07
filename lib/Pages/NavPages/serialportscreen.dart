@@ -386,7 +386,7 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
       if (mounted) {
         setState(() {
           _isPortOpen = true;
-          _statusMessage = "Connected. Waiting for data...";
+          _statusMessage = "Connected to $portName. Waiting for data...";
           _scanRateTimer?.cancel();
           _scanRateTimer = Timer.periodic(_scanRate, _onScanRateTick);
           _startAutoSaveTimer();
@@ -433,7 +433,7 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
     setState(() {
       _isPortOpen = false;
       _isDataFlowing = false;
-      _statusMessage = "Connection lost. Reconnecting...";
+      _statusMessage = "Connection lost to $_comPortName. Reconnecting...";
       _isAttemptingReconnect = true;
     });
     _reconnectTimer?.cancel();
@@ -611,7 +611,7 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
         _buffer = '';
         _isDataDirty = false;
         _isDataFlowing = false;
-        if (_isPortOpen) _statusMessage = "Connected. Waiting for data...";
+        if (_isPortOpen) _statusMessage = "Connected to $_comPortName. Waiting for data...";
         _firstDataTimestamp = null;
         _filenameController.text =
         "Test_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}";
@@ -1068,7 +1068,7 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
       yAxisTitleText =
       '${visibleChannels.first.channelName} (${visibleChannels.first.unit})';
     } else {
-      yAxisTitleText = 'Value (Mixed Units)';
+      yAxisTitleText = 'Value';
     }
 
     for (var channel in visibleChannels) {
@@ -1267,14 +1267,14 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
                 textAlign: TextAlign.center),
             const SizedBox(height: 16),
             Row(children: [
-              Expanded(child: _buildControlButton(label: 'Connect',
+              Expanded(child: _buildControlButton(label: 'Start',
                   icon: Icons.power_settings_new,
                   onPressed: _isPortOpen || _isAttemptingReconnect
                       ? null
                       : _connectAndRead,
                   isDarkMode: isDarkMode)),
               const SizedBox(width: 10),
-              Expanded(child: _buildControlButton(label: 'Disconnect',
+              Expanded(child: _buildControlButton(label: 'Stop',
                   icon: Icons.link_off,
                   onPressed: _isPortOpen || _isAttemptingReconnect
                       ? _disconnectPort
@@ -1839,7 +1839,7 @@ class _SerialPortScreenState extends State<SerialPortScreen> {
 
       if (mounted) {
         MessageUtils.showMessage(
-            context, "Data saved successfully to $_sessionDbName");
+            context, "Data saved successfully to ${_filenameController.text}");
       }
     } catch (e, s) {
       LogPage.addLog("Save Error: $e\n$s");

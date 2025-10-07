@@ -428,7 +428,7 @@ class _AutoStartScreenState extends State<AutoStartScreen> {
             if (mounted) {
                 setState(() {
                     _isPortOpen = true;
-                    _statusMessage = "Connected. Waiting for data...";
+                    _statusMessage = "Connected to $portName. Waiting for data...";
                     _scanRateTimer?.cancel();
                     _scanRateTimer = Timer.periodic(_scanRate, _onScanRateTick);
                     _startAutoSaveTimer();
@@ -473,7 +473,7 @@ class _AutoStartScreenState extends State<AutoStartScreen> {
         setState(() {
             _isPortOpen = false;
             _isDataFlowing = false;
-            _statusMessage = "Connection lost. Reconnecting...";
+            _statusMessage = "Connection lost to $_comPortName. Reconnecting...";
             _isAttemptingReconnect = true;
         });
         _reconnectTimer?.cancel();
@@ -644,7 +644,7 @@ class _AutoStartScreenState extends State<AutoStartScreen> {
                 _buffer = '';
                 _isDataDirty = false;
                 _isDataFlowing = false;
-                if (_isPortOpen) _statusMessage = "Connected. Waiting for data...";
+                if (_isPortOpen) _statusMessage = "Connected to $_comPortName. Waiting for data...";
                 _firstDataTimestamp = null;
                 _filenameController.text = "Test_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}";
                 _currentSegment = 1;
@@ -1023,7 +1023,7 @@ class _AutoStartScreenState extends State<AutoStartScreen> {
         if (visibleChannels.length == 1) {
             yAxisTitleText = '${visibleChannels.first.channelName} (${visibleChannels.first.unit})';
         } else {
-            yAxisTitleText = 'Value (Mixed Units)';
+            yAxisTitleText = 'Value';
         }
 
         for (var channel in visibleChannels) {
@@ -1174,9 +1174,9 @@ class _AutoStartScreenState extends State<AutoStartScreen> {
                         Text('Status: $_statusMessage', style: GoogleFonts.firaCode(fontSize: 13, color: statusColor), textAlign: TextAlign.center),
                         const SizedBox(height: 16),
                         Row(children: [
-                            Expanded(child: _buildControlButton(label: 'Connect', icon: Icons.power_settings_new, onPressed: _isPortOpen || _isAttemptingReconnect ? null : _connectAndRead, isDarkMode: isDarkMode)),
+                            Expanded(child: _buildControlButton(label: 'Start', icon: Icons.power_settings_new, onPressed: _isPortOpen || _isAttemptingReconnect ? null : _connectAndRead, isDarkMode: isDarkMode)),
                             const SizedBox(width: 10),
-                            Expanded(child: _buildControlButton(label: 'Disconnect', icon: Icons.link_off, onPressed: _isPortOpen || _isAttemptingReconnect ? _disconnectPort : null, color: ThemeColors.getColor('resetButton', isDarkMode), isDarkMode: isDarkMode)),
+                            Expanded(child: _buildControlButton(label: 'Stop', icon: Icons.link_off, onPressed: _isPortOpen || _isAttemptingReconnect ? _disconnectPort : null, color: ThemeColors.getColor('resetButton', isDarkMode), isDarkMode: isDarkMode)),
                         ]),
                         const SizedBox(height: 10),
                         Row(children: [
@@ -1548,7 +1548,7 @@ class _AutoStartScreenState extends State<AutoStartScreen> {
                 _isDataDirty = false;
             });
 
-            if (mounted) MessageUtils.showMessage(context, "Data saved successfully to $_sessionDbName");
+            if (mounted) MessageUtils.showMessage(context, "Data saved successfully to ${_filenameController.text}");
         } catch (e, s) {
             LogPage.addLog("Save Error: $e\n$s");
             if (mounted) MessageUtils.showMessage(context, "An error occurred while saving: $e", isError: true);

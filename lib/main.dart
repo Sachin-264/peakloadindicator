@@ -1,20 +1,46 @@
+// ------------ IMPORTS ------------
+import 'dart:io'; // <-- FIX: YEH IMPORT ADD KIYA GAYA HAI
 import 'package:flutter/material.dart';
 import 'package:bitsdojo_window/bitsdojo_window.dart';
+import 'package:window_manager/window_manager.dart'; // <-- FIX: YEH IMPORT ADD KIYA GAYA HAI
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:lucide_icons/lucide_icons.dart';
+
 import 'Pages/LoginPage/loginpage.dart';
 import 'Pages/homepage.dart';
 import 'Pages/logScreen/log.dart';
 import 'SplashScreen.dart';
 import 'constants/database_manager.dart';
 import 'constants/global.dart';
-import 'constants/theme.dart'; // Ensure this file defines ThemeColors correctly
-import 'constants/sessionmanager.dart'; // Import the SessionDatabaseManager
+import 'constants/theme.dart';
+import 'constants/sessionmanager.dart';
+
+// ------------ MAIN FUNCTION ------------
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // <-- FIX: WINDOW MANAGER KO INITIALIZE KIYA GAYA HAI -->
+  await windowManager.ensureInitialized();
+
+  sqfliteFfiInit();
+  databaseFactory = databaseFactoryFfi;
+
+  doWhenWindowReady(() {
+    appWindow.minSize = const Size(800, 600);
+    appWindow.title = 'Countron Smart Logger';
+    appWindow.maximize();
+    appWindow.show();
+  });
+
+  runApp(const MyApp());
+}
+
+// ------------ AAPKA BAAKI SARA CODE (BINA KISI BADLAAV KE) ------------
 
 class CustomTitleBar extends StatefulWidget {
   final String title;
-  final Color? customColor; // Optional custom color for title and icon
+  final Color? customColor;
 
   const CustomTitleBar({
     super.key,
@@ -176,7 +202,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
                   builder: (context, isScanning, child) {
                     return WindowButton(
                       icon: Icons.close,
-                      onPressed: () async { // Make the onPressed callback async
+                      onPressed: () async {
                         if (isScanning) {
                           final shouldClose = await showDialog<bool>(
                             context: context,
@@ -220,20 +246,16 @@ class _CustomTitleBarState extends State<CustomTitleBar> with SingleTickerProvid
                             ),
                           );
                           if (shouldClose == true) {
-                            // --- Close all databases before exiting ---
                             await SessionDatabaseManager().closeAllManagedDatabases();
                             await DatabaseManager().close();
-                            appWindow.close();
+                            // <-- FIX: appWindow.close() KI JAGAH exit(0) ISTEMAAL KIYA GAYA HAI -->
+                            exit(0);
                           }
                         } else {
-                          if (Navigator.of(context).canPop()) {
-                            Navigator.of(context).pop();
-                          } else {
-                            // --- Close all databases before exiting ---
-                            await SessionDatabaseManager().closeAllManagedDatabases();
-                            await DatabaseManager().close();
-                            appWindow.close();
-                          }
+                          await SessionDatabaseManager().closeAllManagedDatabases();
+                          await DatabaseManager().close();
+                          // <-- FIX: appWindow.close() KI JAGAH exit(0) ISTEMAAL KIYA GAYA HAI -->
+                          exit(0);
                         }
                       },
                       tooltip: 'Close',
@@ -367,27 +389,6 @@ class _WindowButtonState extends State<WindowButton> with SingleTickerProviderSt
   }
 }
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  sqfliteFfiInit();
-  databaseFactory = databaseFactoryFfi;
-
-  doWhenWindowReady(() {
-    appWindow.minSize = const Size(800, 600); // Keep minSize for when it's restored
-    appWindow.title = 'Peak Load Indicator';
-    appWindow.maximize(); // <-- This is the key change to maximize
-    appWindow.show();
-
-    // The delayed re-render hack is typically not needed when maximizing,
-    // as bitsdojo_window usually handles the maximized state correctly.
-    // If you encounter a blank window issue after this change,
-    // you might need to re-evaluate, but for maximization, it's usually fine without it.
-  });
-
-  runApp(const MyApp());
-}
-
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -414,13 +415,11 @@ class HomePageWrapper extends StatefulWidget {
 }
 
 class _HomePageWrapperState extends State<HomePageWrapper> {
-  // Cache the Future result to avoid re-running it on rebuild
   late final Future<bool> _authFuture;
 
   @override
   void initState() {
     super.initState();
-    // Initialize the Future in initState so it only runs once
     _authFuture = _loadWithMinimumDuration();
   }
 
@@ -428,7 +427,7 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
     try {
       final results = await Future.wait([
         DatabaseManager().isAuthRequired(),
-        Future.delayed(const Duration(seconds: 3)),
+        Future.delayed(const Duration(seconds: 4)),
       ]);
       return results[0] as bool;
     } catch (e) {
@@ -447,7 +446,7 @@ class _HomePageWrapperState extends State<HomePageWrapper> {
         return Scaffold(
           backgroundColor: scaffoldBgColor,
           body: FutureBuilder<bool>(
-            future: _authFuture, // Use the cached Future
+            future: _authFuture,
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return const SplashScreen();

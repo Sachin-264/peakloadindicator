@@ -5,9 +5,11 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   bitsdojo_window_windows
   desktop_multi_window
+  file_saver
   flutter_libserialport
   flutter_localization
   screen_retriever_windows
+  video_player_win
   window_manager
   window_manager_plus
 )

@@ -1,10 +1,13 @@
+import 'dart:convert';
+import 'dart:io'; // Required for File operations
+import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart'; // Using file_picker now
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:lucide_icons/lucide_icons.dart';
-
 import '../../constants/global.dart';
+import '../../constants/message_utils.dart';
 import '../../constants/theme.dart';
-
 
 class LogPage extends StatefulWidget {
   static final List<String> _logs = [];
@@ -47,6 +50,66 @@ class _LogPageState extends State<LogPage> with SingleTickerProviderStateMixin {
     super.dispose();
   }
 
+  // --- REWRITTEN DOWNLOAD FUNCTION ---
+  // This function now uses file_picker to let the user choose a location and filename.
+  Future<void> _downloadLogs() async {
+    print("--- Starting Log Download Process ---");
+
+    if (LogPage._logs.isEmpty) {
+      print("[DEBUG] No logs found. Aborting download.");
+      MessageUtils.showMessage(context, 'No logs to download.', isError: true);
+      return;
+    }
+
+    try {
+      // 1. Prepare the log content
+      final String logContent = LogPage._logs.reversed.join('\n');
+      final Uint8List bytes = Uint8List.fromList(utf8.encode(logContent));
+      print("[DEBUG] Log content prepared. Byte length: ${bytes.length}");
+
+      // 2. Suggest a filename
+      final now = DateTime.now();
+      final String timestamp =
+          '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}';
+      final String suggestedFileName = 'countron-log-$timestamp.txt';
+      print("[DEBUG] Suggested filename: $suggestedFileName");
+
+      // 3. Open the "Save As" dialog using FilePicker
+      // This will return the full path including the name the user chooses.
+      print("[DEBUG] Opening file browser (Save As dialog)...");
+      String? outputFile = await FilePicker.platform.saveFile(
+        dialogTitle: 'Please select a location to save your log file:',
+        fileName: suggestedFileName,
+        allowedExtensions: ['txt'],
+        type: FileType.custom,
+      );
+
+      // 4. Check the result and write the file
+      if (outputFile != null) {
+        // This block runs ONLY if the user selected a location and clicked "Save".
+        print("[DEBUG] User selected a path: $outputFile");
+        final file = File(outputFile);
+        await file.writeAsBytes(bytes);
+        print("[DEBUG] File successfully written to disk.");
+
+        LogPage.addLog('[$_currentTime] Logs successfully downloaded to $outputFile');
+        MessageUtils.showMessage(context, 'Logs downloaded successfully!');
+      } else {
+        // This block runs if the user closed the dialog without saving.
+        print("[DEBUG] User cancelled the file browser dialog.");
+        LogPage.addLog('[$_currentTime] Log download was cancelled by the user.');
+        MessageUtils.showMessage(context, 'Log download cancelled.',
+            isError: true);
+      }
+    } catch (e) {
+      print("[ERROR] An exception occurred during log download: $e");
+      LogPage.addLog('[$_currentTime] Failed to download logs: $e');
+      MessageUtils.showMessage(context, 'Failed to download logs.',
+          isError: true);
+    }
+    print("--- Ending Log Download Process ---");
+  }
+
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
@@ -81,18 +144,40 @@ class _LogPageState extends State<LogPage> with SingleTickerProviderStateMixin {
                           color: ThemeColors.getColor('dialogText', isDarkMode),
                         ),
                       ),
-                      IconButton(
-                        icon: Icon(
-                          LucideIcons.trash2,
-                          color: ThemeColors.getColor('dialogText', isDarkMode),
-                          size: 20,
-                        ),
-                        onPressed: () {
-                          setState(() {
-                            LogPage._logs.clear();
-                          });
-                          LogPage.addLog('[$_currentTime] Cleared all logs');
-                        },
+                      Row(
+                        children: [
+                          Tooltip(
+                            message: 'Download Logs',
+                            child: IconButton(
+                              icon: Icon(
+                                LucideIcons.download,
+                                color: ThemeColors.getColor(
+                                    'dialogText', isDarkMode),
+                                size: 20,
+                              ),
+                              onPressed: _downloadLogs,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Tooltip(
+                            message: 'Clear Logs',
+                            child: IconButton(
+                              icon: Icon(
+                                LucideIcons.trash2,
+                                color: ThemeColors.getColor(
+                                    'dialogText', isDarkMode),
+                                size: 20,
+                              ),
+                              onPressed: () {
+                                setState(() {
+                                  LogPage._logs.clear();
+                                });
+                                LogPage.addLog(
+                                    '[$_currentTime] Cleared all logs');
+                              },
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -108,7 +193,8 @@ class _LogPageState extends State<LogPage> with SingleTickerProviderStateMixin {
                   Expanded(
                     child: Container(
                       decoration: BoxDecoration(
-                        color: ThemeColors.getColor('cardBackground', isDarkMode),
+                        color:
+                        ThemeColors.getColor('cardBackground', isDarkMode),
                         borderRadius: BorderRadius.circular(12),
                         boxShadow: [
                           BoxShadow(
@@ -129,7 +215,9 @@ class _LogPageState extends State<LogPage> with SingleTickerProviderStateMixin {
                           'No logs available',
                           style: GoogleFonts.poppins(
                             fontSize: 14,
-                            color: ThemeColors.getColor('cardText', isDarkMode).withOpacity(0.7),
+                            color: ThemeColors.getColor(
+                                'cardText', isDarkMode)
+                                .withOpacity(0.7),
                           ),
                         ),
                       )
@@ -138,7 +226,8 @@ class _LogPageState extends State<LogPage> with SingleTickerProviderStateMixin {
                         itemCount: LogPage._logs.length,
                         itemBuilder: (context, index) {
                           return FadeTransition(
-                            opacity: Tween<double>(begin: 0.0, end: 1.0).animate(
+                            opacity: Tween<double>(begin: 0.0, end: 1.0)
+                                .animate(
                               CurvedAnimation(
                                 parent: _animationController,
                                 curve: Interval(
@@ -149,9 +238,11 @@ class _LogPageState extends State<LogPage> with SingleTickerProviderStateMixin {
                               ),
                             ),
                             child: Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 6),
+                              padding:
+                              const EdgeInsets.symmetric(vertical: 6),
                               child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                                crossAxisAlignment:
+                                CrossAxisAlignment.start,
                                 children: [
                                   Container(
                                     width: 8,
@@ -159,7 +250,9 @@ class _LogPageState extends State<LogPage> with SingleTickerProviderStateMixin {
                                     margin: const EdgeInsets.only(top: 4),
                                     decoration: BoxDecoration(
                                       shape: BoxShape.circle,
-                                      color: ThemeColors.getColor('buttonGradientStart', isDarkMode),
+                                      color: ThemeColors.getColor(
+                                          'buttonGradientStart',
+                                          isDarkMode),
                                     ),
                                   ),
                                   const SizedBox(width: 10),
@@ -168,7 +261,8 @@ class _LogPageState extends State<LogPage> with SingleTickerProviderStateMixin {
                                       LogPage._logs[index],
                                       style: GoogleFonts.poppins(
                                         fontSize: 13,
-                                        color: ThemeColors.getColor('cardText', isDarkMode),
+                                        color: ThemeColors.getColor(
+                                            'cardText', isDarkMode),
                                       ),
                                     ),
                                   ),

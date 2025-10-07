@@ -399,7 +399,7 @@ class _AuthSettingsScreenState extends State<AuthSettingsScreen>
         ],
       ),
       const SizedBox(height: 16),
-      _buildInfoText('These details will be used in generated PDF reports.'),
+      _buildInfoText('These details will be used in generated reports.'),
     ],
   );
 

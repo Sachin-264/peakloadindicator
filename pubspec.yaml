@@ -72,6 +72,11 @@ dependencies:
   flutter_staggered_animations: ^1.1.1
   syncfusion_flutter_charts: ^29.2.11
   syncfusion_flutter_pdf: ^29.2.11
+  simple_animations: ^5.2.0
+  # ADD THESE TWO PACKAGES FOR DESKTOP VIDEO
+  video_player_win:
+  file_saver: ^0.3.1
+
 
 dev_dependencies:
   flutter_test:
@@ -104,5 +109,6 @@ flutter:
   assets:
      - assets/Countronics.db
      - assets/images/logo_animation.gif
+     - assets/images/splashscreen.mp4
      - assets/fonts/Roboto-Regular.ttf
      - assets/fonts/Roboto-Bold.ttf

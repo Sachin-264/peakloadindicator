@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   bitsdojo_window_linux
   desktop_multi_window
+  file_saver
   flutter_libserialport
   flutter_localization
   open_file_linux
